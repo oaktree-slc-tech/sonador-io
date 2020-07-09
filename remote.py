@@ -26,7 +26,6 @@ class SonadorBaseObject(JsonBaseObject):
 
 	def __init__(self, server, *args, **kwargs):
 		self.server = server
-		self.verify_ssl = kwargs.pop('verify_ssl', self.verify_ssl)
 		super(SonadorBaseObject, self).__init__(*args, **kwargs)
 
 	@property
@@ -40,9 +39,12 @@ class SonadorBaseObject(JsonBaseObject):
 
 		return self._objectdata.get('uid')
 
-	def delete(self, **kwargs):
+	def delete(self, verify=None, **kwargs):
+		if verify is None:
+			verify = self.server.verify
+
 		r = requests.delete(self.server.sonador_apiurl(self.url, method='DELETE'),
-			verify=self.verify_ssl, headers=self.sonador_server.sonador_request_headers(), **kwargs)
+			verify=verify, headers=self.sonador.sonador_request_headers(), **kwargs)
 
 		if not r.ok:
 			request_client_error('Unable to delete Sonador object %s, a server error occurred'
@@ -61,8 +63,8 @@ class SonadorObjectCollection(GuruRemotePaginationMixin, JsonObjectCollection):
 		self.remote_schema = kwargs.pop('remote_schema', None)
 		super(SonadorObjectCollection, self).__init__(*args, **kwargs)
 
-	def _init_collection_models(self):
-		return map(lambda ojson: self.model(self.server, ojson), self._objectdata)
+	def _init_collection_models(self, **kwargs):
+		return map(lambda ojson: self.model(self.server, ojson, **kwargs), self._objectdata)
 
 	def append(self, value):
 		'''	Append a model to the end of the collection
@@ -200,6 +202,34 @@ def sonador_dataobject_schema_display(sonador_server, output_dest, datamodel_cla
 		output_dest.write('\n\n')
 
 
+def sonador_datacollection_serialize(datacollection, output_dest, output_type=OUTPUT_TYPE_TABULATE):
+	'''	Write collection data to the provided output in the desired output type
+
+		@input datacollection (collection of data objects): Collection to be serialized to the provided output.
+		@input output_dest: Output destination to which the data should be written
+		@input output_type (str, default='tabulate'): Format which should be used for the output
+	'''
+	# Convert data source (JSON) to desired output format and write to the specified destination
+	if output_type == OUTPUT_TYPE_TABULATE:
+		tabulate_output_columns = datacollection.model.tabulate_output_columns
+		output_dest.write(
+			tabulate((object2tabulate(s, tabulate_output_columns) for s in datacollection),
+				headers=tuple(six.itervalues(tabulate_output_columns))))
+	
+	elif output_type == OUTPUT_TYPE_CSV:
+
+		# Ensure schema for the object is present
+		if not datacollection.remote_schema:
+			raise ValueError('Unable to create CSV file, collection did not include a remote schema')
+
+		w = csv.DictWriter(output_dest, tuple(datacollection.remote_schema.get('fields', [])))
+		w.writeheader()
+
+		# Output data
+		for d in datacollection:
+			w.writerow(pick(d._objectdata, tuple(datacollection.remote_schema.get('fields', []))))
+
+
 def sonador_datacollection_list(sonador_server, output_dest, datamodel_collection_class,
 		output_type=OUTPUT_TYPE_TABULATE, verify=False, filters=None, data_collection_endpoint=None, **kwargs):
 	'''	Retrieve Sonador data collection list to the provided output dest
@@ -207,54 +237,59 @@ def sonador_datacollection_list(sonador_server, output_dest, datamodel_collectio
 	if not output_type in six.iterkeys(OUTPUT_TYPE_SUPPORTED):
 		raise ValueError('Unsupported output type: %s. Supported: %s' % (output_type, ', '.join(six.iterkeys(OUTPUT_TYPE_SUPPORTED))))
 
-	datasources = fetch_sonador_data_collection(sonador_server, datamodel_collection_class,
+	# Retrieve data collection (if not provided)
+	datacollection = fetch_sonador_data_collection(sonador_server, datamodel_collection_class,
 		verify=verify, filters=filters, fetch_remote_schema=True if output_type==OUTPUT_TYPE_CSV else False, 
 		data_collection_endpoint=data_collection_endpoint, **kwargs)
 
-	# Convert data source (JSON) to desired output format and write to the specified destination
-	if output_type == OUTPUT_TYPE_TABULATE:
-		tabulate_output_columns = datamodel_collection_class.model.tabulate_output_columns
-		output_dest.write(
-			tabulate((object2tabulate(s, tabulate_output_columns) for s in datasources),
-				headers=tuple(six.itervalues(tabulate_output_columns))))
-	
-	elif output_type == OUTPUT_TYPE_CSV:
+	# Write data results to provided output destination
+	sonador_datacollection_serialize(datacollection, output_dest, output_type=output_type)
 
-		# Ensure schema for the object is present
-		if not datasources.remote_schema:
-			raise ValueError('Unable to create CSV file, collection did not include a remote schema')
+	return datacollection
 
-		w = csv.DictWriter(output_dest, tuple(datasources.remote_schema.get('fields', [])))
-		w.writeheader()
 
-		# Output data
-		for d in datasources:
-			w.writerow(pick(d._objectdata, tuple(datasources.remote_schema.get('fields', []))))
+def sonador_dataobject_serialize(dataobject, output_dest, include_extended_attrs=True):
+	'''	Write data object data to the provided output destination
 
-	return datasources
+		@input dataobject (model instance): Object for which the data should be output
+		@input output_dest: Output destination to whcih the data should be written
+	'''
+	# Output tabulated values
+	for pname, plabel in six.iteritems(dataobject.tabulate_output_columns):
+		output_dest.write('%s: %s\n' % (plabel, getattr(dataobject, pname, '')))
+
+	# Output extended attributes, drop attributes in the blacklist
+	if include_extended_attrs:
+		sonador_dataobject_extendattrs(dataobject, output_dest, 
+			tuple(filter(lambda k: not k in getattr(dataobject, 'details_exclude', []),
+				set(dataobject._objectdata.keys()).difference(set(dataobject.tabulate_output_columns.keys())))))
+
+
+def sonador_dataobject_extendattrs(dataobject, output_dest, extended_attrs):
+	'''	Write data object extended attributes to the provided output destination.
+	'''
+	for pname in extended_attrs:
+
+		# Retrieve verbose name from schema (if available)
+		if hasattr(dataobject, 'schema') and dataobject.schema.get('schema', {}).get(pname):
+			plabel = dataobject.schema.get('schema', {}).get(pname, {}).get('verbose_name')
+		else: plabel = pname
+
+		# Determine type of object and retrieve data
+		if isinstance(dataobject, dict): pval = dataobject.get(pname, '')
+		else: pval = getattr(dataobject, pname, '')
+		
+		# Write to output destination
+		output_dest.write('%s: %s\n' % (plabel, pval))
 
 
 def sonador_dataobject_details(sonador_server, output_dest, datamodel_class, objectid, verify=False,
-		dataobject_endpoint=None, **kwargs):
+		dataobject_endpoint=None, included_extended_attrs=True, **kwargs):
 	'''	Retrieve details for Sonador cata object and output to provided destination
 	'''
 	dobject = fetch_sonador_dataobject(sonador_server, datamodel_class, objectid, 
 		verify=verify, dataobject_endpoint=dataobject_endpoint, **kwargs)
 
-	# Output tabulated values
-	for pname, plabel in six.iteritems(datamodel_class.tabulate_output_columns):
-		output_dest.write('%s: %s\n' % (plabel, getattr(dobject, pname, '')))
-
-	# Output extended attributes, drop attributes in the blacklist
-	for pname in filter(lambda k: not k in getattr(datamodel_class, 'details_exclude', []),
-		set(dobject._objectdata.keys()).difference(set(datamodel_class.tabulate_output_columns.keys()))):
-
-		# Retrieve verbose name from schema (if available)
-		if hasattr(datamodel_class, 'schema') and datamodel_class.schema.get('schema', {}).get(pname):
-			plabel = datamodel_class.schema.get('schema', {}).get(pname, {}).get('verbose_name')
-		else: plabel = pname
-
-		output_dest.write('%s: %s\n' % (plabel, getattr(dobject, pname, '')))
-
+	sonador_dataobject_serialize(dobject, output_dest, include_extended_attrs=included_extended_attrs)
+	logger.debug('Object Resource Data:\n%s' % json.dumps(dobject._objectdata))
 	return dobject
-

@@ -4,7 +4,9 @@ from collections import OrderedDict
 from client.utils.logs import LOGGING_LEVELS
 from client.utils.object import pick
 
+from .validate import argparse_type_directory, argparse_keyval
 from .serialization import OUTPUT_TYPE_TABULATE, OUTPUT_TYPE_CSV, OUTPUT_TYPE_SUPPORTED
+from .imaging.orthanc import FILEARCHIVE_TYPE_ZIPARCHIVE, FILEARCHIVE_TYPE_DICOMDIR, FILEARCHIVE_TYPE_SUPPORTED 
 
 
 # General Commands
@@ -81,4 +83,64 @@ def datamodel_schema_options(subparser):
 	'''
 	subparser.add_argument('--include-schema', dest='include_schema', action='store_true', default=False,
 		help='Include the schema for the model in the output')
-	
+
+
+def datamodel_query_options(subparser):
+	'''	Add CLI options for data model query operations: query structure, 
+	'''
+	subparser.add_argument('--query', '-Q', dest='query', nargs='+', type=argparse_keyval, required=True, metavar='KEY=VALUE',
+		help='Search values that should be sent to the server as part of the request. Query values should be '
+			+ 'structured as key=value pairs. Example: -Q PatientID="*" StudyDescription="*Chest*". Partial expressions '
+			+ 'can be matched by including a wildcard in the value. PatientName="Jones*" will match any '
+			+ 'patient name that includes "Jones".')
+
+
+def datamodel_pagination_options(subparser, limit_default=1000):
+	'''	Add CLI options for data model pagination
+	'''
+	subparser.add_argument('--limit', dest='limit', type=int, default=limit_default, 
+		help='The number of results which should be included in the query.')
+	subparser.add_argument('--offset', dest='offset', type=int, default=0,
+		help='Offset that should be applied to the results set. Can be used to along with --limit to paginate through '
+			+ 'large queries.')
+
+def datamodel_query_output_options(subparser):
+	'''	Add CLI options for data model query output: collapse
+	'''
+	subparser.add_argument('--collapse', dest='collapse', default=False, action='store_true',
+		help='Only retrieve resource IDs, rather than the full details, of the query results.')
+
+
+def datamodel_dicom_modify_options(subparser):
+	'''	Add CLI options for the data model modify command
+	'''
+	subparser.add_argument('--modify', '-M', dest='modify', nargs='+', type=argparse_keyval, required=True, metavar='KEY=VALUE',
+		help='DICOM tags which should be modified. Values should be structured as key=value pairs. '
+			+ 'Example: -M SeriesDescription="FastMRI sequence 5".')
+	subparser.add_argument('--remove-tags', dest='remove_tags', nargs='+', type=str, metavar='TagName',
+		help='DICOM tags which should be removed from the study.')
+	subparser.add_argument('--private-creator', dest='private_creator', type=str, default=None, 
+		help='The organization (private creator) to associate with the request. If modifying private DICOM tags, ' 
+			+'the private creator must be specified along with the tags that will be updated.')
+
+
+def dicom_download_options(subparser):
+	'''	CLI options for download of DICOM data
+	'''
+	subparser.add_argument('--download-folder', '-d', dest='download_folder', type=argparse_type_directory, required=True,
+		help='Folder to which files should be downloaded.')
+	subparser.add_argument('--archive-type', dest='archive_type', choices=FILEARCHIVE_TYPE_SUPPORTED, 
+		default=FILEARCHIVE_TYPE_ZIPARCHIVE, help='Style of archive format to retrieve from the server. '
+			+ 'If "dicomdir" is used, all image files will be in a single folder and a DICOMDIR meta file '
+			+ 'will be included at the root of the archive. If "zip" is used, image data will be separated '
+			+ 'into subfolders by patient, study, and series.')
+	subparser.add_argument('--extract', '-x', dest='extract', default=False, action='store_true',
+		help='Extract archive contents rather than saving data as a zip file.')
+
+
+def dicomweb_remote_server_operation_options(subparser):
+	'''	CLI options for DICOMWeb remote server operations
+	'''
+	subparser.add_argument('--remote-server', dest='remote_server', type=str, 
+		help='Remote DICOMweb server. May also be provided as the SONADOR_DICOMWEB_SERVER shell environment variable.',
+		default=os.environ.get('SONADOR_DICOMWEB_SERVER'))

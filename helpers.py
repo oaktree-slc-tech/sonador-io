@@ -37,7 +37,7 @@ def fetch_sonador_session_token(sonador_server, verify=False, credentials_endpoi
 
 class SonadorServer(object):
 
-	def __init__(self, sonador_url, access_id, secret_key, apitoken=None, verify=False,
+	def __init__(self, sonador_url, access_id=None, secret_key=None, apitoken=None, verify=False,
 			internal_dns=False):
 		'''	Initialize the server instance
 
@@ -60,6 +60,10 @@ class SonadorServer(object):
 		if apitoken:
 			self.apitoken_type = API_ACCESS_TOKEN
 		else: self.apitoken_type = None
+
+		if not self._apitoken and (not self.access_id or not self.secret_key):
+			raise ValueError('Unable to initialize Sonador server connection, invalid auth credentials. '
+				+ 'An API token or access ID and secret key must be provided.')
 
 	@property
 	def scheme(self):
@@ -128,6 +132,7 @@ def request_client_error(msg, r, rdata=None, exception_class=ClientOperationErro
 	try: rdata.update(r.json())
 	except ValueError as err:
 		logger.debug('Unable to serialize response to JSON\n%s' % err)
+		logger.debug('Server response body:\n%s' % r.content.decode('utf-8'))
 
 	edetails = {
 		gcapicodes.STATUS_CODE: r.status_code,
