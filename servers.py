@@ -6,11 +6,15 @@ from collections import OrderedDict
 
 from client import auth as guru_auth
 from client.utils.urls import build_url
-from client.utils.object import pick
+from client.utils.object import pick, omit
 from client.utils.microservices import server_controloperation_json_response, RemotePage
 
+from .apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, \
+	IMAGING_SERVER_RESOURCE_SERIES, IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_RESOURCE_SUPPORTED
+from .serialization import json_datetime_parser
 from .helpers import request_client_error, fetch_sonador_session_token
-from .remote import SonadorBaseObject, SonadorObjectCollection, fetch_sonador_data_collection
+from .remote import SonadorBaseObject, SonadorObjectCollection, \
+	fetch_sonador_data_collection, fetch_sonador_dataobject
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +61,19 @@ class SonadorImagingServer(SonadorBaseObject):
 		
 		return hostname
 
-	def orthanc_apiurl(self, resource_endpoint):
+	@property
+	def server_label(self):
+		if getattr(self, 'name', None):
+			'%s (%s)' % (self.name, self.pk)
+		return self.pk
+
+	def orthanc_apiurl(self, resource_endpoint, query_params=''):
 		'''	Create URL for Orthanc API call
 		'''
 		if self.server.internal_dns:
-			return build_url(self.internal_scheme, self.internal_netloc, resource_endpoint)
+			return build_url(self.internal_scheme, self.internal_netloc, resource_endpoint, query_params=query_params)
 
-		return build_url(self.scheme, self.netloc, resource_endpoint)
+		return build_url(self.scheme, self.netloc, resource_endpoint, query_params=query_params)
 
 	def orthanc_request_headers(self, headers=None):
 		'''	Add headers required by Orthanc API
@@ -79,25 +89,33 @@ class SonadorImagingServer(SonadorBaseObject):
 
 		return headers
 
+	def fetch_dicom_modalities(self, **kwargs):
+		'''	Retrieve the DICOM modalities associated with the imaging server
+		'''
+		return fetch_sonador_data_collection(self.server, DicomImagingModalityCollection,
+			data_collection_endpoint=posixpath.join(self.fetch_endpoint, self.pk, 'dicom'), pacs=self, **kwargs)
+
 	@property
 	def dicom_modalities(self):
-		'''	DICOM modalities associated with the imaging server
+		'''	DICOM modalities associated with the imaging server (cached property)
 		'''
 		if getattr(self, '_dicom', None) is None:
-			setattr(self, '_dicom', 
-				fetch_sonador_data_collection(self.server, DicomImagingModalityCollection,
-					data_collection_endpoint=posixpath.join(self.fetch_endpoint, self.pk, 'dicom')))
+			setattr(self, '_dicom', self.fetch_dicom_modalities())
 
 		return self._dicom
 
+	def fetch_dicomweb_remotes(self, **kwargs):
+		'''	Retrieve the DICOMweb remotes associated with the imaging server
+		'''
+		return fetch_sonador_data_collection(self.server, RemoteDICOMwebServerCollection,
+			data_collection_endpoint=posixpath.join(self.fetch_endpoint, self.pk, 'dicom-web'), pacs=self, **kwargs)
+
 	@property
 	def dicomweb_remotes(self):
-		'''	Remote DICOMweb  instances associated with the imaging server
+		'''	Remote DICOMweb  instances associated with the imaging server (cached property)
 		'''
 		if getattr(self, '_dweb', None) is None:
-			setattr(self, '_dweb', 
-				fetch_sonador_data_collection(self.server, RemoteDICOMwebServerCollection,
-					data_collection_endpoint=posixpath.join(self.fetch_endpoint, self.pk, 'dicom-web')))
+			setattr(self, '_dweb', self.fetch_dicomweb_remotes())
 
 		return self._dweb
 
@@ -119,31 +137,155 @@ class SonadorImagingServer(SonadorBaseObject):
 			if retry_count < retry_limit:
 
 				logger.warning('Unable to upload image to PACS %s. Status code: %s. Retry transfer: %s/%s.'
-					% (self.pk, r.status_code, retry_count+1, retry_limit))
+					% (self.server_label, r.status_code, retry_count+1, retry_limit))
 
 				# Reset position of image before attempting upload
 				img.seek(0)
 				r = self.upload_image(img, headers=headers, retry_count=retry_count+1, retry_limit=retry_limit)
 
 			# Retry limit exceeded: notify user of failed transfer
-			else:  request_client_error('Unable to upload image to PACS %s. Status code: %s.' % (self.pk, r.status_code), r)
+			else:  request_client_error('Unable to upload image to PACS %s. Status code: %s.' % (self.server_label, r.status_code), r)
 
 		return r
 
+	def get_dicomweb_remote(self, rid, verify=None):
+		'''	Retrieve DICOMweb remote instance
+		'''
+		if verify is None:
+			verify = self.server.verify
+
+		return fetch_sonador_dataobject(self.server, RemoteDICOMwebServer, rid, verify=verify, pacs=self,
+			dataobject_endpoint=posixpath.join(self.fetch_endpoint, self.pk, 'dicom-web', rid))
+
+	def get_imaging_resource(self, rid, resource_type, headers=None, verify=None, **kwargs):
+		'''	Retrieve the requested resource
+		'''
+		if verify is None:
+			verify = self.server.verify
+
+		r = requests.get(self.orthanc_apiurl(posixpath.join(resource_type.fetch_endpoint, rid)),
+			headers=self.orthanc_request_headers(headers=headers), verify=verify)
+		if not r.ok:
+			request_client_error('Unable to retrieve requested resource %s instance %s. Status code: %s'
+				% (rid, resource_type, r.status_code), r)
+
+		rdata = server_controloperation_json_response(r,
+			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
+		return resource_type(self.server, rdata, pacs=self, **kwargs)
+
+	def get_patient(self, pid, headers=None, **kwargs):
+		'''	Retrieve patient data for the specified UID
+		'''
+		from .imaging.orthanc import ImagingPatient
+		return self.get_imaging_resource(pid, ImagingPatient, headers=headers, **kwargs)
+
+	def get_study(self, sid, headers=None, **kwargs):
+		'''	Retrieve a study instance
+		'''
+		from .imaging.orthanc import ImagingStudy
+		return self.get_imaging_resource(sid, ImagingStudy, headers=headers, **kwargs)
+
+	def get_series(self, rid, headers=None, **kwargs):
+		'''	Retrieve a series instance 
+		'''
+		from .imaging.orthanc import ImagingSeries
+		return self.get_imaging_resource(rid, ImagingSeries, headers=headers, **kwargs)
+
+	def query(self, sfilter, expand=True, resource=IMAGING_SERVER_RESOURCE_SERIES, 
+			limit=None, offset=None, query=None, headers=None, verify=None, **kwargs):
+		'''	Submit a query to Orthanc with the provided filter terms
+
+			@input sfilter (dict): Terms to be included in the request
+			@input expand (bool, default=True): Desired response from Orthanc. If True, the full
+				record listing will be retrieved. If False, only the resource IDs will be returned.
+			@input resource (str, default='Series'): Type of resource for which the query should be executed.
+			@input limit (int, default=None): Number of records which should be included in the response.
+				If None, Orthanc will retrieve all records matching the query.
+			@input offset (int, default=None): Any offset to apply to the record list. Used together
+				with limit to paginate query results.
+			@input query (dict, default=new dict): Existing dictionary structure to be expanded with 
+				the provided search query.
+			@input headers (dict, default=new dict): Headers to be included with the query request.
+
+			@returns iterable of resource IDs if expanded is False, collection of the matching resource type if 
+				expanded is True
+		'''
+		from .imaging.orthanc import IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES
+		if not isinstance(sfilter, dict):
+			raise TypeError('Unable to execute query, terms must be submitted as a dictionary')
+		if not resource in IMAGING_SERVER_RESOURCE_SUPPORTED:
+			raise ValueError('Unable to execute query, invalid resource type: %s' % resource)
+
+		if verify is None:
+			verify = self.server.verify
+
+		# Create query structure
+		query = query or {}
+		query.update({
+			'Level': resource, 'Expand': expand, 'Query': sfilter
+		})
+		if limit is not None:
+			query['Limit'] = limit
+		if offset is not None:
+			query['Since'] = offset
+
+		# Orthanc query structure
+		logger.debug('Orthanc query:\n%s' % json.dumps(query))
+
+		# Execute query
+		r = requests.post(self.orthanc_apiurl('tools/find'), json=query, headers=self.orthanc_request_headers(headers=headers))
+		if not r.ok:
+			request_client_error('Unable to execute resource query to PACS %s. Status code: %s.' % (self.server_label, r.status_code), r)
+
+		# Parse response
+		rdata = server_controloperation_json_response(r,
+			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
+
+		return IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES.get(resource)(self.server, rdata, pacs=self, **kwargs) if expand \
+			else rdata
+
+	def fetch_jobs(self, verify=None, headers=None, limit=None, offset=None, expand=True, **kwargs):
+		'''	Retrieve the processing jobs for the server
+		'''
+		from .imaging.jobs import OrthancJobCollection
+		
+		if verify is None:
+			verify = self.server.verify
+		
+		# Retrieve jobs
+		r = requests.get(self.orthanc_apiurl(OrthancJobCollection.model.fetch_endpoint, query_params={ 'expand': expand }), 
+			headers=self.orthanc_request_headers(headers=headers), verify=verify)
+		if not r.ok:
+			request_client_error('Unable to retrieve jobs from PACS %s. Status code: %s.' % (self.server_label, r.status_code), r)
+
+		# Parse response
+		rdata = server_controloperation_json_response(r,
+			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
+
+		return OrthancJobCollection(self.server, rdata, pacs=self, **kwargs)
+
+	def get_job(self, jid, headers=None, **kwargs):
+		'''	Retrieve a processing job instance
+		'''
+		from .imaging.jobs import OrthancJob
+		return self.get_imaging_resource(jid, OrthancJob, headers=headers, **kwargs)
+
 
 class SonadorImagingServerCollection(SonadorObjectCollection):
-	'''	Collection of Sonador PACS imaging servers
+	'''	Collection of Orthanc/PACS imaging servers managed by Sonador
 	'''
 	model = SonadorImagingServer
 
 
-class ImagingServerChildMixin(object):
-	'''	Mixin object providing properties and methods common to objects associated
-		with Sonador managed PACS imaging servers.
+# Orthanc DICOM Server Base Objects
+
+class ImagingServerBaseObject(SonadorBaseObject):
+	''' Data object associated with a PACS server. Includes a reference to the server
+		from which the object came.
 	'''
-	@property
-	def imaging_server(self):
-		return self._objectdata.get('server')
+	def __init__(self, *args, **kwargs):
+		self.pacs = kwargs.pop('pacs', None)
+		super(ImagingServerBaseObject, self).__init__(*args, **kwargs)
 
 
 class ImagingServerChildCollection(SonadorObjectCollection):
@@ -151,12 +293,26 @@ class ImagingServerChildCollection(SonadorObjectCollection):
 		with Sonador managed PACS imaging servers
 	'''
 	def __init__(self, *args, **kwargs):
-		self.imaging_server = kwargs.pop('imaging_server', None)
+		self.pacs = kwargs.pop('pacs', None)
 		super(ImagingServerChildCollection, self).__init__(*args, **kwargs)
 
+	def _init_collection_models(self, **kwargs):
+		if self.pacs:
+			kwargs['pacs'] = self.pacs
+
+		return super(ImagingServerChildCollection, self)._init_collection_models(**kwargs)
 
 
 # PACS Data Excahnge: PACS DICOM and DICOMweb
+
+class ImagingServerModalityMixin(object):
+	'''	Mixin object providing properties and methods common to objects associated
+		with Sonador managed PACS imaging servers.
+	'''
+	@property
+	def imaging_server(self):
+		return self._objectdata.get('server')
+
 
 DICOM_MODALITY_OUTPUT_COLUMNS = OrderedDict((
 		('imaging_server', 'Imaging Server ID'),
@@ -168,7 +324,7 @@ DICOM_MODALITY_OUTPUT_COLUMNS = OrderedDict((
 	))
 
 
-class DicomImagingModality(ImagingServerChildMixin, SonadorBaseObject):
+class DicomImagingModality(ImagingServerModalityMixin, ImagingServerBaseObject):
 	'''	DICOM imaging modalities associated with a server
 	'''
 	tabulate_output_columns = DICOM_MODALITY_OUTPUT_COLUMNS
@@ -191,11 +347,96 @@ DICOMWEB_OUTPUT_COLUMNS = OrderedDict((
 	))
 
 
-class RemoteDICOMwebServer(ImagingServerChildMixin, SonadorBaseObject):
+class RemoteDICOMwebServer(ImagingServerModalityMixin, ImagingServerBaseObject):
 	'''	Remote DICOMweb server associated with a Sonador managed PACS imaging server
 	'''
 	tabulate_output_columns = DICOMWEB_OUTPUT_COLUMNS
-	details_exclude = ('server', 'username', 'password')
+	details_exclude = ('server', 'username', 'password', 'token')
+
+	@property
+	def dicomweb_urlbase(self):
+		return posixpath.join('dicom-web/servers', self.orthanc_name)
+
+	def remote_query(self, sfilter, expand=True, resource=IMAGING_SERVER_RESOURCE_SERIES,
+			limit=None, offset=None, fuzzy=True, query=None, headers=None, verify=None, **kwargs):
+		'''	Submit a query (via Orthanc) to a DICOMweb remote instance
+
+			@input sfilter (dict): Terms to be included in the request
+			@input expand (bool, default=True): If false, only the resource IDs will be returned.
+			@input resource (str, default='Series'): Type of resource for which the query should be executed.
+			@input limit (int, default=None): Njumber of records which should be included in the response.
+				If None, all records matching the query will be returned.
+			@input offset (int, default=None): Any offset to apply to the record list. Used together with
+				limit to paginate query results.
+			@input fuzzy (bool, default=True): Toggles whether the query should use fuzzy matching
+			@input query (dict, default=new dict): Existing ditionary structure to be expanded with the provided
+				search query.
+			@input headers (dict, default=new dict): Headers to be included with the query request.
+
+			@returns iterable of resource IDs is expand is False, colleciton of th matching resource type if 
+				expand is True
+		'''
+		from .imaging.dicomweb import REMOTE_IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES, \
+			REMOTE_DICOMWEB_RESOURCE_TYPE
+		if not isinstance(sfilter, dict):
+			raise TypeError('Unable to execute query, terms must be submitted as a dictionary')
+		if not resource in REMOTE_IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES:
+			raise ValueError('Unable to execute query, invalid resource type: %s' % resource)
+
+		# Create query structure
+		query = query or {}
+		query.update({ 'Uri': REMOTE_DICOMWEB_RESOURCE_TYPE.get(resource), 'Arguments': sfilter })
+		if limit:
+			sfilter['limit'] = str(limit+1)
+		if offset:
+			sfilter['offset'] = str(offset)
+		if fuzzy:
+			sfilter['fuzzymatching'] = str(fuzzy).lower()
+
+		# DICOMweb query structure
+		logger.debug('DICOMWeb query:\n%s' % json.dumps(query))
+
+		# Execute query
+		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.dicomweb_urlbase, 'qido')), json=query, 
+			headers=self.pacs.orthanc_request_headers(headers=headers))
+		if not r.ok:
+			request_client_error('Unable to execute DICOMweb resource query for %s on PACS %s. Status code: %s.' 
+					% (self.pk, self.pacs.server_label, r.status_code), 
+				r)
+
+		# Parse response
+		rdata = server_controloperation_json_response(r,
+			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
+
+		return REMOTE_IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES.get(resource)(self.server, rdata, dicomweb=self, **kwargs) if expand \
+			else rdata
+
+	def remote_fetch(self, resources, fetch=None, headers=None, async_transfer=True):
+		''' Create a job to retrieve the resources specified in the resource list. Series should be retrieved using
+			the SeriesInstanceUID and StudyInstanceUID. The request i posted to the retrieve endpoint of Orthanc
+			and all resources will be retrieved in a single batch.
+		'''
+		from .imaging.jobs import OrthancJob, OrthancJobResult
+
+		fetch = fetch or {}
+		fetch.update({ 'Resources': resources })
+		if async_transfer:
+			fetch['Synchronous'] = not async_transfer
+
+		# Execute request
+		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.dicomweb_urlbase, 'retrieve')), json=fetch,
+			headers=self.pacs.orthanc_request_headers(headers=headers))
+		if not r.ok:
+			request_client_error('Unable to execute DICOMweb fetch for %s on PACS %s. Status code: %s.' 
+					% (self.pk, self.pacs.server_label, r.status_code), 
+				r)
+
+		# Parse response
+		rdata = server_controloperation_json_response(r,
+			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
+
+		return OrthancJob(self.server, rdata, pacs=self.pacs, dicomweb=self) if async_transfer \
+			else OrthancJobResult(self.server, rdata, pacs=self.pacs, dicomweb=self)
 
 
 class RemoteDICOMwebServerCollection(ImagingServerChildCollection):
@@ -203,6 +444,8 @@ class RemoteDICOMwebServerCollection(ImagingServerChildCollection):
 	'''
 	model = RemoteDICOMwebServer
 
+
+# API methods
 
 def sonador_apitoken_fetch(sonador_server, output_dest, verify=False):
 	'''	Fetch API credentials for the server
