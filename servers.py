@@ -387,7 +387,7 @@ class RemoteDICOMwebServer(ImagingServerModalityMixin, ImagingServerBaseObject):
 		query = query or {}
 		query.update({ 'Uri': REMOTE_DICOMWEB_RESOURCE_TYPE.get(resource), 'Arguments': sfilter })
 		if limit:
-			sfilter['limit'] = str(limit+1)
+			sfilter['limit'] = str(limit)
 		if offset:
 			sfilter['offset'] = str(offset)
 		if fuzzy:
