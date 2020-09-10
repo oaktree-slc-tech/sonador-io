@@ -3,6 +3,8 @@ import six, os, logging, argparse
 from client.utils.urls import validate_url
 from client.utils.logs import LOGGING_LEVELS
 
+logger = logging.getLogger(__name__)
+
 
 def argparse_type_directory(dpath):
 	'''	Ensure that the provided path is a directory and that it exists
