@@ -68,6 +68,10 @@ class ImagingResourceMixin(object):
 		''' DICOMDIR archive URL for the resource
 		'''
 
+	@property
+	def url(self):
+		return self.resource_url
+
 	def filearchive(self, cache=False, filearchive_type=FILEARCHIVE_TYPE_ZIPARCHIVE, verify=None):
 		'''	Retrieve a ZIP archive of all data associated with the resource.
 
@@ -155,6 +159,20 @@ class ImagingResourceMixin(object):
 				r)
 
 		logger.debug('Response from PACS imaging server:\n%s' % json.dumps(r.json()))
+		return r
+
+	def delete(self, verify=None, headers=None, **kwargs):
+		'''	Remove the imaging resource from Orthanc
+		'''
+		if verify is None:
+			verify = self.server.verify
+
+		r = requests.delete(self.pacs.orthanc_apiurl(self.resource_url),
+			headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify, **kwargs)
+		if not r.ok:
+			request_client_error(
+				'Unable to delete resource %s from imaging server %s, a server error occurred' % (self.url, self.pacs.server_label), r)
+
 		return r
 
 
