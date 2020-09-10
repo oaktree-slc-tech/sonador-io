@@ -1,5 +1,8 @@
 import six, os, logging, argparse
 
+from client.utils.urls import validate_url
+from client.utils.logs import LOGGING_LEVELS
+
 
 def argparse_type_directory(dpath):
 	'''	Ensure that the provided path is a directory and that it exists
@@ -25,3 +28,33 @@ def argparse_keyval(s):
 	else: value = ''
 
 	return (key, value)
+
+
+def validate_sonador_connection_args(args, exitcode):
+	'''	Ensure user-provided Sonador arguments are sane
+	'''
+	if not args.apitoken:
+
+		if args.accessid is None:
+			logger.error(six.text_type('The import client requires a Sonador Access ID. See --help for details.'))
+			exitcode = 1
+		if args.secretkey is None:
+			logger.error(six.text_type('The import client requires a Sonador Secret Key. See --help for details.'))
+			exitcode = 1
+
+		# Verify endpoint value and structure
+		if not args.endpoint:
+			logger.error(six.text_type('A Sonador endpoint is required.'))
+			exitcode = 1
+
+	# Verify Sonador URL endpoint
+	if args.endpoint:
+
+		try: validate_url(args.endpoint)
+		except ValueError as err:
+			logger.error(
+				six.text_type('Malformed endpoint URL "%s", a valid http URL is required. Example: http://domain.com:port'
+					% args.endpoint))
+			exitcode = 1
+	
+	return exitcode
