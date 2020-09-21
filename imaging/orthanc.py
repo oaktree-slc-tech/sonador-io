@@ -436,10 +436,30 @@ class DcmInstance(ImagingResourceCoreMixin, ImagingServerBaseObject):
 	'''	DCM instance
 	'''
 	pk_attr = 'ID'
+	fetch_endpoint = 'instances'
 
 	def __init__(self, *args, **kwargs):
 		self.series = kwargs.pop('series', None)
 		super(DcmInstance, self).__init__(*args, **kwargs)
+
+	@property
+	def resource_url(self):
+		return posixpath.join(self.fetch_endpoint, self.pk)
+
+	@property
+	def tags(self):
+		if getattr(self, '_tags', None) is None:
+			r = requests.get(
+				self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'simplified-tags'), query_params={ 'expand': True, }),
+				headers=self.pacs.orthanc_request_headers())
+			if not r.ok:
+				request_client_error(
+					'Unable to retrieve tags for DCM instance %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
+					r)
+
+			self._tags = r.json()
+
+		return self._tags
 
 
 class DcmInstanceCollection(ImagingServerChildCollection):
