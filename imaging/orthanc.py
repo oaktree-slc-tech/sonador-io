@@ -445,6 +445,8 @@ class DcmInstance(ImagingResourceCoreMixin, ImagingServerBaseObject):
 class DcmInstanceCollection(ImagingServerChildCollection):
 	'''	Collection of instances
 	'''
+	model = DcmInstance
+
 	def __init__(self, *args, **kwargs):
 		self.series = kwargs.pop('series', None)
 		super(DcmInstanceCollection, self).__init__(*args, **kwargs)
