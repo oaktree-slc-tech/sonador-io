@@ -3,9 +3,9 @@ from io import BytesIO
 from abc import abstractmethod
 from urllib.parse import urlencode
 from collections import Iterable
+from collections import OrderedDict
 
 from tabulate import tabulate
-from collections import OrderedDict
 
 from client import auth as guru_auth
 from client.utils.urls import build_url
@@ -14,6 +14,7 @@ from client.utils.microservices import server_controloperation_json_response, Re
 
 from ..apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES
 from ..helpers import request_client_error, fetch_sonador_session_token
+from ..serialization import json_datetime_parser
 from ..remote import SonadorBaseObject, SonadorObjectCollection, fetch_sonador_data_collection
 from ..servers import ImagingServerChildCollection, ImagingServerBaseObject
 
@@ -25,17 +26,9 @@ FILEARCHIVE_TYPE_DICOMDIR = 'dicomdir'
 FILEARCHIVE_TYPE_SUPPORTED = (FILEARCHIVE_TYPE_ZIPARCHIVE, FILEARCHIVE_TYPE_DICOMDIR)
 
 
-class ImagingResourceMixin(object):
-	'''	Mixin class with convenience properties for accessing common Orthanc data fields
+class ImagingResourceCoreMixin(object):
+	'''	Mixin class with convenience properties for accessing common Orthanc data fields.
 	'''
-	@property
-	def dicomdata(self):
-		return self._objectdata.get('MainDicomTags', {})
-
-	@property
-	def patientdata(self):
-		return self._objectdata.get('PatientMainDicomTags', {})
-
 	@property
 	def meta(self):
 		if getattr(self, '_meta', None) is None:
@@ -57,61 +50,8 @@ class ImagingResourceMixin(object):
 		'''
 
 	@property
-	@abstractmethod
-	def filearchive_url(self):
-		''' File archive URL for the imaging resource
-		'''
-
-	@property
-	@abstractmethod
-	def dicomdir_url(self):
-		''' DICOMDIR archive URL for the resource
-		'''
-
-	@property
 	def url(self):
 		return self.resource_url
-
-	def filearchive(self, cache=False, filearchive_type=FILEARCHIVE_TYPE_ZIPARCHIVE, verify=None):
-		'''	Retrieve a ZIP archive of all data associated with the resource.
-
-			@input cache (bool, default=False): Cache the data locally to speed up access.
-
-			@returns zipfile.ZipFile
-		'''
-		# Retrieve cached copy of the file (if available)
-		if getattr(self, '_filearchive', None):
-			return self._filearchive
-
-		if verify is None:
-			verify = self.server.verify
-
-		# Determine URL from which to retrieve the data
-		if FILEARCHIVE_TYPE_DICOMDIR == FILEARCHIVE_TYPE_ZIPARCHIVE:
-			filearchive_url = self.filearchive_url
-		elif FILEARCHIVE_TYPE_DICOMDIR == FILEARCHIVE_TYPE_DICOMDIR:
-			filearchive_url = self.dicomdir_url
-		else:
-			raise TypeError('Unable to download archive of image data, invalid archive type: %s' % filearchive_type)
-
-		# Retrieve file data from Orthanc
-		r = requests.get(self.pacs.orthanc_apiurl(filearchive_url), headers=self.pacs.orthanc_request_headers(), verify=verify)
-		if not r.ok:
-			request_client_error('Unable to retrieve DICOM resource file data for %s on server % s. Status code: %s.'
-					% (self.filearchive_url, self.pacs.server_label, r.status_code),
-				r)
-
-		# Initialize file archive from request data, attach the raw content of the request
-		# to the archive
-		zbuffer = BytesIO(r.content)
-		farchive = zipfile.ZipFile(zbuffer, mode='r')
-		setattr(farchive, 'raw', zbuffer)
-
-		# Cache (if indicated)
-		if cache:
-			setattr(self, '_filearchive', farchive)
-
-		return farchive
 
 	def modify(self, replace=None, remove=None, remove_private_tags=False, force=False, transcode=None, private_creator=None,
 			modify=None, headers=None, verify=None, **kwargs):
@@ -174,6 +114,72 @@ class ImagingResourceMixin(object):
 				'Unable to delete resource %s from imaging server %s, a server error occurred' % (self.url, self.pacs.server_label), r)
 
 		return r
+
+
+class ImagingResourceMixin(ImagingResourceCoreMixin):
+	'''	Mixin class with convenience properties for accessing data fields on higher-order resources 
+		such as series, studies, and patients.
+	'''
+	@property
+	def dicomdata(self):
+		return self._objectdata.get('MainDicomTags', {})
+
+	@property
+	def patientdata(self):
+		return self._objectdata.get('PatientMainDicomTags', {})
+
+	@property
+	@abstractmethod
+	def filearchive_url(self):
+		''' File archive URL for the imaging resource
+		'''
+
+	@property
+	@abstractmethod
+	def dicomdir_url(self):
+		''' DICOMDIR archive URL for the resource
+		'''
+
+	def filearchive(self, cache=False, filearchive_type=FILEARCHIVE_TYPE_ZIPARCHIVE, verify=None):
+		'''	Retrieve a ZIP archive of all data associated with the resource.
+
+			@input cache (bool, default=False): Cache the data locally to speed up access.
+
+			@returns zipfile.ZipFile
+		'''
+		# Retrieve cached copy of the file (if available)
+		if getattr(self, '_filearchive', None):
+			return self._filearchive
+
+		if verify is None:
+			verify = self.server.verify
+
+		# Determine URL from which to retrieve the data
+		if FILEARCHIVE_TYPE_DICOMDIR == FILEARCHIVE_TYPE_ZIPARCHIVE:
+			filearchive_url = self.filearchive_url
+		elif FILEARCHIVE_TYPE_DICOMDIR == FILEARCHIVE_TYPE_DICOMDIR:
+			filearchive_url = self.dicomdir_url
+		else:
+			raise TypeError('Unable to download archive of image data, invalid archive type: %s' % filearchive_type)
+
+		# Retrieve file data from Orthanc
+		r = requests.get(self.pacs.orthanc_apiurl(filearchive_url), headers=self.pacs.orthanc_request_headers(), verify=verify)
+		if not r.ok:
+			request_client_error('Unable to retrieve DICOM resource file data for %s on server % s. Status code: %s.'
+					% (self.filearchive_url, self.pacs.server_label, r.status_code),
+				r)
+
+		# Initialize file archive from request data, attach the raw content of the request
+		# to the archive
+		zbuffer = BytesIO(r.content)
+		farchive = zipfile.ZipFile(zbuffer, mode='r')
+		setattr(farchive, 'raw', zbuffer)
+
+		# Cache (if indicated)
+		if cache:
+			setattr(self, '_filearchive', farchive)
+
+		return farchive
 
 
 # PACS Imaging
@@ -375,7 +381,36 @@ class ImagingSeries(ImagingResourceMixin, ImagingServerBaseObject):
 
 	@property
 	def slices(self):
+		'''	Retrieve instance UIDs for the series
+		'''
 		return self._objectdata.get('Instances')
+
+	def fetch_slices(self, **kwargs):
+		'''	Retrieve details for slices in the series
+
+			@returns collection of DICOM instances
+		'''
+		# Retrieve instances details
+		r = requests.get(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'instances')),
+			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')))
+		if not r.ok:
+			request_client_error(
+				'Unable to retrieve details for series %s instances on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
+				r)
+
+		# Parse response and return collection
+		rdata = server_controloperation_json_response(r,
+			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
+		return DcmInstanceCollection(self.server, rdata, pacs=self.pacs, series=self, **kwargs)
+
+	@property
+	def slices_collection(self):
+		'''	Cached property for retrieving the slice/image instances which belong to the series
+		'''
+		if getattr(self, '_slices', None) is None:
+			setattr(self, '_slices', self.fetch_slices())
+
+		return self._slices
 
 
 class ImagingSeriesCollection(ImagingServerChildCollection):
@@ -389,3 +424,34 @@ IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES = OrderedDict((
 		(IMAGING_SERVER_RESOURCE_STUDY, ImagingStudyCollection), 
 		(IMAGING_SERVER_RESOURCE_SERIES, ImagingSeriesCollection),
 	))
+
+
+IMAGING_INSTANCE_OUTPUT_COLUMNS = OrderedDict((
+		('series', 'Series'),
+		('pk', 'Instance UID'),
+	))
+
+
+class DcmInstance(ImagingResourceCoreMixin, ImagingServerBaseObject):
+	'''	DCM instance
+	'''
+	pk_attr = 'ID'
+
+	def __init__(self, *args, **kwargs):
+		self.series = kwargs.pop('series', None)
+		super(DcmInstance, self).__init__(*args, **kwargs)
+
+
+class DcmInstanceCollection(ImagingServerChildCollection):
+	'''	Collection of instances
+	'''
+	def __init__(self, *args, **kwargs):
+		self.series = kwargs.pop('series', None)
+		super(DcmInstanceCollection, self).__init__(*args, **kwargs)
+
+	def _init_collection_models(self, **kwargs):
+		if self.series:
+			kwargs['series'] = self.series
+
+		return super(DcmInstanceCollection, self)._init_collection_models(**kwargs)
+		
