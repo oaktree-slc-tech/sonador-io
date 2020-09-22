@@ -452,10 +452,14 @@ class DcmInstance(ImagingResourceCoreMixin, ImagingServerBaseObject):
 
 	@property
 	def tags(self):
+		'''	Dictionary/JSON of all tags associated with the image
+		'''
 		if getattr(self, '_tags', None) is None:
+			
 			r = requests.get(
 				self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'simplified-tags'), query_params={ 'expand': True, }),
 				headers=self.pacs.orthanc_request_headers())
+			
 			if not r.ok:
 				request_client_error(
 					'Unable to retrieve tags for DCM instance %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
@@ -464,6 +468,26 @@ class DcmInstance(ImagingResourceCoreMixin, ImagingServerBaseObject):
 			self._tags = r.json()
 
 		return self._tags
+
+	@property
+	def dcmtags(self):
+		'''	Dictionary/JSON of all DICOM tags including hexadecimal indexes and value type
+		'''
+		if getattr(self, '_dcmtags', None) is None:
+			
+			r = requests.get(
+				self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'tags'), query_params={ 'expand': True, }),
+				headers=self.pacs.orthanc_request_headers())
+			
+			if not r.ok:
+
+				request_client_error(
+					'Unable to retrieve full DCM tags for DCM instance %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
+					r)
+
+			self._dcmtags = r.json()
+
+		return self._dcmtags
 
 	def _get_filedata(self, dcmresource_url, verify=None, headers=None):
 		'''	Retrieve DICOM resource data
