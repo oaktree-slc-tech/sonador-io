@@ -244,6 +244,21 @@ class SonadorImagingServer(SonadorBaseObject):
 		return IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES.get(resource)(self.server, rdata, pacs=self, **kwargs) if expand \
 			else rdata
 
+	def query_patient(self, sfilter, **kwargs):
+		'''Query patient resources on the imaging server. (Wrapper function for "query".)
+		'''	
+		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_PATIENT, **kwargs)
+
+	def query_study(self, sfilter, **kwargs):
+		'''	Query study resources on the imaging server.  (Wrapper function for "query".)
+		'''
+		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_STUDY, **kwargs)
+
+	def query_series(self, sfilter, **kwargs):
+		'''	Query series resources on the imaging server. (Wrapper function for "query".)
+		'''
+		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_SERIES, **kwargs)
+
 	def fetch_jobs(self, verify=None, headers=None, limit=None, offset=None, expand=True, **kwargs):
 		'''	Retrieve the processing jobs for the server
 		'''

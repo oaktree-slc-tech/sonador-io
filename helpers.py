@@ -115,6 +115,24 @@ class SonadorServer(object):
 
 		return headers
 
+	def get_imageserver(self, uid, verify=None, imageserver_datamodel_class=None):
+		'''	Retrieve data for the specified Imaging/PACS server
+
+			@input uid (str): Sonador UID/pk for the imaging server.
+			@input verify (bool, default=server default): Toggles whether SSL certificates
+				should be validated as part of the request. If no value is passed, 
+				the default setting included in the Sonder server will be used.
+		'''
+		if imageserver_datamodel_class is None:
+			from .servers import SonadorImagingServer
+			imageserver_datamodel_class = SonadorImagingServer
+		from .remote import fetch_sonador_dataobject
+		
+		if verify is None:
+			verify = self.verify
+
+		return fetch_sonador_dataobject(self, imageserver_datamodel_class, uid, verify=verify)
+
 
 def request_client_error(msg, r, rdata=None, exception_class=ClientOperationError):
 	'''	Raise a ClientOperationError if the provided request was not completed successfully
