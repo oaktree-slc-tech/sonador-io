@@ -1,7 +1,8 @@
-import six, requests, json, csv, collections, logging, posixpath, zipfile
+import six, requests, json, csv, collections, logging, posixpath, zipfile, pydicom
 from io import BytesIO
 from abc import abstractmethod
 from urllib.parse import urlencode
+from collections import namedtuple
 from collections import Iterable
 from collections import OrderedDict
 
@@ -324,6 +325,9 @@ IMAGING_SERIES_OUTPUT_COLUMNS = OrderedDict((
 	))
 
 
+FileDataResponse = namedtuple('FileDataRequest', ('buffer', 'response'))
+
+
 class ImagingSeries(ImagingResourceMixin, ImagingServerBaseObject):
 	'''	Imaging series: set of grouped images
 	'''
@@ -461,6 +465,112 @@ class DcmInstance(ImagingResourceCoreMixin, ImagingServerBaseObject):
 
 		return self._tags
 
+	def _get_filedata(self, dcmresource_url, verify=None, headers=None):
+		'''	Retrieve DICOM resource data
+
+			@returns io.BytesIO stream
+		'''
+		if verify is None:
+			verify = self.server.verify
+
+		# Retrieve file data from Orthanc
+		r = requests.get(
+			self.pacs.orthanc_apiurl(dcmresource_url), headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
+		if not r.ok:
+			request_client_error(
+				'Unable to retrieve DICOM resource file data for %s (instance %s) on server %s. Status code: %s.'
+					% (dcmresource_url, self.pk, self.pacs.server_label, r.status_code),
+				r)
+
+		# Initialize DICOM instance from request data, attach the raw content of the request
+		return FileDataResponse(BytesIO(r.content), r)
+
+	def dcmfile(self, cache=False, **kwargs):
+		'''	Retrieve a ZIP archive of all data associated with the resource.
+
+			@input cache (bool, default=False): Cache the data locally to speed up access.
+
+			@returns pydicom.dataset.FileDataset
+		'''
+		# Retrieve cached copy of the file (if available)
+		if getattr(self, '_dcmfile', None):
+			return self._dcmfile
+		
+		fbuffer, _ = self._get_filedata(posixpath.join(self.resource_url, 'file'), **kwargs)
+		dfile = pydicom.dcmread(fbuffer)
+		setattr(dfile, 'raw', zbuffer)
+
+		# Cache (if indicated)
+		if cache:
+			setattr(self, '_dcmfile', dfile)
+
+		return dfile
+
+	def imgfile(self, stretch_dynamicrange=True, bitdepth=8, **kwargs):
+		'''	Retrieve image file data from Orthanc
+
+			@input stretch_dynamicrange (bool, default=True): When True, signed intger
+				data stretched to the full dynamic range of the encoding type will be retrieved.
+			@input bitdepth (iint, default=8): Bitdepth of the image
+
+			@returns io.BytesIO
+		'''
+		# 8 bit stretched image where pixel data is set to [0..255]
+		if stretch_dynamicrange and bitdepth == 8:
+			dcmresource_url = posixpath.join(self.resource_url, 'preview')
+
+		# 8 bit unsigned image where pixel data is left unmodified.
+		# Pixel intensities are cropped to the maximal value encoded by the target image format.
+		elif not stretch_dynamicrange and bitdepth == 8:
+			dcmresource_url = posixpath.join(self.resource_url, 'image-uint8')
+
+		# 16 bit unsigned image: pixel intensities are coppred to the maximal value encoded by the target image format.
+		elif not stretch_dynamicrange and bitdepth == 16:
+			dcmresource_url = posixpath.join(self.resource_url, 'image-uint16')
+
+		# 16 bit signed image
+		elif stretch_dynamicrange and bitdepth == 16:
+			dcmresource_url = posixpath.join(self.resource_url, 'image-int16')
+
+		fbuffer, _ = self._get_filedata(dcmresource_url, **kwargs)
+
+		return fbuffer
+
+	def pngfile(self, cache=False, **kwargs):
+		'''	Retrieve a full-resolution PNG grayscale preview of the DCM file. Wraps imgfile
+
+			@returns io.BytesIO
+		'''
+		if getattr(self, '_pngfile', None):
+			return self._pngfile
+
+		pbuffer = self.imgfile(**kwargs)
+
+		# Cache (if indicated)
+		if cache:
+			setattr(self, '_pngfile', pbuffer)
+
+		return pbuffer
+
+	def jpegfile(self, cache=False, **kwargs):
+		'''	Retrieve a full-resolution JPEG grayscale preview of the DCM file. Wraps imgfile.
+
+			@returns io.BytesIO
+		'''
+		if getattr(self, '_jpegfile', None):
+			return self._jpegfile
+
+		headers = kwargs.get('headers') or {}
+		headers['Accept'] = 'image/jpeg'
+
+		jbuffer = self.imgfile(headers=headers, **kwargs)
+
+		# Cache (if indicated)
+		if cache:
+			setattr(self, '_jpegfile', jbuffer)
+
+		return jbuffer
+
 
 class DcmInstanceCollection(ImagingServerChildCollection):
 	'''	Collection of instances
@@ -476,4 +586,4 @@ class DcmInstanceCollection(ImagingServerChildCollection):
 			kwargs['series'] = self.series
 
 		return super(DcmInstanceCollection, self)._init_collection_models(**kwargs)
-		
+
