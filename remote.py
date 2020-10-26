@@ -26,7 +26,7 @@ class SonadorBaseObject(JsonBaseObject):
 
 	def __init__(self, server, *args, **kwargs):
 		self.server = server
-		super(SonadorBaseObject, self).__init__(*args, **kwargs)
+		super().__init__(*args, **kwargs)
 
 	@property
 	def url(self):
@@ -61,7 +61,7 @@ class SonadorObjectCollection(GuruRemotePaginationMixin, JsonObjectCollection):
 	def __init__(self, server, *args, **kwargs):
 		self.server = server
 		self.remote_schema = kwargs.pop('remote_schema', None)
-		super(SonadorObjectCollection, self).__init__(*args, **kwargs)
+		super().__init__(*args, **kwargs)
 
 	def _init_collection_models(self, **kwargs):
 		return map(lambda ojson: self.model(self.server, ojson, **kwargs), self._objectdata)

@@ -35,19 +35,10 @@ def argparse_keyval(s):
 def validate_sonador_connection_args(args, exitcode):
 	'''	Ensure user-provided Sonador arguments are sane
 	'''
-	if not args.apitoken:
-
-		if args.accessid is None:
-			logger.error(six.text_type('The import client requires a Sonador Access ID. See --help for details.'))
-			exitcode = 1
-		if args.secretkey is None:
-			logger.error(six.text_type('The import client requires a Sonador Secret Key. See --help for details.'))
-			exitcode = 1
-
-		# Verify endpoint value and structure
-		if not args.endpoint:
-			logger.error(six.text_type('A Sonador endpoint is required.'))
-			exitcode = 1
+	# Verify endpoint value and structure
+	if not args.endpoint:
+		logger.error(six.text_type('A Sonador endpoint is required.'))
+		exitcode = 1
 
 	# Verify Sonador URL endpoint
 	if args.endpoint:
@@ -60,3 +51,20 @@ def validate_sonador_connection_args(args, exitcode):
 			exitcode = 1
 	
 	return exitcode
+
+
+def validate_sonador_connection_credentials(args, exitcode):
+	'''	Ensure that user-provide Sonador credentials are sane
+	'''
+	# Verify access ID and secret key
+	if not args.apitoken:
+
+		if args.accessid is None:
+			logger.error(six.text_type('The import client requires a Sonador Access ID. See --help for details.'))
+			exitcode = 1
+		if args.secretkey is None:
+			logger.error(six.text_type('The import client requires a Sonador Secret Key. See --help for details.'))
+			exitcode = 1
+
+	return exitcode
+	
