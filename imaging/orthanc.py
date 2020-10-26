@@ -1,6 +1,6 @@
 import six, requests, json, csv, collections, logging, posixpath, zipfile, pydicom
 from io import BytesIO
-from abc import abstractmethod
+from abc import ABCMeta, abstractmethod
 from urllib.parse import urlencode
 from collections import namedtuple
 from collections import Iterable
@@ -27,7 +27,7 @@ FILEARCHIVE_TYPE_DICOMDIR = 'dicomdir'
 FILEARCHIVE_TYPE_SUPPORTED = (FILEARCHIVE_TYPE_ZIPARCHIVE, FILEARCHIVE_TYPE_DICOMDIR)
 
 
-class ImagingResourceCoreMixin(object):
+class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 	'''	Mixin class with convenience properties for accessing common Orthanc data fields.
 	'''
 	@property
@@ -115,6 +115,16 @@ class ImagingResourceCoreMixin(object):
 				'Unable to delete resource %s from imaging server %s, a server error occurred' % (self.url, self.pacs.server_label), r)
 
 		return r
+
+
+class ImagingResourceParentMixin(object, metaclass=ABCMeta):
+	'''	Mixin class which defines the resource/parent interface for Orthanc imaging resources
+	'''
+	@property
+	@abstractmethod
+	def parent(self):
+		'''	Retrieve the parent of the current resource
+		'''
 
 
 class ImagingResourceMixin(ImagingResourceCoreMixin):
@@ -253,7 +263,7 @@ IMAGING_STUDY_OUTPUT_COLUMNS = OrderedDict((
 	))
 
 
-class ImagingStudy(ImagingResourceMixin, ImagingServerBaseObject):
+class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServerBaseObject):
 	'''	Imaging study: set of sequences/series/scans
 	'''
 	pk_attr = 'ID'
@@ -275,6 +285,15 @@ class ImagingStudy(ImagingResourceMixin, ImagingServerBaseObject):
 	@property
 	def patient(self):
 		return self._objectdata.get('ParentPatient')
+
+	@property
+	def parent(self):
+		'''	Retrieve the parent patient for the study
+		'''
+		if getattr(self, '_parent', None) is None:
+			self._parent = self.pacs.get_patient(self.patient)
+
+		return self._parent
 
 	@property
 	def patient_name(self):
@@ -328,7 +347,7 @@ IMAGING_SERIES_OUTPUT_COLUMNS = OrderedDict((
 FileDataResponse = namedtuple('FileDataRequest', ('buffer', 'response'))
 
 
-class ImagingSeries(ImagingResourceMixin, ImagingServerBaseObject):
+class ImagingSeries(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServerBaseObject):
 	'''	Imaging series: set of grouped images
 	'''
 	pk_attr = 'ID'
@@ -350,6 +369,15 @@ class ImagingSeries(ImagingResourceMixin, ImagingServerBaseObject):
 	@property
 	def study(self):
 		return self._objectdata.get('ParentStudy')
+
+	@property
+	def parent(self):
+		'''	Retrieve parent study for the series
+		'''
+		if getattr(self, '_parent', None) is None:
+			self._parent = self.pacs.get_study(self.study)
+
+		return self._parent		
 
 	@property
 	def sequence_name(self):
@@ -436,15 +464,28 @@ IMAGING_INSTANCE_OUTPUT_COLUMNS = OrderedDict((
 	))
 
 
-class DcmInstance(ImagingResourceCoreMixin, ImagingServerBaseObject):
+class DcmInstance(ImagingResourceCoreMixin, ImagingResourceParentMixin, ImagingServerBaseObject):
 	'''	DCM instance
 	'''
 	pk_attr = 'ID'
 	fetch_endpoint = 'instances'
 
 	def __init__(self, *args, **kwargs):
-		self.series = kwargs.pop('series', None)
+		self._parent = kwargs.pop('series', None)
 		super(DcmInstance, self).__init__(*args, **kwargs)
+
+	@property
+	def series(self):
+		return self._objectdata.get('ParentSeries')
+
+	@property
+	def parent(self):
+		'''	Retrieve the parent series for the instance
+		'''
+		if self._parent is None:
+			self._parent = self.pacs.get_series(self.series)
+
+		return self._parent
 
 	@property
 	def resource_url(self):
@@ -509,8 +550,8 @@ class DcmInstance(ImagingResourceCoreMixin, ImagingServerBaseObject):
 		# Initialize DICOM instance from request data, attach the raw content of the request
 		return FileDataResponse(BytesIO(r.content), r)
 
-	def dcmfile(self, cache=False, **kwargs):
-		'''	Retrieve a ZIP archive of all data associated with the resource.
+	def dcmfile(self, cache=False, file_type='pydicom', **kwargs):
+		'''	Retrieve the raw DICOM data for the instance.
 
 			@input cache (bool, default=False): Cache the data locally to speed up access.
 
@@ -522,7 +563,7 @@ class DcmInstance(ImagingResourceCoreMixin, ImagingServerBaseObject):
 		
 		fbuffer, _ = self._get_filedata(posixpath.join(self.resource_url, 'file'), **kwargs)
 		dfile = pydicom.dcmread(fbuffer)
-		setattr(dfile, 'raw', zbuffer)
+		setattr(dfile, 'raw', fbuffer)
 
 		# Cache (if indicated)
 		if cache:
@@ -602,12 +643,12 @@ class DcmInstanceCollection(ImagingServerChildCollection):
 	model = DcmInstance
 
 	def __init__(self, *args, **kwargs):
-		self.series = kwargs.pop('series', None)
+		self.parent = kwargs.pop('series', None)
 		super(DcmInstanceCollection, self).__init__(*args, **kwargs)
 
 	def _init_collection_models(self, **kwargs):
-		if self.series:
-			kwargs['series'] = self.series
+		if self.parent:
+			kwargs['series'] = self.parent
 
 		return super(DcmInstanceCollection, self)._init_collection_models(**kwargs)
 

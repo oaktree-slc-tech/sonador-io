@@ -17,3 +17,26 @@ DCMHEADER_CLINICAL_TRIAL_SPONSOR = 'ClinicalTrialSponsorName'
 
 
 DCM_EXTENSIONS_DEFAULT = ['*.dcm', '*.DCM', '*.DICOM', '*.dicom', 'IM*']
+DCM_MODALITY_MR = 'MR'
+DCM_MODALITIES_MRI = ['MR', 'MRI', 'MR\\SD']
+
+
+# Environment variable names
+SONADOR_ACCESS_ID = 'SONADOR_ACCESS_ID'
+SONADOR_SECRET_KEY = 'SONADOR_SECRET_KEY'
+SONADOR_URL = 'SONADOR_URL'
+SONADOR_APITOKEN = 'SONADOR_APITOKEN'
+SONADOR_INTERNAL_DNS = 'SONADOR_INTERNAL_DNS'
+SONADOR_IMAGING_SERVER = 'SONADOR_IMAGING_SERVER'
+
+
+# Functional testing globals
+from client.utils.logs import LOGGING_LEVELS
+
+TESTING_VERBOSITY = {
+	'debug': 3,
+	'info': 2,
+	'warning': 1,
+	'error': 0,
+	'critical': 0,
+}

@@ -191,6 +191,12 @@ class SonadorImagingServer(SonadorBaseObject):
 		from .imaging.orthanc import ImagingSeries
 		return self.get_imaging_resource(rid, ImagingSeries, headers=headers, **kwargs)
 
+	def get_dcm_instance(self, rid, headers=None, **kwargs):
+		'''	Retrieve a DCM instance
+		'''
+		from .imaging.orthanc import DcmInstance
+		return self.get_imaging_resource(rid, DcmInstance, headers=headers, **kwargs)
+
 	def query(self, sfilter, expand=True, resource=IMAGING_SERVER_RESOURCE_SERIES, 
 			limit=None, offset=None, query=None, headers=None, verify=None, **kwargs):
 		'''	Submit a query to Orthanc with the provided filter terms
@@ -300,7 +306,7 @@ class ImagingServerBaseObject(SonadorBaseObject):
 	'''
 	def __init__(self, *args, **kwargs):
 		self.pacs = kwargs.pop('pacs', None)
-		super(ImagingServerBaseObject, self).__init__(*args, **kwargs)
+		super().__init__(*args, **kwargs)
 
 
 class ImagingServerChildCollection(SonadorObjectCollection):
@@ -309,13 +315,13 @@ class ImagingServerChildCollection(SonadorObjectCollection):
 	'''
 	def __init__(self, *args, **kwargs):
 		self.pacs = kwargs.pop('pacs', None)
-		super(ImagingServerChildCollection, self).__init__(*args, **kwargs)
+		super().__init__(*args, **kwargs)
 
 	def _init_collection_models(self, **kwargs):
 		if self.pacs:
 			kwargs['pacs'] = self.pacs
 
-		return super(ImagingServerChildCollection, self)._init_collection_models(**kwargs)
+		return super()._init_collection_models(**kwargs)
 
 
 # PACS Data Excahnge: PACS DICOM and DICOMweb

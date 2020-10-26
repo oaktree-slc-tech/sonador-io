@@ -1,4 +1,4 @@
-import six, logging, traceback, argparse, datetime, requests
+import six, os, logging, traceback, argparse, datetime, requests
 from six.moves.urllib import parse as urlparse
 
 from client import apisettings as gcapicodes
@@ -6,6 +6,9 @@ from client import auth as guru_auth
 from client.utils.urls import build_url
 from client.errors import ClientOperationError
 from client.utils.format import formerrors2str
+from client.utils.conversion import str2bool
+
+from .apisettings import SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, SONADOR_INTERNAL_DNS
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +37,21 @@ def fetch_sonador_session_token(sonador_server, verify=False, credentials_endpoi
 	return r.json()
 
 
+def initenv_sonador_server(sonador_url=os.environ.get(SONADOR_URL), 
+		access_id=os.environ.get(SONADOR_ACCESS_ID), secret_key=os.environ.get(SONADOR_SECRET_KEY),
+		apitoken=os.environ.get(SONADOR_APITOKEN), internal_dns=str2bool(os.environ.get(SONADOR_INTERNAL_DNS)),
+		**kwargs):
+	''' Initialize Sonador Server connection. The method reads the standard Sonador environment
+		variables for default arguments. If the environment variable is not defined, the default 
+		for the argument will be None.
+	'''
+	return SonadorServer(sonador_url, access_id=access_id, secret_key=secret_key, apitoken=apitoken,
+		internal_dns=internal_dns, **kwargs)
+
 
 class SonadorServer(object):
+	'''	Sonador server client
+	'''
 
 	def __init__(self, sonador_url, access_id=None, secret_key=None, apitoken=None, verify=False,
 			internal_dns=False):

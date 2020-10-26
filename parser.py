@@ -4,6 +4,9 @@ from collections import OrderedDict
 from client.utils.logs import LOGGING_LEVELS
 from client.utils.object import pick
 
+from .apisettings import SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, \
+	SONADOR_IMAGING_SERVER
+
 from .validate import argparse_type_directory, argparse_keyval
 from .serialization import OUTPUT_TYPE_TABULATE, OUTPUT_TYPE_CSV, OUTPUT_TYPE_SUPPORTED
 from .imaging.orthanc import FILEARCHIVE_TYPE_ZIPARCHIVE, FILEARCHIVE_TYPE_DICOMDIR, FILEARCHIVE_TYPE_SUPPORTED 
@@ -14,37 +17,61 @@ SONADOR_COMMAND_LIST = 'list'
 SONADOR_COMMAND_DETAILS = 'details'
 
 
-# Sonador Interface Commands
+PARSER_SONADOR_ACCESSID = 'accessid'
+PARSER_SONADOR_SECRET = 'secretkey'
+PARSER_SONADOR_ENDPOINT = 'endpoint'
+PARSER_SONADOR_APITOKEN = 'apitoken'
+PARSER_SONADOR_IMAGESERVER = 'server'
+
+
+ENV_MAPPINGS = {
+	PARSER_SONADOR_ACCESSID: PARSER_SONADOR_ACCESSID,
+	PARSER_SONADOR_SECRET:  SONADOR_SECRET_KEY,
+	PARSER_SONADOR_ENDPOINT: SONADOR_URL,
+	PARSER_SONADOR_APITOKEN: SONADOR_APITOKEN,
+	PARSER_SONADOR_IMAGESERVER: SONADOR_IMAGING_SERVER,
+}
+
+
+# Sonador Interface Options
+
 def add_arguments_for_api_connection(parser):
-	'''Add arguments for parser like access-id, secret-key, api-endpoint
+	'''Add  options for Sonador API connection: access-id, secret-key, api-endpoint, and token
 	'''
-	parser.add_argument('--access-id', dest='accessid', default=os.environ.get('SONADOR_ACCESS_ID'),
-		help='''Access ID used for authentication to Sonador. May also be provided 
-			as the SONADOR_ACCESS_ID shell environment variable.'''.replace('\t', '').replace('\n', ''))
-	parser.add_argument('--secret-key', dest='secretkey', default=os.environ.get('SONADOR_SECRET_KEY'),
-		help='''Secret key used for authentication to Sonador. May also be 
-			provided as the SONADOR_SECRET_KEY shell environment variable.'''.replace('\t', '').replace('\n', ''))
-	parser.add_argument('--api-endpoint', dest='endpoint', default=os.environ.get('SONADOR_URL'),
-		help='''Sonador instance to which API requests should be sent (including scheme, port, path). 
-			May also be provided as the SONADOR_URL shell environment variable.'''.replace('\t', '').replace('\n', ''))
-	parser.add_argument('--api-token', dest='apitoken', default=os.environ.get('SONADOR_APITOKEN'),
-		help='''Sonador access token which should be used to make authenticated requests. When present, 
+	parser.add_argument('--access-id', dest=PARSER_SONADOR_ACCESSID, default=os.environ.get(SONADOR_ACCESS_ID),
+		help=('''Access ID used for authentication to Sonador. May also be provided 
+			as the %s shell environment variable.''' % SONADOR_ACCESS_ID).replace('\t', '').replace('\n', ''))
+	parser.add_argument('--secret-key', dest=PARSER_SONADOR_SECRET, default=os.environ.get(SONADOR_SECRET_KEY),
+		help=('''Secret key used for authentication to Sonador. May also be 
+			provided as the %s shell environment variable.''' % SONADOR_SECRET_KEY).replace('\t', '').replace('\n', ''))
+	parser.add_argument('--api-endpoint', dest=PARSER_SONADOR_ENDPOINT, default=os.environ.get(SONADOR_URL),
+		help=('''Sonador instance to which API requests should be sent (including scheme, port, path). 
+			May also be provided as the %s shell environment variable.''' % SONADOR_URL).replace('\t', '').replace('\n', ''))
+	parser.add_argument('--api-token', dest=PARSER_SONADOR_APITOKEN, default=os.environ.get(SONADOR_APITOKEN),
+		help=('''Sonador access token which should be used to make authenticated requests. When present, 
 				takes precedence over the access ID and secret key. May also be provided as the
-				SONADOR_APITOKEN shell environment variable.'''.replace('\t', '').replace('\n', ''))
+				%s shell environment variable.''' % SONADOR_APITOKEN).replace('\t', '').replace('\n', ''))
 
 
 def add_arguments_for_verify_ssl(parser):
-	'''Add argument for parser like verify-ssl
+	'''Add argument for Sonador API SSL verification
 	'''
 	parser.add_argument('--verify-ssl', dest='verifyssl', action='store_true', default=True,
 		help='Verify SSL connections')
 
 
-def add_arguments_for_logging_options(parser):
+def add_arguments_for_internal_dns(parser):
+	'''	Add argument for Sonador API DNS management
+	'''
+	parser.add_argument('--internal-dns', dest='internal_dns', action='store_true', default=False,
+		help='Use internal DNS (if present) for Sonador and Orthanc API server connections')
+
+
+def add_arguments_for_logging_options(parser, loglevel_default='info'):
 	'''Add arguments for parser like loglevel, logformat, logname, error-traceback
 	'''
-	parser.add_argument('--log-level', dest='loglevel', default='info', choices=LOGGING_LEVELS.keys(),
-		help='level of detail to show in output log')
+	parser.add_argument('--log-level', dest='loglevel', default=loglevel_default, 
+		choices=LOGGING_LEVELS.keys(), help='level of detail to show in output log')
 	parser.add_argument('--log-format', dest='logformat', default='%(name)s:%(levelname)s: %(message)s',
 		help='format string to use for log messages')
 	parser.add_argument('--log-name', dest='logname', default='sonador',
@@ -73,9 +100,9 @@ def output_operation_options(subparser):
 def imageserver_operation_options(subparser):
 	'''	Add CLI options for imageserver operations
 	'''
-	subparser.add_argument('--server', '-s', dest='server', type=str, 
-		help='Imaging server. May also be provided as the SONADOR_IMAGING_SERVER shell environment variable.',
-		default=os.environ.get('SONADOR_IMAGING_SERVER'))
+	subparser.add_argument('--server', '-s', dest=PARSER_SONADOR_IMAGESERVER, type=str, 
+		help='Imaging server. May also be provided as the %s shell environment variable.' % SONADOR_IMAGING_SERVER,
+		default=os.environ.get(SONADOR_IMAGING_SERVER))
 
 
 def datamodel_schema_options(subparser):
