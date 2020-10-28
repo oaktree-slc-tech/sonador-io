@@ -63,7 +63,7 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 			@input remove_private_tags (bool, default=False): Flag that, when true, will cause
 				private tags (i.e., manufacturer-specific tags) to be removed
 			@input force (bool, default=False): Flag that, when true, allows modification of DICOM identifiers
-				such as PatientID, StudyInstnceUID, SeriesInstanceuid, and SOPInstanceUID.
+				such as PatientID, StudyInstanceUID, SeriesInstanceuid, and SOPInstanceUID.
 			@input transcode (str, default=None): Allows for the definition of the TransferSyntax of the 
 				modified resources.
 		'''
@@ -479,6 +479,10 @@ class DcmInstance(ImagingResourceCoreMixin, ImagingResourceParentMixin, ImagingS
 		return self._objectdata.get('ParentSeries')
 
 	@property
+	def series_index(self):
+		return self._objectdata.get('IndexInSeries')
+
+	@property
 	def parent(self):
 		'''	Retrieve the parent series for the instance
 		'''
@@ -650,5 +654,9 @@ class DcmInstanceCollection(ImagingServerChildCollection):
 		if self.parent:
 			kwargs['series'] = self.parent
 
-		return super(DcmInstanceCollection, self)._init_collection_models(**kwargs)
+		# Return a sorted copy of the collection so that the instances are ordered
+		# by their index
+		return sorted(
+			super(DcmInstanceCollection, self)._init_collection_models(**kwargs),
+			key=lambda i: i.series_index)
 
