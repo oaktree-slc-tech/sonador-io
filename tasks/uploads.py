@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 DCM_CONTENT_TYPE = 'application/octet-stream'
 
 DicomMetaKey = namedtuple('DicomMetaKey', ('resource', 'header', 'uid'))
-DicomMeta = namedtuple('DicomMeta', ('description',))
+DicomMeta = namedtuple('DicomMeta', ('description', 'modality'))
 
 
 def dcmcache_imgmeta(ifile, hcache):
@@ -37,14 +37,14 @@ def dcmcache_imgmeta(ifile, hcache):
 		and not hcache.get(
 		DicomMetaKey(IMAGING_SERVER_RESOURCE_STUDY, dcmfile.StudyInstanceUID, dcmfile.StudyInstanceUID)):
 		hcache[DicomMetaKey(IMAGING_SERVER_RESOURCE_STUDY, DCMHEADER_STUDY_INSTANCE_UID, dcmfile.StudyInstanceUID)] \
-			= DicomMeta(dcmfile.StudyDescription)
+			= DicomMeta(dcmfile.StudyDescription, None)
 
 	# Update to series metadata
 	if getattr(dcmfile, DCMHEADER_SERIES_INSTANCE_UID, None) \
 		and not hcache.get(
 			DicomMetaKey(IMAGING_SERVER_RESOURCE_SERIES, dcmfile.SeriesInstanceUID, dcmfile.SeriesInstanceUID)):
 			hcache[DicomMetaKey(IMAGING_SERVER_RESOURCE_SERIES, DCMHEADER_SERIES_INSTANCE_UID, dcmfile.SeriesInstanceUID)] \
-				= DicomMeta(dcmfile.SeriesDescription)
+				= DicomMeta(dcmfile.SeriesDescription, getattr(dcmfile, 'Modality', None))
 
 
 def imageserver_upload_folder(iserver, folders, tpool=None, threads=4, verify=False, 
