@@ -4,6 +4,8 @@ from collections import OrderedDict
 from client.utils.serialization import GuruLabsBaseJsonEncoder
 from client.utils.serialization import datetime2str
 
+from .apisettings import DCM_DATETIME_STRFORMAT
+
 
 OUTPUT_TYPE_TABULATE = 'tabulate'
 OUTPUT_TYPE_CSV = 'csv'
@@ -26,6 +28,7 @@ DATE1_REGEX = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 DATE1_FORMAT = '%Y-%m-%d'
 ISO8601_DATETIME_REGEX = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d+Z$')
 ISO8601_DATETIME_FORMAT = '%Y-%m-%dT%H:%M:%S.%fZ'
+DCM_DATETIME_REGEX = re.compile(r'^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2}).(?P<fractional>\d{6}).+')
 
 
 
@@ -38,8 +41,12 @@ class SonadorJsonEncoder(GuruLabsBaseJsonEncoder):
 def json_str2datetime(v):
 	'''	Parse a string value to a date/time object
 	'''
+	# DICOM formatted date/time
+	if DCM_DATETIME_REGEX.match(v):
+		return datetime.datetime.strptimie(v, DCM_DATETIME_STRFORMAT)
+
 	# ISO8601 formatted date/time
-	if ISO8601_DATETIME_REGEX.match(v):
+	elif ISO8601_DATETIME_REGEX.match(v):
 		return datetime.datetime.strptime(v, ISO8601_DATETIME_FORMAT)
 
 	# Sonador formatted date/time

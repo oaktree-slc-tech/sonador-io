@@ -149,11 +149,30 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 
 
 def imageserver_upload_archive(iserver, archive, tpool=None, threads=4, verify=False, 
-		dcm_extensions=DCM_EXTENSIONS_DEFAULT, ignore_errors=False):
+		dcm_extensions=DCM_EXTENSIONS_DEFAULT, ignore_errors=False, 
+		callback_preupload=None, callback_postupload=None, callback_onerror=None):
 	'''	Scan the provide archive folder and upload DICOM images to the imaging server.
 
 		@input iserver (SonadorImagingServer instance): Imaging server to which the
 			images should be uploaded.
+		
+		@input callback_preupload (callable): Function  that is invoked
+			immediately prior to uploading a DICOM file to Orthanc. The callback 
+			should accept the following signature:
+			- ifile (file-like object): DICOM data
+			- dcmfile (pydicom.dataset.Dataset): PyDicom dataset object, containing a 
+				dictionary of the DICOM data elements.
+
+			and returns a file-like binary object with the data  to be sent to Sonador.
+
+		@input callback_postupload (callable): Function that is invoked immediately following
+			a DICOM file is sent to Orthanc. The callback should accept the following
+			signature:
+			- uresults (requests.Response): HTTP response which contains the results
+				of the upload and the server response.
+			- ifile (file-like object): DICOM data
+			- dcmfile (pydicom.dataset.Dataset): PyDicom dataset object, containing a
+				dictionarry of the DICOM  data  elements.
 
 		@returns tuple: int, OrderedDict. Returns the count of uploaded files and 
 			an ordered dictionary of image metadata. (Series/study UIDs and descriptions.)
@@ -185,23 +204,43 @@ def imageserver_upload_archive(iserver, archive, tpool=None, threads=4, verify=F
 				ifile = BytesIO(afile.read())
 			
 				# Parse image to ensure that the it is well formed prior to upload, upload to server
-				dcmcache_imgmeta(ifile, hcache)
-				iserver.upload_image(ifile)
+				dcmfile = dcmcache_imgmeta(ifile, hcache)
+
+				# Invoke preupload hook
+				if callable(callback_preupload):
+					ifile = callback_preupload(iname, ifile, dcmfile)
+				
+				# Uplooad file to Orthanc
+				uresults = iserver.upload_image(ifile)
+
+				# Invoke postupload hook
+				if callable(callback_postupload):
+					callback_postupload(uresults, iname, ifile, dcmfile)
 
 			except pydicom.errors.InvalidDicomError as err:
 
+				# Invoke onerror callback
+				if callable(callback_onerror):
+					callback_onerror(err, iname, afile)
+
 				# Log and suppress the error
 				if ignore_errors:
-					logger.warning('Unable to upload file %s, invalid DCM file. Skipping.' % iname)
+					logger.error('Unable to upload file %s, invalid DCM file. Skipping.' % iname)
+					return False
 
 				raise err
 
 			except Exception as err:
 
+				# Invoke onerror callback
+				if callable(callback_onerror):
+					callback_onerror(err, iname, afile)
+
 				# Log and suppress the error
 				if ignore_errors:
-					logger.error('Unable to upload file %s due to an error. Skipping file. Error:\n%s'
-						% (iname, err))
+					logger.error(
+						'Unable to upload file %s due to an error. Skipping file. Error:\n%s' % (iname, err))
+					return False
 
 				raise err
 

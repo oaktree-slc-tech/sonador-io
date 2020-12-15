@@ -16,6 +16,9 @@ DCMHEADER_CLINICAL_TRIAL_SUBJECTID = 'ClinicalTrialSubjectID'
 DCMHEADER_CLINICAL_TRIAL_SPONSOR = 'ClinicalTrialSponsorName'
 
 
+DCM_DATETIME_STRFORMAT = '%Y%m%d%H%M%S.%f'
+
+
 DCM_EXTENSIONS_DEFAULT = ['*.dcm', '*.DCM', '*.DICOM', '*.dicom', 'IM*']
 DCM_MODALITY_MR = 'MR'
 DCM_MODALITIES_MRI = ['MR', 'MRI', 'MR\\SD']
