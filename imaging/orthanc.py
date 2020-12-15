@@ -296,6 +296,10 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		return self._parent
 
 	@property
+	def model_patient(self):
+		return self.parent
+
+	@property
 	def patient_name(self):
 		return self.patientdata.get('PatientName')
 
@@ -377,7 +381,15 @@ class ImagingSeries(ImagingResourceMixin, ImagingResourceParentMixin, ImagingSer
 		if getattr(self, '_parent', None) is None:
 			self._parent = self.pacs.get_study(self.study)
 
-		return self._parent		
+		return self._parent
+
+	@property
+	def model_study(self):
+		return self.parent
+
+	@property
+	def model_patient(self):
+		return self.model_study.parent
 
 	@property
 	def sequence_name(self):
@@ -490,6 +502,18 @@ class DcmInstance(ImagingResourceCoreMixin, ImagingResourceParentMixin, ImagingS
 			self._parent = self.pacs.get_series(self.series)
 
 		return self._parent
+
+	@property
+	def model_series(self):
+		return self.parent
+
+	@property
+	def model_study(self):
+		return self.model_series.parent
+
+	@property
+	def model_patient(self):
+		return self.model_study.parent
 
 	@property
 	def resource_url(self):
