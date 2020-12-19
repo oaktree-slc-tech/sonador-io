@@ -17,6 +17,9 @@ DCMHEADER_CLINICAL_TRIAL_SPONSOR = 'ClinicalTrialSponsorName'
 
 
 DCM_DATETIME_STRFORMAT = '%Y%m%d%H%M%S.%f'
+DCM_DATE_STRFORMAT = '%Y%m%d'
+DCM_TIME_STRFORMAT = '%H%M%S.%f'
+DCM_TIME_STRFORMAT_ALT1 = '%H%M%S'
 
 
 DCM_EXTENSIONS_DEFAULT = ['*.dcm', '*.DCM', '*.DICOM', '*.dicom', 'IM*']

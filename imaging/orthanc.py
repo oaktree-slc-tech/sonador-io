@@ -1,4 +1,4 @@
-import six, requests, json, csv, collections, logging, posixpath, zipfile, pydicom
+import six, requests, json, csv, collections, logging, posixpath, zipfile, pydicom, datetime
 from io import BytesIO
 from abc import ABCMeta, abstractmethod
 from urllib.parse import urlencode
@@ -13,9 +13,10 @@ from client.utils.urls import build_url
 from client.utils.object import pick
 from client.utils.microservices import server_controloperation_json_response, RemotePage
 
-from ..apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES
+from ..apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
+	DCM_DATE_STRFORMAT, DCM_TIME_STRFORMAT
 from ..helpers import request_client_error, fetch_sonador_session_token
-from ..serialization import json_datetime_parser
+from ..serialization import json_datetime_parser, json_str2datetime, dcm_str2time
 from ..remote import SonadorBaseObject, SonadorObjectCollection, fetch_sonador_data_collection
 from ..servers import ImagingServerChildCollection, ImagingServerBaseObject
 
@@ -44,7 +45,7 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 
 		return self._meta
 
-	@property
+	property
 	@abstractmethod
 	def resource_url(self):
 		'''	URL for the imaging resource
@@ -340,8 +341,8 @@ IMAGING_SERIES_OUTPUT_COLUMNS = OrderedDict((
 		('modality', 'Modality'),
 		('sequence_name', 'Name'),
 		('series_number', 'Number'),
-		('series_date', 'Date'),
-		('series_time', 'Time'),
+		('series_datestr', 'Date'),
+		('series_timestr', 'Time'),
 		('series_uid', 'UID'),
 		('body_part', 'Body Part Examined'),
 		('description', 'Description'),
@@ -408,12 +409,55 @@ class ImagingSeries(ImagingResourceMixin, ImagingResourceParentMixin, ImagingSer
 		return self.dicomdata.get('SeriesNumber')
 
 	@property
-	def series_date(self):
+	def series_datestr(self):
+		'''	DICOM string representation of when the series was acquired. (Created from the SeriesDate header.)
+		'''
 		return self.dicomdata.get('SeriesDate')
 
 	@property
-	def series_time(self):
+	def series_date(self):
+		'''	Date that the series was acquired. (Parsed from series_datestr.)
+		'''
+		if getattr(self, '_sdate', None) is None:
+			if self.series_datestr:
+				self._sdate = datetime.datetime.strptime(self.series_datestr, DCM_DATE_STRFORMAT).date()
+			else: self._sdate = None
+
+		return self._sdate
+
+	@property
+	def series_timestr(self):
+		'''	DICOM string representation of when the series was acquired. (Created from the SeriesTime header.)
+		'''
 		return self.dicomdata.get('SeriesTime')
+
+	@property
+	def series_time(self):
+		'''	Time that the series was acquired. (Parsed from series_timestr.)
+
+			@returns datetime.time
+		'''
+		if getattr(self, '_stime', None) is None:
+			if self.series_timestr:
+				self._stime = dcm_str2time(self.series_timestr)
+			else: self._stime = None
+	
+		return self._stime
+
+	@property
+	def ts(self):
+		'''	Date/time that the series was acquired. (Created from series_date and series_time properties.)
+		'''
+		if getattr(self, '_ts', None) is None:
+
+			# Create timestamp by grouping series date and series time
+			if self.series_date and self.series_time:
+				self._ts = datetime.datetime.combine(self.series_date, self.series_time)
+			
+			# Unable to create timestamp, set to None
+			else: self._ts = None
+
+		return self._ts
 
 	@property
 	def series_uid(self):

@@ -1,4 +1,5 @@
-import six, os, logging, traceback, argparse, datetime, requests
+import six, os, logging, traceback, argparse, datetime, requests, shutil
+from collections import namedtuple
 from six.moves.urllib import parse as urlparse
 
 from client import apisettings as gcapicodes
@@ -218,3 +219,60 @@ def argparse_datetime_type(arg_datestr, datetime_format='%Y-%m-%d %H:%M:%S'):
 	try: return datetime.datetime.strptime(arg_datestr, datetime_format)
 	except ValueError as err:
 		raise argparse.ArgumentTypeError('Invalid date: %s. Expected format: %s.' % (arg_datestr, datetime_format))
+
+
+# DCM Series Utilities
+
+DCMFileIndex = namedtuple('DCMFileIndex', ('filename', 'prefix', 'number'))
+DCMIMAGE_RE = re.compile(r'^(?P<prefix>[A-Za-z]+)(?P<number>\d+)$')
+
+
+def dcmimage_index(fname, pattern=DCMIMAGE_RE):
+	'''	Split the provided file name into the file prefix and file index.
+
+		@input fname: File name from which to extract the file prefix
+			and the index number.
+		
+		@returns DCMFileIndex instance (or None) if a match can't be made
+	'''
+	fmatch = pattern.match(fname)
+	if fmatch:
+		return DCMFileIndex(fname, fmatch.group('prefix'), int(fmatch.group('number')))
+
+	return None
+
+
+def reindex_dcm_images(dcmimage_dir, index_start=1, tmp_prefix='tmp'):
+	'''	Scan the images in the provided directory, order them by their index number
+		and re-index the filenames to start at the provided start index.
+
+		@input dcmimage_dir (str): Directory in which all image indexes should be shifted.
+	'''
+	# Create a sorted list of the filenames
+	dcmimg_list = sorted(
+		filter(lambda v: v is not None, map(dcmimage_index, os.listdir(dcmimage_dir))),
+		key=lambda v: v.number)
+
+	# Create a temporary subfolder to prevent name collisions when moving files
+	tmp = os.path.join(dcmimage_dir, tmp_prefix)
+	if not os.path.exists(tmp):
+		os.makedirs(tmp, exist_ok=True)
+
+	# Shift the index of all files in the directory
+	for dcm_index in dcmimg_list:
+
+		# Source image path
+		spath = os.path.join(dcmimage_dir, dcm_index.filename)
+		if os.path.exists(spath):
+
+			# Move to tmp directory
+			dpath = os.path.join(tmp, '%s%s' % (dcm_index.prefix, dcm_index.number+index_start))
+			shutil.move(spath, dpath)
+
+	# Move images from tmp directory to working directory
+	for fname in os.listdir(tmp):
+		shutil.move(os.path.join(tmp, fname), os.path.join(dcmimage_dir, fname))
+
+	# Remove tmp
+	os.rmdir(tmp)
+	

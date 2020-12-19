@@ -73,6 +73,24 @@ def dcmcache_scanfiles(ifilelist, hcache=None, study_meta=True, series_meta=True
 	return hcache
 
 
+def dcm_findfiles(filelist, dcmfiles=None, dcm_extensions=DCM_EXTENSIONS_DEFAULT):
+	'''	Scan the provided file list and retrieve all patterns that match the DCM extions.
+
+		@input filelist (iterable): Iterable of file paths
+		@input dcmfiles (previously existing list of files, default=new list): List to 
+			which the files should be added.
+		@input dcm_extensions (iterable of file patterns): File patterns
+			that should be used to find and match potential DICOMs
+	'''
+	if dcmfiles is None:
+		dcmfiles = []
+
+	for ext in dcm_extensions:
+		dcmfiles.extend(fnmatch.filter(filelist, ext))
+
+	return dcmfiles
+
+
 def imageserver_upload_folder(iserver, folders, tpool=None, threads=4, 
 		verify=False, fileupload_check=False, dcm_extensions=DCM_EXTENSIONS_DEFAULT):
 	'''	Scan folders and upload all DICOM images to the provided imaging servers
@@ -100,9 +118,7 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 		for croot, cfolders, cfiles in os.walk(froot):
 
 			# Find all DICOM files and variations inside of the directory
-			dcmfiles = []
-			for ext in dcm_extensions:
-				dcmfiles.extend(fnmatch.filter(cfiles, ext))
+			dcmfiles = dcm_findfiles(cfiles, dcm_extensions=dcm_extensions)
 
 			# Check to see if files have previously been uploaded: create a cache of series UIDs of files
 			# in the folder, then query the Orthanc instance to for which series already exist.
@@ -181,15 +197,10 @@ def imageserver_upload_archive(iserver, archive, tpool=None, threads=4, verify=F
 	tpool = tpool or ThreadPoolExecutor(max_workers=threads)
 
 	# Create regular expressions from the DCM extensions patterns
-	dcm_fpatterns = [re.compile(fnmatch.translate(p)) for p in DCM_EXTENSIONS_DEFAULT]
+	dcm_fpatterns = [re.compile(fnmatch.translate(p)) for p in dcm_extensions]
 
 	# Locate all DCM files included in the archive
-	dcmfiles = []
-
-	# List files from the zip archive, check file pattern and add matching patterns
-	fnames = archive.namelist()
-	for p in dcm_fpatterns:
-		dcmfiles.extend([f for f in fnames if p.search(f)])
+	dcmfiles = dcm_findfiles(archive.namelist(), dcm_extensions=dcm_extensions)
 
 	# Cache of image metadata
 	hcache = OrderedDict()
