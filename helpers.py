@@ -1,4 +1,4 @@
-import six, os, logging, traceback, argparse, datetime, requests, shutil
+import six, os, logging, re, traceback, argparse, datetime, requests, shutil
 from collections import namedtuple
 from six.moves.urllib import parse as urlparse
 
