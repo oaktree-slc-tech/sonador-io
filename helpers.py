@@ -1,6 +1,7 @@
 import six, os, logging, re, traceback, argparse, datetime, requests, shutil
 from collections import namedtuple
 from six.moves.urllib import parse as urlparse
+import pydicom
 
 from client import apisettings as gcapicodes
 from client import auth as guru_auth
@@ -221,9 +222,10 @@ def argparse_datetime_type(arg_datestr, datetime_format='%Y-%m-%d %H:%M:%S'):
 		raise argparse.ArgumentTypeError('Invalid date: %s. Expected format: %s.' % (arg_datestr, datetime_format))
 
 
-# DCM Series Utilities
+# DCM Series Utilities: Provides methos to re-order/re-number images on the local disk.
 
 DCMFileIndex = namedtuple('DCMFileIndex', ('filename', 'prefix', 'number'))
+DCMSliceLocation = namedtuple('DCMSliceLocation', ('filename', 'instance', 'number', 'location', 'prefix', 'filenum'))
 DCMIMAGE_RE = re.compile(r'^(?P<prefix>[A-Za-z]+)(?P<number>\d+)$')
 
 
@@ -242,31 +244,47 @@ def dcmimage_index(fname, pattern=DCMIMAGE_RE):
 	return None
 
 
-def reindex_dcm_images(dcmimage_dir, index_start=1, tmp_prefix='tmp'):
+def dcmimage_slicelocation(fpath, pattern=DCMIMAGE_RE):
+	'''	Load the provided file and retrieve the slice location, instance number, file prefix, 
+		and number in the file name.
+
+		@input fpath (str): full path to the file
+	'''
+	# Split to folder and file name, determine if the file matches the expected DICOM pattern
+	dcm_folder, fname = os.path.split(fpath)
+	fmatch = pattern.match(fname)
+	
+	# Load the file and retrieve the instance number, slice location, file prefix, and file number
+	if fmatch:	
+		dcm = pydicom.dcmread(fpath)
+		if hasattr(dcm, 'SliceLocation'):
+			return DCMSliceLocation(fname, dcm, int(dcm.InstanceNumber), float(dcm.SliceLocation),
+				fmatch.group('prefix'), int(fmatch.group('number')))
+
+	return None
+
+
+def reindex_dcm_images(dcmimage_dir, dcmimg_list, index_start=0, tmp_prefix='tmp'):
 	'''	Scan the images in the provided directory, order them by their index number
 		and re-index the filenames to start at the provided start index.
 
 		@input dcmimage_dir (str): Directory in which all image indexes should be shifted.
 	'''
-	# Create a sorted list of the filenames
-	dcmimg_list = sorted(
-		filter(lambda v: v is not None, map(dcmimage_index, os.listdir(dcmimage_dir))),
-		key=lambda v: v.number)
-
 	# Create a temporary subfolder to prevent name collisions when moving files
 	tmp = os.path.join(dcmimage_dir, tmp_prefix)
 	if not os.path.exists(tmp):
 		os.makedirs(tmp, exist_ok=True)
 
 	# Shift the index of all files in the directory
-	for dcm_index in dcmimg_list:
+	for i, j in enumerate(range(index_start, len(dcmimg_list)+index_start)):
+		dcm_index = dcmimg_list[i]
 
 		# Source image path
 		spath = os.path.join(dcmimage_dir, dcm_index.filename)
 		if os.path.exists(spath):
 
 			# Move to tmp directory
-			dpath = os.path.join(tmp, '%s%s' % (dcm_index.prefix, dcm_index.number+index_start))
+			dpath = os.path.join(tmp, '%s%s' % (dcm_index.prefix, j))
 			shutil.move(spath, dpath)
 
 	# Move images from tmp directory to working directory
@@ -275,4 +293,44 @@ def reindex_dcm_images(dcmimage_dir, index_start=1, tmp_prefix='tmp'):
 
 	# Remove tmp
 	os.rmdir(tmp)
+
+
+def filesort_fileindex(dcmimage_dir, indexfn=dcmimage_index):
+	'''	Returns a sorted list of file index objects sorted by their file number.
+		The file number is parsed from the image name and may differ from the instance number.
+	'''
+	# Create a sorted list of the filenames
+	return sorted(
+		filter(lambda v: v is not None, map(indexfn, os.listdir(dcmimage_dir))),
+		key=lambda v: v.number)
+
+
+def filesort_slicelocation(dcmimage_dir, indexfn=dcmimage_slicelocation):
+	'''	Returns a list of file index objects sorted by their slice location.
+	'''
+	return sorted(
+		filter(lambda v: v is not None, map(indexfn, [os.path.join(dcmimage_dir, fname) for fname in os.listdir(dcmimage_dir)])),
+		key=lambda v: v.location, reverse=True)
+
+
+def reindex_fileindex_shift(dcmimage_dir, index_start=0, tmp_prefix='tmp', indexfn=dcmimage_index):
+	'''	Scan the images in the provided directory, order them by their file number (which is used
+		as the image index). Re-index the filenames to start at the provided start index.
+
+		@input dcmimage_dir (str): Directory in which all image indexes should be shifted
+	'''
+	dcm_list = filesort_fileindex(dcmimage_dir, indexfn=indexfn)
+
+	# Re-index/re-order the images
+	reindex_dcm_images(dcmimage_dir, dcmimg_list, index_start=index_start, tmp_prefix=tmp_prefix)
 	
+
+def reindex_slicelocation(dcmimage_dir, index_start=0, tmp_prefix='tmp', indexfn=dcmimage_slicelocation):
+	'''	Scan the images in the provided directory, order them by the value of their 
+	'''
+	# Create a sorted list of the filenames
+	dcmimg_list = filesort_slicelocation(dcmimage_dir, indexfn=indexfn)
+
+	# Re-index/re-order the images
+	reindex_dcm_images(dcmimage_dir, dcmimg_list, index_start=index_start, tmp_prefix=tmp_prefix)
+
