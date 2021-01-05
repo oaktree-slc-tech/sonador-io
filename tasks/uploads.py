@@ -73,6 +73,24 @@ def dcmcache_scanfiles(ifilelist, hcache=None, study_meta=True, series_meta=True
 	return hcache
 
 
+def dcm_findfiles(filelist, dcmfiles=None, dcm_extensions=DCM_EXTENSIONS_DEFAULT):
+	'''	Scan the provided file list and retrieve all patterns that match the DCM extions.
+
+		@input filelist (iterable): Iterable of file paths
+		@input dcmfiles (previously existing list of files, default=new list): List to 
+			which the files should be added.
+		@input dcm_extensions (iterable of file patterns): File patterns
+			that should be used to find and match potential DICOMs
+	'''
+	if dcmfiles is None:
+		dcmfiles = []
+
+	for ext in dcm_extensions:
+		dcmfiles.extend(fnmatch.filter(filelist, ext))
+
+	return dcmfiles
+
+
 def imageserver_upload_folder(iserver, folders, tpool=None, threads=4, 
 		verify=False, fileupload_check=False, dcm_extensions=DCM_EXTENSIONS_DEFAULT):
 	'''	Scan folders and upload all DICOM images to the provided imaging servers
@@ -100,9 +118,7 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 		for croot, cfolders, cfiles in os.walk(froot):
 
 			# Find all DICOM files and variations inside of the directory
-			dcmfiles = []
-			for ext in dcm_extensions:
-				dcmfiles.extend(fnmatch.filter(cfiles, ext))
+			dcmfiles = dcm_findfiles(cfiles, dcm_extensions=dcm_extensions)
 
 			# Check to see if files have previously been uploaded: create a cache of series UIDs of files
 			# in the folder, then query the Orthanc instance to for which series already exist.
@@ -149,11 +165,30 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 
 
 def imageserver_upload_archive(iserver, archive, tpool=None, threads=4, verify=False, 
-		dcm_extensions=DCM_EXTENSIONS_DEFAULT, ignore_errors=False):
+		dcm_extensions=DCM_EXTENSIONS_DEFAULT, ignore_errors=False, 
+		callback_preupload=None, callback_postupload=None, callback_onerror=None):
 	'''	Scan the provide archive folder and upload DICOM images to the imaging server.
 
 		@input iserver (SonadorImagingServer instance): Imaging server to which the
 			images should be uploaded.
+		
+		@input callback_preupload (callable): Function  that is invoked
+			immediately prior to uploading a DICOM file to Orthanc. The callback 
+			should accept the following signature:
+			- ifile (file-like object): DICOM data
+			- dcmfile (pydicom.dataset.Dataset): PyDicom dataset object, containing a 
+				dictionary of the DICOM data elements.
+
+			and returns a file-like binary object with the data  to be sent to Sonador.
+
+		@input callback_postupload (callable): Function that is invoked immediately following
+			a DICOM file is sent to Orthanc. The callback should accept the following
+			signature:
+			- uresults (requests.Response): HTTP response which contains the results
+				of the upload and the server response.
+			- ifile (file-like object): DICOM data
+			- dcmfile (pydicom.dataset.Dataset): PyDicom dataset object, containing a
+				dictionarry of the DICOM  data  elements.
 
 		@returns tuple: int, OrderedDict. Returns the count of uploaded files and 
 			an ordered dictionary of image metadata. (Series/study UIDs and descriptions.)
@@ -162,15 +197,10 @@ def imageserver_upload_archive(iserver, archive, tpool=None, threads=4, verify=F
 	tpool = tpool or ThreadPoolExecutor(max_workers=threads)
 
 	# Create regular expressions from the DCM extensions patterns
-	dcm_fpatterns = [re.compile(fnmatch.translate(p)) for p in DCM_EXTENSIONS_DEFAULT]
+	dcm_fpatterns = [re.compile(fnmatch.translate(p)) for p in dcm_extensions]
 
 	# Locate all DCM files included in the archive
-	dcmfiles = []
-
-	# List files from the zip archive, check file pattern and add matching patterns
-	fnames = archive.namelist()
-	for p in dcm_fpatterns:
-		dcmfiles.extend([f for f in fnames if p.search(f)])
+	dcmfiles = dcm_findfiles(archive.namelist(), dcm_extensions=dcm_extensions)
 
 	# Cache of image metadata
 	hcache = OrderedDict()
@@ -185,23 +215,43 @@ def imageserver_upload_archive(iserver, archive, tpool=None, threads=4, verify=F
 				ifile = BytesIO(afile.read())
 			
 				# Parse image to ensure that the it is well formed prior to upload, upload to server
-				dcmcache_imgmeta(ifile, hcache)
-				iserver.upload_image(ifile)
+				dcmfile = dcmcache_imgmeta(ifile, hcache)
+
+				# Invoke preupload hook
+				if callable(callback_preupload):
+					ifile = callback_preupload(iname, ifile, dcmfile)
+				
+				# Uplooad file to Orthanc
+				uresults = iserver.upload_image(ifile)
+
+				# Invoke postupload hook
+				if callable(callback_postupload):
+					callback_postupload(uresults, iname, ifile, dcmfile)
 
 			except pydicom.errors.InvalidDicomError as err:
 
+				# Invoke onerror callback
+				if callable(callback_onerror):
+					callback_onerror(err, iname, afile)
+
 				# Log and suppress the error
 				if ignore_errors:
-					logger.warning('Unable to upload file %s, invalid DCM file. Skipping.' % iname)
+					logger.error('Unable to upload file %s, invalid DCM file. Skipping.' % iname)
+					return False
 
 				raise err
 
 			except Exception as err:
 
+				# Invoke onerror callback
+				if callable(callback_onerror):
+					callback_onerror(err, iname, afile)
+
 				# Log and suppress the error
 				if ignore_errors:
-					logger.error('Unable to upload file %s due to an error. Skipping file. Error:\n%s'
-						% (iname, err))
+					logger.error(
+						'Unable to upload file %s due to an error. Skipping file. Error:\n%s' % (iname, err))
+					return False
 
 				raise err
 
