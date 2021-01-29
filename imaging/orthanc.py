@@ -726,5 +726,5 @@ class DcmInstanceCollection(ImagingServerChildCollection):
 		# by their index
 		return sorted(
 			super(DcmInstanceCollection, self)._init_collection_models(**kwargs),
-			key=lambda i: i.series_index)
+			key=lambda i: i.series_index or 0)
 
