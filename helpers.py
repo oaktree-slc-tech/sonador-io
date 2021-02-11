@@ -1,7 +1,11 @@
-import six, os, logging, re, traceback, argparse, datetime, requests, shutil
+import six, os, logging, re, traceback, argparse, datetime, requests, shutil, tempfile
+from PIL import Image
 from collections import namedtuple
 from six.moves.urllib import parse as urlparse
 import pydicom
+from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
+
+import numpy as np
 
 from client import apisettings as gcapicodes
 from client import auth as guru_auth
@@ -39,12 +43,12 @@ def fetch_sonador_session_token(sonador_server, verify=False, credentials_endpoi
 	return r.json()
 
 
-def initenv_sonador_server(sonador_url=os.environ.get(SONADOR_URL), 
+def initenv_sonador_server(sonador_url=os.environ.get(SONADOR_URL),
 		access_id=os.environ.get(SONADOR_ACCESS_ID), secret_key=os.environ.get(SONADOR_SECRET_KEY),
 		apitoken=os.environ.get(SONADOR_APITOKEN), internal_dns=str2bool(os.environ.get(SONADOR_INTERNAL_DNS)),
 		**kwargs):
 	''' Initialize Sonador Server connection. The method reads the standard Sonador environment
-		variables for default arguments. If the environment variable is not defined, the default 
+		variables for default arguments. If the environment variable is not defined, the default
 		for the argument will be None.
 	'''
 	return SonadorServer(sonador_url, access_id=access_id, secret_key=secret_key, apitoken=apitoken,
@@ -71,7 +75,7 @@ class SonadorServer(object):
 		# Credentials
 		self.access_id = access_id
 		self.secret_key = secret_key
-		
+
 		# Auth: API token and token type
 		self.sonador_authdata = None
 		self._apitoken = apitoken
@@ -138,14 +142,14 @@ class SonadorServer(object):
 
 			@input uid (str): Sonador UID/pk for the imaging server.
 			@input verify (bool, default=server default): Toggles whether SSL certificates
-				should be validated as part of the request. If no value is passed, 
+				should be validated as part of the request. If no value is passed,
 				the default setting included in the Sonder server will be used.
 		'''
 		if imageserver_datamodel_class is None:
 			from .servers import SonadorImagingServer
 			imageserver_datamodel_class = SonadorImagingServer
 		from .remote import fetch_sonador_dataobject
-		
+
 		if verify is None:
 			verify = self.verify
 
@@ -154,7 +158,7 @@ class SonadorServer(object):
 
 def request_client_error(msg, r, rdata=None, exception_class=ClientOperationError):
 	'''	Raise a ClientOperationError if the provided request was not completed successfully
-		
+
 		@input msg (str): Message which should be associated with the error
 		@input r (requests.Response): Response object
 		@input exception_class (Exception, default=ClientOperationError): Exception class
@@ -178,9 +182,9 @@ def request_client_error(msg, r, rdata=None, exception_class=ClientOperationErro
 		edetails[gcapicodes.ERRORS] = rdata.get(gcapicodes.ERRORS)
 
 	raise exception_class(msg, http_code=r.status_code, details=edetails)
-	
 
-def report_operation_error(err, error_traceback=None, 
+
+def report_operation_error(err, error_traceback=None,
 		user_message_template='Unable to execute operation due to an error:\n%s'):
 	'''	Log operation error
 
@@ -234,7 +238,7 @@ def dcmimage_index(fname, pattern=DCMIMAGE_RE):
 
 		@input fname: File name from which to extract the file prefix
 			and the index number.
-		
+
 		@returns DCMFileIndex instance (or None) if a match can't be made
 	'''
 	fmatch = pattern.match(fname)
@@ -245,7 +249,7 @@ def dcmimage_index(fname, pattern=DCMIMAGE_RE):
 
 
 def dcmimage_slicelocation(fpath, pattern=DCMIMAGE_RE):
-	'''	Load the provided file and retrieve the slice location, instance number, file prefix, 
+	'''	Load the provided file and retrieve the slice location, instance number, file prefix,
 		and number in the file name.
 
 		@input fpath (str): full path to the file
@@ -253,9 +257,9 @@ def dcmimage_slicelocation(fpath, pattern=DCMIMAGE_RE):
 	# Split to folder and file name, determine if the file matches the expected DICOM pattern
 	dcm_folder, fname = os.path.split(fpath)
 	fmatch = pattern.match(fname)
-	
+
 	# Load the file and retrieve the instance number, slice location, file prefix, and file number
-	if fmatch:	
+	if fmatch:
 		dcm = pydicom.dcmread(fpath)
 		if hasattr(dcm, 'SliceLocation'):
 			return DCMSliceLocation(fname, dcm, int(dcm.InstanceNumber), float(dcm.SliceLocation),
@@ -323,10 +327,10 @@ def reindex_fileindex_shift(dcmimage_dir, index_start=0, tmp_prefix='tmp', index
 
 	# Re-index/re-order the images
 	reindex_dcm_images(dcmimage_dir, dcmimg_list, index_start=index_start, tmp_prefix=tmp_prefix)
-	
+
 
 def reindex_slicelocation(dcmimage_dir, index_start=0, tmp_prefix='tmp', indexfn=dcmimage_slicelocation):
-	'''	Scan the images in the provided directory, order them by the value of their 
+	'''	Scan the images in the provided directory, order them by the value of their
 	'''
 	# Create a sorted list of the filenames
 	dcmimg_list = filesort_slicelocation(dcmimage_dir, indexfn=indexfn)
@@ -334,3 +338,92 @@ def reindex_slicelocation(dcmimage_dir, index_start=0, tmp_prefix='tmp', indexfn
 	# Re-index/re-order the images
 	reindex_dcm_images(dcmimage_dir, dcmimg_list, index_start=index_start, tmp_prefix=tmp_prefix)
 
+
+def convert_to_dicom(image_filename, meta_headers=None, data_elements=None,
+					 transfer_syntax_uid=pydicom.uid.ExplicitVRBigEndian, is_little_endian=True,
+					 is_implicit_VR = True, dtype=np.uint8, image_photometric_interpretation="MONOCHROME1",
+					 image_samples_per_pixel=1, image_pixel_representation=0):
+
+	''' Conerts *.jpg, *.png andother formats images to the dicom format.
+	Add meta headers and returns dicom image.
+
+	:param image_filename (str): path to image file which should be convertedd
+	:param meta_headers (dict): meta headers of the dicom image. MediaStorageSOPClassUID, MediaStorageSOPInstanceUID,
+								ImplementationClassUID, etc.
+	:param: data_elements (dict): meta header of the dicom image. Includes PatientID, PatientName, etc.
+	:param: transfer_syntax_uid (pydicom.uid): Transfer syntax of the image
+	:param: is_little_endian (boolean): The Dataset (excluding the pixel data) will be written using
+											the given endianess.
+	:param: is_implicit_VR (boolean): The Dataset will be written using the transfer syntax with the given
+												VR handling
+
+	:return: dicom image
+	'''
+	if meta_headers and not isinstance(meta_headers, dict):
+		raise TypeError('Unable to convert image, meta_headers must be submitted as a dictionary')
+
+	if data_elements and not isinstance(data_elements, dict):
+		raise TypeError('Unable to convert image, data_elements must be submitted as a dictionary')
+
+	try:
+		image = Image.open(image_filename)
+	except IOError:
+		raise TypeError("Unable to convert image, file doesn't exist, or the image format is incorrect")
+
+	if not image.verify():
+		raise TypeError("Unable to convert image, file doesn't exist, or the image format is incorrect")
+
+	if not isinstance(dtype, np.uint8) or not isinstance(np.uint16) \
+		or not isinstance(dtype, np.uint32):
+		raise TypeError("Unable to convert image, dtype should be one of the folowing " +
+						"formats: np.uint8, np.uint16, np.uint32")
+
+	# Create some temporary filenames
+	suffix = '.dcm'
+	dicom_filename = tempfile.NamedTemporaryFile(suffix=suffix).name
+
+	file_meta = FileMetaDataset()
+
+	if meta_headers:
+		for header, header_value in meta_headers.items():
+			setattr(file_meta, header, header_value)
+
+	# Create the FileDataset instance (initially no data elements, but file_meta
+	# supplied)
+	ds = FileDataset(dicom_filename, {},
+					 file_meta=file_meta, preamble=b"\0" * 128)
+
+
+	if data_elements:
+		for header, header_value in data_elements.items():
+			setattr(ds, header, header_value)
+
+	ds.file_meta.TransferSyntaxUID = transfer_syntax_uid
+	ds.is_little_endian = is_little_endian
+	ds.is_implicit_VR = is_implicit_VR
+
+	np_frame = np.array(image.getdata(), dtype=np.uint8)
+	ds.Rows = image.height
+	ds.Columns = image.width
+	ds.PhotometricInterpretation = image_photometric_interpretation
+
+	if dtype == np.uint8:
+		ds.BitsStored = 8
+		ds.BitsAllocated = 8
+		ds.HighBit = 7
+
+	if dtype == np.uint16:
+		ds.BitsStored = 16
+		ds.BitsAllocated = 16
+		ds.HighBit = 15
+
+	if dtype == np.uint32:
+		ds.BitsStored = 32
+		ds.BitsAllocated = 32
+		ds.HighBit = 31
+
+	ds.SamplesPerPixel = image_samples_per_pixel
+	ds.PixelRepresentation = image_pixel_representation
+	ds.PixelData = np_frame.tobytes()
+
+	return ds
