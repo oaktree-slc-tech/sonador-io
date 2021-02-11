@@ -339,18 +339,16 @@ def reindex_slicelocation(dcmimage_dir, index_start=0, tmp_prefix='tmp', indexfn
 	reindex_dcm_images(dcmimage_dir, dcmimg_list, index_start=index_start, tmp_prefix=tmp_prefix)
 
 
-def convert_to_dicom(image_filename, meta_headers=None, data_elements=None,
-					 transfer_syntax_uid=pydicom.uid.ExplicitVRBigEndian, is_little_endian=True,
-					 is_implicit_VR = True, dtype=np.uint8, image_photometric_interpretation="MONOCHROME1",
-					 image_samples_per_pixel=1, image_pixel_representation=0):
+def convert_to_dicom(image_filename, meta_headers=None, transfer_syntax_uid=pydicom.uid.ExplicitVRBigEndian,
+					 is_little_endian=True, is_implicit_VR = True, dtype=np.uint8,
+					 image_photometric_interpretation="MONOCHROME1", image_samples_per_pixel=1,
+					 image_pixel_representation=0):
 
 	''' Conerts *.jpg, *.png andother formats images to the dicom format.
 	Add meta headers and returns dicom image.
 
 	:param image_filename (str): path to image file which should be convertedd
-	:param meta_headers (dict): meta headers of the dicom image. MediaStorageSOPClassUID, MediaStorageSOPInstanceUID,
-								ImplementationClassUID, etc.
-	:param: data_elements (dict): meta header of the dicom image. Includes PatientID, PatientName, etc.
+	:param meta_headers (dict): meta headers of the dicom image.
 	:param: transfer_syntax_uid (pydicom.uid): Transfer syntax of the image
 	:param: is_little_endian (boolean): The Dataset (excluding the pixel data) will be written using
 											the given endianess.
@@ -361,9 +359,6 @@ def convert_to_dicom(image_filename, meta_headers=None, data_elements=None,
 	'''
 	if meta_headers and not isinstance(meta_headers, dict):
 		raise TypeError('Unable to convert image, meta_headers must be submitted as a dictionary')
-
-	if data_elements and not isinstance(data_elements, dict):
-		raise TypeError('Unable to convert image, data_elements must be submitted as a dictionary')
 
 	try:
 		image = Image.open(image_filename)
@@ -384,18 +379,14 @@ def convert_to_dicom(image_filename, meta_headers=None, data_elements=None,
 
 	file_meta = FileMetaDataset()
 
-	if meta_headers:
-		for header, header_value in meta_headers.items():
-			setattr(file_meta, header, header_value)
-
 	# Create the FileDataset instance (initially no data elements, but file_meta
 	# supplied)
 	ds = FileDataset(dicom_filename, {},
 					 file_meta=file_meta, preamble=b"\0" * 128)
 
-
-	if data_elements:
-		for header, header_value in data_elements.items():
+	# Adding meta headers to dicom image
+	if meta_headers:
+		for header, header_value in meta_headers.items():
 			setattr(ds, header, header_value)
 
 	ds.file_meta.TransferSyntaxUID = transfer_syntax_uid

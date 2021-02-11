@@ -3,13 +3,17 @@ from collections import OrderedDict, namedtuple
 from io import BytesIO
 from pydicom.dataset import FileDataset as DCMFileDataset
 
+import pandas as pd
+
 from concurrent.futures import ThreadPoolExecutor
 
 from ..apisettings import DCM_EXTENSIONS_DEFAULT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
-	DCMHEADER_STUDY_INSTANCE_UID, DCMHEADER_STUDY_DESCRIPTION, DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SERIES_DESCRIPTION
+	DCMHEADER_STUDY_INSTANCE_UID, DCMHEADER_STUDY_DESCRIPTION, DCMHEADER_SERIES_INSTANCE_UID, \
+	DCMHEADER_SERIES_DESCRIPTION, UPLOAD_CSV_DATASET_FILENAME
 from ..remote import sonador_datacollection_list, sonador_dataobject_details, sonador_dataobject_schema_display, \
 	fetch_sonador_dataobject
 from ..servers import SonadorImagingServerCollection, DicomImagingModalityCollection
+from ..helpers import convert_to_dicom
 
 logger = logging.getLogger(__name__)
 
@@ -259,3 +263,54 @@ def imageserver_upload_archive(iserver, archive, tpool=None, threads=4, verify=F
 
 	fcount = sum(tpool.map(upload_archiveimage, dcmfiles))
 	return hcache, fcount
+
+
+def upload_csv_dataset(iserver, csv_file, tpool=None, threads=4, verify=False, ignore_errors=False,
+	   	fileupload_check=False, callback_preupload=None, callback_postupload=None, callback_onerror=None):
+	# Create thread pool
+	tpool = tpool or ThreadPoolExecutor(max_workers=threads)
+
+	# Create cache of previously uploaded files to check upload status
+	# before re-transmitting
+	previously_uploaded = OrderedDict()
+
+	# Reading csv file with headers and path to the images
+	df = pd.read_csv(csv_file)
+
+	# Check if required headers exist. (FileName, StudyInstanceUID, SeriesInstanceUID)
+    # if doesn't rise exception
+	if not UPLOAD_CSV_DATASET_FILENAME not in df or not DCMHEADER_STUDY_INSTANCE_UID in df \
+		or not DCMHEADER_SERIES_INSTANCE_UID in df:
+		raise ValueError(f"Unable to upload csv dataset, missing required headers: " +
+		 	f"{UPLOAD_CSV_DATASET_FILENAME}, {DCMHEADER_STUDY_INSTANCE_UID}, {DCMHEADER_SERIES_INSTANCE_UID}")
+
+	# Check to see if files have previously been uploaded: create a cache of series UIDs of files
+	# in the folder, then query the Orthanc instance to for which series already exist.
+	if fileupload_check:
+		fseries_meta = set(uid for uid in df.groupby(DCMHEADER_SERIES_INSTANCE_UID)[DCMHEADER_SERIES_INSTANCE_UID]
+						   if len(iserver.query_series({DCMHEADER_SERIES_INSTANCE_UID: uid})))
+
+	count_uploaded_images = 0
+	if df.shape[0]:
+		logger.debug(f'Found {df.shape[0]} files, begin convertation to the DICOM format')
+
+		# Walking through csv file and converting image to DICOM fortmat with headers
+		for index, row in df.iterrows():
+			# Check if image already exists on the server
+			if row[DCMHEADER_SERIES_INSTANCE_UID] in fseries_meta:
+				logging.info(f'Image {row[UPLOAD_CSV_DATASET_FILENAME]} (series {DCMHEADER_SERIES_INSTANCE_UID}) ' +
+							 f'already available on server {iserver.server_label}.')
+			else:
+				# Convert image to the DICOM format
+				filename_ =row[UPLOAD_CSV_DATASET_FILENAME]
+				dcmfile = convert_to_dicom(filename_,
+			   		meta_headers=row.drop([UPLOAD_CSV_DATASET_FILENAME]).to_dict())
+				# Upload image to PACS imaging server
+				r = iserver.upload_image(dcmfile)
+				if r.ok:
+					count_uploaded_images += 1
+				else:
+					logging.info(f"Image {filename_} wasn't uploaded to the server due error")
+
+	if count_uploaded_images:
+		logger.info(f'Transfer results ({count_uploaded_images}): images uploaded successfully')
