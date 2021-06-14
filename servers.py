@@ -10,7 +10,8 @@ from client.utils.object import pick, omit
 from client.utils.microservices import server_controloperation_json_response, RemotePage
 
 from .apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, \
-	IMAGING_SERVER_RESOURCE_SERIES, IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_RESOURCE_SUPPORTED
+	IMAGING_SERVER_RESOURCE_SERIES, IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_RESOURCE_SUPPORTED, \
+	DCMHEADER_MODALITY, DCM_MODALITY_SR, DCM_MODALITY_SEG
 from .serialization import json_datetime_parser
 from .helpers import request_client_error, fetch_sonador_session_token
 from .remote import SonadorBaseObject, SonadorObjectCollection, \
@@ -197,8 +198,8 @@ class SonadorImagingServer(SonadorBaseObject):
 		from .imaging.orthanc import DcmInstance
 		return self.get_imaging_resource(rid, DcmInstance, headers=headers, **kwargs)
 
-	def query(self, sfilter, expand=True, resource=IMAGING_SERVER_RESOURCE_SERIES, 
-			limit=None, offset=None, query=None, headers=None, verify=None, **kwargs):
+	def query(self, sfilter, expand=True,limit=None, offset=None, query=None, headers=None, verify=None, 
+			resource=IMAGING_SERVER_RESOURCE_SERIES, resource_modelcollection_class=None, **kwargs):
 		'''	Submit a query to Orthanc with the provided filter terms
 
 			@input sfilter (dict): Terms to be included in the request
@@ -221,6 +222,10 @@ class SonadorImagingServer(SonadorBaseObject):
 			raise TypeError('Unable to execute query, terms must be submitted as a dictionary')
 		if not resource in IMAGING_SERVER_RESOURCE_SUPPORTED:
 			raise ValueError('Unable to execute query, invalid resource type: %s' % resource)
+
+		# Retrieve resource model class
+		if resource_modelcollection_class is None:
+			resource_modelcollection_class = IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES.get(resource)
 
 		if verify is None:
 			verify = self.server.verify
@@ -247,23 +252,53 @@ class SonadorImagingServer(SonadorBaseObject):
 		rdata = server_controloperation_json_response(r,
 			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
 
-		return IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES.get(resource)(self.server, rdata, pacs=self, **kwargs) if expand \
-			else rdata
+		return resource_modelcollection_class(self.server, rdata, pacs=self, **kwargs) if expand else rdata
+
+	def _check_query_structure(self, sfilter):
+		'''	Check the query structure to ensure that it is well formed
+		'''
+		if not isinstance(sfilter, dict):
+			raise ValueError('Invalid resource query type: %s. Resource queries must be a dictionary.' % type(sfilter))
 
 	def query_patient(self, sfilter, **kwargs):
 		'''Query patient resources on the imaging server. (Wrapper function for "query".)
 		'''	
+		self._check_query_structure(sfilter)
 		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_PATIENT, **kwargs)
 
 	def query_study(self, sfilter, **kwargs):
 		'''	Query study resources on the imaging server.  (Wrapper function for "query".)
 		'''
+		self._check_query_structure(sfilter)
 		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_STUDY, **kwargs)
 
 	def query_series(self, sfilter, **kwargs):
 		'''	Query series resources on the imaging server. (Wrapper function for "query".)
 		'''
+		self._check_query_structure(sfilter)
 		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_SERIES, **kwargs)
+
+	def query_sr(self, sfilter, **kwargs):
+		'''	Query DICOM-SR resources on the imaging server. (Wrapper function for "query".)
+		'''
+		from .imaging.orthanc.sr import DcmSRSeriesCollection
+
+		self._check_query_structure(sfilter)
+		sfilter.update({ DCMHEADER_MODALITY: DCM_MODALITY_SR })
+
+		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_SERIES, 
+			resource_modelcollection_class=DcmSRSeriesCollection, **kwargs)
+
+	def query_seg(self, sfilter, **kwargs):
+		'''	Query DICOM-SEG resources on the imaging server. (Wrapper function for "query".)
+		'''
+		from .imaging.orthanc.seg import DcmSegmentationSeriesCollection
+
+		self._check_query_structure(sfilter)
+		sfilter.update({ DCMHEADER_MODALITY: DCM_MODALITY_SEG })
+
+		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_SERIES,
+			resource_modelcollection_class=DcmSegmentationSeriesCollection, **kwargs)
 
 	def fetch_jobs(self, verify=None, headers=None, limit=None, offset=None, expand=True, **kwargs):
 		'''	Retrieve the processing jobs for the server
