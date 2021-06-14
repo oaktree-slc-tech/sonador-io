@@ -26,6 +26,7 @@ class SonadorBaseObject(JsonBaseObject):
 
 	def __init__(self, server, *args, **kwargs):
 		self.server = server
+		self.collection = kwargs.pop('collection', None)
 		super().__init__(*args, **kwargs)
 
 	@property
@@ -64,6 +65,9 @@ class SonadorObjectCollection(GuruRemotePaginationMixin, JsonObjectCollection):
 		super().__init__(*args, **kwargs)
 
 	def _init_collection_models(self, **kwargs):
+		# Add reference to the collection
+		kwargs['collection'] = self
+
 		return map(lambda ojson: self.model(self.server, ojson, **kwargs), self._objectdata)
 
 	def append(self, value):
