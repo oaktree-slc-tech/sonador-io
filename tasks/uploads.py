@@ -1,4 +1,4 @@
-import os, posixpath, logging, glob, re, fnmatch, pydicom, zipfile
+import os, posixpath, logging, glob, re, fnmatch, pydicom, zipfile, pathlib, shutil
 from collections import OrderedDict, namedtuple
 from io import BytesIO
 from pydicom.dataset import FileDataset as DCMFileDataset
@@ -92,7 +92,8 @@ def dcm_findfiles(filelist, dcmfiles=None, dcm_extensions=DCM_EXTENSIONS_DEFAULT
 
 
 def imageserver_upload_folder(iserver, folders, tpool=None, threads=4, 
-		verify=False, fileupload_check=False, dcm_extensions=DCM_EXTENSIONS_DEFAULT):
+		verify=False, fileupload_check=False, destfolder_complete=None,
+		dcm_extensions=DCM_EXTENSIONS_DEFAULT):
 	'''	Scan folders and upload all DICOM images to the provided imaging servers
 
 		@input iserver (SonadorImagingServer instance): Imaging server to which the
@@ -110,12 +111,16 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 	# Create cache of previously uploaded files to check upload status
 	# before re-transmitting
 	previously_uploaded = OrderedDict()
-
+	
+	if destfolder_complete and not os.path.exists(destfolder_complete):
+		raise Exception('Invalid destination folder %s does not exist' % destfolder_complete)
+		
 	for froot in folders:
-		logger.info('Scan %s for images to upload to server %s' % (froot, iserver.server_label))
+		froot_path = pathlib.Path(froot)
+		logger.info('Scan %s for images to upload to server %s' % (froot_path, iserver.server_label))
 
 		# Walk through folders and locate images for upload
-		for croot, cfolders, cfiles in os.walk(froot):
+		for croot, cfolders, cfiles in os.walk(froot_path):
 
 			# Find all DICOM files and variations inside of the directory
 			dcmfiles = dcm_findfiles(cfiles, dcm_extensions=dcm_extensions)
@@ -141,7 +146,7 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 							the upload was skipped (fileupload_check is True and the UID was already in Orthanc)
 							the method returns None.
 					'''
-					ipath = os.path.join(croot, iname)
+					ipath = pathlib.Path(os.path.join(croot, iname))
 					with open(ipath, 'rb') as img:
 						logger.debug('Upload image %s to server %s' % (iname, iserver.pk))
 
@@ -157,6 +162,21 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 
 						# Upload image to PACS imaging server
 						r = iserver.upload_image(img)
+						
+						# Move file to the destination folder
+						if destfolder_complete and r.ok:
+							ipath_dest = pathlib.Path(
+								os.path.join(destfolder_complete, froot_path.name, ipath.relative_to(froot_path)))
+
+							# Create parent folder
+							if not ipath_dest.parent.exists():
+								ipath_dest.parent.mkdir(parents=True, exist_ok=True)
+
+							# Move the file to the destination folder
+							shutil.move(ipath, ipath_dest)
+							logger.debug(
+								'Image %s uploaded successfully, move image file to destination folder %s' % (ipath, ipath_dest))
+						
 						return r.ok
 
 				uresults = sum(filter(lambda v: v is not None, tpool.map(upload_dcmimages, dcmfiles)))
