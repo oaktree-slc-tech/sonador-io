@@ -675,7 +675,8 @@ class ImagingSeries(ImagingSeriesCoreResource):
 	@property
 	def dcminstance_modelcollection_class(self): return DcmInstanceCollection
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def image_orientation_patient(self):
 		'''	Retrieve the image orientation, which specifies the direction cosines of the first row
 			and the first column with respect to the patient. Corresponds to the ImageOrientationPatient
@@ -701,7 +702,8 @@ class ImagingSeries(ImagingSeriesCoreResource):
 
 		return self._slices
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def shape(self):
 		'''	Cached property that retrieves the dimensions of the image volume
 		'''
@@ -709,7 +711,8 @@ class ImagingSeries(ImagingSeriesCoreResource):
 		return ImageStackShape(
 			len(self.slices), dcm0.dcmfile(cache=True).Rows, dcm0.dcmfile(cache=True).Columns)
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def segmentations(self):
 		'''	DICOM-SEG segmentations associated with the series with most recent segmentations first.
 		'''
@@ -718,7 +721,8 @@ class ImagingSeries(ImagingSeriesCoreResource):
 			key=lambda dcmseg: dcmseg.ts if dcmseg.ts else datetime.datetime(year=1900, month=1, day=1),
 			reverse=True)
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def annotations(self):
 		'''	DICOM-SR annotations associated with the series with most recent reports first.
 		'''
@@ -959,7 +963,8 @@ class DcmInstance(DcmInstanceCoreResource):
 
 		return jbuffer
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def image_position_patient(self):
 		'''	Retrieve the image position in the MRI/patient coordinate system.
 			Corresponds to the ImagePositionPatient header. The provided
@@ -983,7 +988,8 @@ class DcmInstance(DcmInstanceCoreResource):
 		return ImageCoord(*tuple(float(v) for v in coord)) if (coord and len(coord) == 3) \
 			else coord
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def image_orientation_patient(self):
 		'''	Retrieve the image orientation, which specifies the direction cosines of the first row
 			and the first column with respect to the patient. Corresponds to the ImageOrientationPatient
@@ -994,7 +1000,8 @@ class DcmInstance(DcmInstanceCoreResource):
 		return parse_image_orientation(
 			self.tags.get(DCMHEADER_IMAGE_ORIENTATION_PATIENT))
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def slice_location(self):
 		'''	Retrieve the slice location within the image volume. The location is taken from the SliceLocation header
 			and will return None if the header is not present.
@@ -1004,7 +1011,8 @@ class DcmInstance(DcmInstanceCoreResource):
 		zval = self.tags.get('SliceLocation')		
 		return float(zval) if isinstance(zval, six.string_types) else zval
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def slice_thickness(self):
 		'''	Retrieve the slice thinkess. The thickness is taken from the SliceThickness header and will return
 			None if the header is not present.
@@ -1014,7 +1022,8 @@ class DcmInstance(DcmInstanceCoreResource):
 		thickness = self.tags.get('SliceThickness')
 		return float(thickness) if isinstance(thickness, six.string_types) else zval
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def pixel_spacing(self):
 		'''	Retrieve the pixel spacing for the slice. The spacing components are retrieved from the PixelSpacing
 			header and will return None if the header is not present.
