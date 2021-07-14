@@ -149,7 +149,7 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 					% (self.resource_url, self.pacs.server_label, r.status_code),
 				r)
 
-		logger.debug('Response from PACS imaging server:\n%s' % json.dumps(r.json()))
+		logger.debug('Response from PACS imaging server:\n%s' % r.content)
 		return r
 
 	def delete(self, verify=None, headers=None, **kwargs):
