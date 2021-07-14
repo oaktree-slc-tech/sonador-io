@@ -998,8 +998,7 @@ class DcmInstance(DcmInstanceCoreResource):
 	def slice_location(self):
 		'''	Retrieve the slice location within the image volume. The location is taken from the SliceLocation header
 			and will return None if the header is not present.
-
-			@returns float or None
+		@returns float or None
 		'''
 		zval = self.tags.get('SliceLocation')		
 		return float(zval) if isinstance(zval, six.string_types) else zval
