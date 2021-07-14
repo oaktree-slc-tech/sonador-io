@@ -99,7 +99,8 @@ class DcmStructuredInstance(DcmInstanceCoreResource):
 class DcmStructuredInstanceCollection(DcmInstanceCoreCollection):
 	''' Collection base class used for managing DICOM-SR and DICOM-SEG instances
 	'''
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def series_reference_uids(self):
 		'''	Cached property for retrieving the reference UIDs of image series associated
 			the segmentation instances in the collection. 
@@ -110,8 +111,8 @@ class DcmStructuredInstanceCollection(DcmInstanceCoreCollection):
 class DcmSRInstance(DcmStructuredInstance):
 	'''	DCM Instance model used for DICOM-SR reports
 	'''
-
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def instance_reference_uids(self):
 		'''	Cached property for retrieving the reference UIDs of image instances associated with
 			the structured report.
@@ -128,7 +129,8 @@ class DcmSRInstance(DcmStructuredInstance):
 
 		return instance_references
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def series_reference_uids(self):
 		'''	Cached property for retrieving the reference UIDs of image series associated with the
 			structured report.
