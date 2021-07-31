@@ -59,6 +59,17 @@ class DcmSRSeries(ImagingSeriesCoreResource):
 		'''
 		return self.instances_collection.series_reference_uids
 
+	@property
+	@functools.lru_cache()
+	def imaging_series_collection(self):
+		''' Imaging series that are referenced by the DICOM-SR instance with the most recent
+			imaging series first.
+		'''
+		return sorted(
+			[s for s in self.parent.series_collection if s.series_uid in self.series_reference_uids],
+			key=lambda s: s.ts if s.ts else datetime.datetime(year=1900, month=1, day=1),
+			reverse=True)
+
 
 class DcmSRSeriesCollection(ImagingServerChildCollection):
 	model = DcmSRSeries
