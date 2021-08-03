@@ -150,7 +150,7 @@ class DcmSRInstance(DcmStructuredInstance):
 		series_references = set()
 		
 		# Iterate through all series references in the report, unpack UIDs
-		for refset in self.tags.get(DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE):
+		for refset in self.tags.get(DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE, []):
 			for ref in refset.get(DCMHEADER_SR_REF_SERIES_SEQ):
 				if ref.get(DCMHEADER_SERIES_INSTANCE_UID):
 					series_references.add(ref.get(DCMHEADER_SERIES_INSTANCE_UID))
