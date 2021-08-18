@@ -32,7 +32,8 @@ DATE1_FORMAT = '%Y-%m-%d'
 DCM_DATE_REGEX = re.compile(r'^\d{4}[1-9]{2}\d{2}$')
 ISO8601_DATETIME_REGEX = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d+Z$')
 ISO8601_DATETIME_FORMAT = '%Y-%m-%dT%H:%M:%S.%fZ'
-DCM_DATETIME_REGEX = re.compile(r'^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2}).(?P<fractional>\d{6}).+')
+DCM_DATETIME_REGEX = re.compile(
+	r'^(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2}).(?P<fractional>\d{6}).+')
 
 
 
@@ -51,7 +52,7 @@ def json_str2datetime(v):
 
 	# DICOM formatted date/time
 	if DCM_DATETIME_REGEX.match(v):
-		return datetime.datetime.strptimie(v, DCM_DATETIME_STRFORMAT)
+		return datetime.datetime.strptime(v, DCM_DATETIME_STRFORMAT)
 
 	# ISO8601 formatted date/time
 	elif ISO8601_DATETIME_REGEX.match(v):

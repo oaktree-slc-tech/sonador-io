@@ -59,6 +59,17 @@ class DcmSRSeries(ImagingSeriesCoreResource):
 		'''
 		return self.instances_collection.series_reference_uids
 
+	@property
+	@functools.lru_cache()
+	def imaging_series_collection(self):
+		''' Imaging series that are referenced by the DICOM-SR instance with the most recent
+			imaging series first.
+		'''
+		return sorted(
+			[s for s in self.parent.series_collection if s.series_uid in self.series_reference_uids],
+			key=lambda s: s.ts if s.ts else datetime.datetime(year=1900, month=1, day=1),
+			reverse=True)
+
 
 class DcmSRSeriesCollection(ImagingServerChildCollection):
 	model = DcmSRSeries
@@ -99,7 +110,8 @@ class DcmStructuredInstance(DcmInstanceCoreResource):
 class DcmStructuredInstanceCollection(DcmInstanceCoreCollection):
 	''' Collection base class used for managing DICOM-SR and DICOM-SEG instances
 	'''
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def series_reference_uids(self):
 		'''	Cached property for retrieving the reference UIDs of image series associated
 			the segmentation instances in the collection. 
@@ -110,8 +122,8 @@ class DcmStructuredInstanceCollection(DcmInstanceCoreCollection):
 class DcmSRInstance(DcmStructuredInstance):
 	'''	DCM Instance model used for DICOM-SR reports
 	'''
-
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def instance_reference_uids(self):
 		'''	Cached property for retrieving the reference UIDs of image instances associated with
 			the structured report.
@@ -128,7 +140,8 @@ class DcmSRInstance(DcmStructuredInstance):
 
 		return instance_references
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def series_reference_uids(self):
 		'''	Cached property for retrieving the reference UIDs of image series associated with the
 			structured report.
@@ -137,7 +150,7 @@ class DcmSRInstance(DcmStructuredInstance):
 		series_references = set()
 		
 		# Iterate through all series references in the report, unpack UIDs
-		for refset in self.tags.get(DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE):
+		for refset in self.tags.get(DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE, []):
 			for ref in refset.get(DCMHEADER_SR_REF_SERIES_SEQ):
 				if ref.get(DCMHEADER_SERIES_INSTANCE_UID):
 					series_references.add(ref.get(DCMHEADER_SERIES_INSTANCE_UID))
