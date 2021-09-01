@@ -20,17 +20,22 @@ DicomMetaKey = namedtuple('DicomMetaKey', ('resource', 'header', 'uid'))
 DicomMeta = namedtuple('DicomMeta', ('description', 'modality'))
 
 
-def dcmcache_imgmeta(ifile, hcache, study_meta=True, series_meta=True):
+def dcmcache_imgmeta(ifile, hcache, study_meta=True, series_meta=True, force_read=False):
 	'''	Load the provided image file, retrieve header data, ensure that the file is well formed.
 		Checks to see if the file is tracked in the image cache 
 		(provided as an argument). If the file is not present, the file will be added to the cache.
 
 		@input ifile (File like object): DCM file
-		@input hcache (OrderedDict): Dictionary of image metadata processed as part of the
-			image upload
+		@input hcache (OrderedDict): Dictionary of image metadata to which the file meta should be added.
+		@input study_meta (bool, default=True): Add study metadata as part of the image cache.
+		@input series_meta (bool, default=True): Add series metadata as part of the image cache.
+		@input force_read (bool, default=False): Force loading of the provided file. When False,
+			the load method throws an error if it is unable to read required components of the DCM header.
+
+		@returns pydicom.FileDataset
 	'''
 	# Load DICOM file, retrieve header data, ensure that the file is well formed
-	dcmfile = pydicom.dcmread(ifile)
+	dcmfile = pydicom.dcmread(ifile, force=force_read)
 	ifile.seek(0)
 	
 	# Updates to study metadata
