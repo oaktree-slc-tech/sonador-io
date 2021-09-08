@@ -41,6 +41,9 @@ ImageOrientation = namedtuple('ImageOrientation', ('row', 'col'))
 ImageStackShape = namedtuple('ImageStackShape', ('slices', 'rows', 'cols'))
 
 
+EUCLID_COORD_ORIGIN = ImageCoord(0, 0, 0)
+
+
 def parse_image_orientation(coords):
 	'''	Parse the provided coordinates to a row/column paris of X,Y,Z values
 
@@ -1045,6 +1048,12 @@ class DcmInstance(DcmInstanceCoreResource):
 			spacing = ImageSpacing(float(spacing[0]), float(spacing[1]), self.slice_thickness)
 
 		return spacing
+
+	@property
+	@functools.lru_cache()
+	def plane_type(self):
+		return int(self.tags.get('PlaneType')) if self.tags.get('PlaneType') \
+			else self.tags.get('PlaneType')
 
 
 class DcmInstanceCoreCollection(ImagingServerChildCollection):
