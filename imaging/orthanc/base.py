@@ -95,7 +95,7 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 	def dicomdata(self):
 		return self._objectdata.get('MainDicomTags', {})
 
-	property
+	@property
 	@abstractmethod
 	def resource_url(self):
 		'''	URL for the imaging resource

@@ -11,7 +11,6 @@ from client.utils.format import formerrors2str
 from client.utils.conversion import str2bool
 
 from .apisettings import SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, SONADOR_INTERNAL_DNS
-from .remote import fetch_sonador_dataobject
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +143,7 @@ class SonadorServer(object):
 			
 			@returns SonadorImagingServer model instance
 		'''
+		from .remote import fetch_sonador_dataobject
 		if imageserver_datamodel_class is None:
 			from .servers import SonadorImagingServer
 			imageserver_datamodel_class = SonadorImagingServer
@@ -163,6 +163,7 @@ class SonadorServer(object):
 			
 			@returns DataService model instance
 		'''
+		from .remote import fetch_sonador_dataobject
 		if dataservice_datamodel_class is None:
 			from .services import DataService
 			dataservice_datamodel_class = DataService
@@ -171,6 +172,14 @@ class SonadorServer(object):
 			verify = self.verify
 		
 		return fetch_sonador_dataobject(self, dataservice_datamodel_class, uid, verify=verify)
+	
+	def get_session_token(self, verify=None, *args, **kwargs):
+		'''	Retrieve a session token using the provided acess ID/secret
+		'''
+		if verify is None:
+			verify = self.verify
+		
+		return fetch_sonador_session_token(self, verify=verify)
 
 
 def request_client_error(msg, r, rdata=None, exception_class=ClientOperationError):
