@@ -1,6 +1,7 @@
 import six, os, logging, re, traceback, argparse, datetime, requests, shutil
 from collections import namedtuple
 from six.moves.urllib import parse as urlparse
+from docker.airflow.sonador.remote import fetch_sonador_dataobject
 import pydicom
 
 from client import apisettings as gcapicodes
@@ -134,12 +135,14 @@ class SonadorServer(object):
 		return headers
 
 	def get_imageserver(self, uid, verify=None, imageserver_datamodel_class=None):
-		'''	Retrieve data for the specified Imaging/PACS server
+		'''	Retrieve model data for the specified Imaging/PACS server
 
 			@input uid (str): Sonador UID/pk for the imaging server.
 			@input verify (bool, default=server default): Toggles whether SSL certificates
 				should be validated as part of the request. If no value is passed, 
-				the default setting included in the Sonder server will be used.
+				the default setting included in the Sonador server will be used.
+			
+			@returns SonadorImagingServer model instance
 		'''
 		if imageserver_datamodel_class is None:
 			from .servers import SonadorImagingServer
@@ -150,6 +153,26 @@ class SonadorServer(object):
 			verify = self.verify
 
 		return fetch_sonador_dataobject(self, imageserver_datamodel_class, uid, verify=verify)
+
+	def get_dataservice(self, uid, verify=None, dataservice_datamodel_class=None):
+		'''	Retrieve model data for the specified Data Service
+
+			@input uid (str): Sonador UID/pk for the data service
+			@input verify (bool, default=server default): Toggles whether SSL certificates
+				should be validated as part of the request. If no value is passed,
+				the default setting included in the Sonador server will be used.
+			
+			@returns DataService model instance
+		'''
+		if dataservice_datamodel_class is None:
+			from .services import DataService
+			dataservice_datamodel_class = DataService
+		from .remote import fetch_sonador_dataobject
+		
+		if verify is None:
+			verify = self.verify
+		
+		return fetch_sonador_dataobject(self, dataservice_datamodel_class, uid, verify=verify)
 
 
 def request_client_error(msg, r, rdata=None, exception_class=ClientOperationError):
