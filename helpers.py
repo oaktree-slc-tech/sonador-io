@@ -1,7 +1,6 @@
 import six, os, logging, re, traceback, argparse, datetime, requests, shutil
 from collections import namedtuple
 from six.moves.urllib import parse as urlparse
-from docker.airflow.sonador.remote import fetch_sonador_dataobject
 import pydicom
 
 from client import apisettings as gcapicodes
@@ -12,6 +11,7 @@ from client.utils.format import formerrors2str
 from client.utils.conversion import str2bool
 
 from .apisettings import SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, SONADOR_INTERNAL_DNS
+from .remote import fetch_sonador_dataobject
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +147,6 @@ class SonadorServer(object):
 		if imageserver_datamodel_class is None:
 			from .servers import SonadorImagingServer
 			imageserver_datamodel_class = SonadorImagingServer
-		from .remote import fetch_sonador_dataobject
 		
 		if verify is None:
 			verify = self.verify
@@ -167,7 +166,6 @@ class SonadorServer(object):
 		if dataservice_datamodel_class is None:
 			from .services import DataService
 			dataservice_datamodel_class = DataService
-		from .remote import fetch_sonador_dataobject
 		
 		if verify is None:
 			verify = self.verify
