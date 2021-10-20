@@ -134,22 +134,52 @@ class SonadorServer(object):
 		return headers
 
 	def get_imageserver(self, uid, verify=None, imageserver_datamodel_class=None):
-		'''	Retrieve data for the specified Imaging/PACS server
+		'''	Retrieve model data for the specified Imaging/PACS server
 
 			@input uid (str): Sonador UID/pk for the imaging server.
 			@input verify (bool, default=server default): Toggles whether SSL certificates
 				should be validated as part of the request. If no value is passed, 
-				the default setting included in the Sonder server will be used.
+				the default setting included in the Sonador server will be used.
+			
+			@returns SonadorImagingServer model instance
 		'''
+		from .remote import fetch_sonador_dataobject
 		if imageserver_datamodel_class is None:
 			from .servers import SonadorImagingServer
 			imageserver_datamodel_class = SonadorImagingServer
-		from .remote import fetch_sonador_dataobject
 		
 		if verify is None:
 			verify = self.verify
 
 		return fetch_sonador_dataobject(self, imageserver_datamodel_class, uid, verify=verify)
+
+	def get_dataservice(self, uid, verify=None, dataservice_datamodel_class=None):
+		'''	Retrieve model data for the specified Data Service
+
+			@input uid (str): Sonador UID/pk for the data service
+			@input verify (bool, default=server default): Toggles whether SSL certificates
+				should be validated as part of the request. If no value is passed,
+				the default setting included in the Sonador server will be used.
+			
+			@returns DataService model instance
+		'''
+		from .remote import fetch_sonador_dataobject
+		if dataservice_datamodel_class is None:
+			from .services import DataService
+			dataservice_datamodel_class = DataService
+		
+		if verify is None:
+			verify = self.verify
+		
+		return fetch_sonador_dataobject(self, dataservice_datamodel_class, uid, verify=verify)
+	
+	def get_session_token(self, verify=None, *args, **kwargs):
+		'''	Retrieve a session token using the provided acess ID/secret
+		'''
+		if verify is None:
+			verify = self.verify
+		
+		return fetch_sonador_session_token(self, verify=verify)
 
 
 def request_client_error(msg, r, rdata=None, exception_class=ClientOperationError):

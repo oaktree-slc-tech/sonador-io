@@ -20,6 +20,7 @@ from client.utils.object import pick
 from client.utils.microservices import server_controloperation_json_response, RemotePage
 
 from ...apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
+	DCMHEADER_PATIENT_ID, DCMHEADER_PATIENT_NAME, DCMHEADER_PATIENT_SEX, DCMHEADER_PATIENT_BIRTHDATE, \
 	DCMHEADER_IMAGE_POSITION_PATIENT, DCMHEADER_IMAGE_ORIENTATION_PATIENT, DCM_DATE_STRFORMAT, DCM_TIME_STRFORMAT, \
 	DCMHEADER_MODALITY, DCMHEADER_STUDY_INSTANCE_UID
 from ...helpers import request_client_error, fetch_sonador_session_token
@@ -94,7 +95,7 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 	def dicomdata(self):
 		return self._objectdata.get('MainDicomTags', {})
 
-	property
+	@property
 	@abstractmethod
 	def resource_url(self):
 		'''	URL for the imaging resource
@@ -276,19 +277,19 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerBaseObject):
 
 	@property
 	def patient_name(self):
-		return self.dicomdata.get('PatientName')
+		return self.dicomdata.get(DCMHEADER_PATIENT_NAME)
 
 	@property
 	def patientid(self):
-		return self.dicomdata.get('PatientID')
+		return self.dicomdata.get(DCMHEADER_PATIENT_ID)
 
 	@property
 	def patient_sex(self):
-		return self.dicomdata.get('PatientSex')
+		return self.dicomdata.get(DCMHEADER_PATIENT_SEX)
 
 	@property
 	def birth_date(self):
-		return self.dicomdata.get('PatientBirthDate')
+		return self.dicomdata.get(DCMHEADER_PATIENT_BIRTHDATE)
 
 	@property
 	def studies(self):
