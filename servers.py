@@ -7,7 +7,7 @@ from collections import OrderedDict
 from client import auth as guru_auth
 from client.utils.urls import build_url
 from client.utils.object import pick, omit
-from client.utils.microservices import server_controloperation_json_response, RemotePage
+from client.utils.microservices import RemotePage
 
 from .apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, \
 	IMAGING_SERVER_RESOURCE_SERIES, IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_RESOURCE_SUPPORTED, \
@@ -170,9 +170,7 @@ class SonadorImagingServer(SonadorBaseObject):
 			request_client_error('Unable to retrieve requested resource %s instance %s. Status code: %s'
 				% (rid, resource_type, r.status_code), r)
 
-		rdata = server_controloperation_json_response(r,
-			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
-		return resource_type(self.server, rdata, pacs=self, **kwargs)
+		return self.server._init_dataclass(resource_type, r, pacs=self, **kwargs)
 
 	def get_patient(self, pid, headers=None, **kwargs):
 		'''	Retrieve patient data for the specified UID
@@ -249,10 +247,8 @@ class SonadorImagingServer(SonadorBaseObject):
 			request_client_error('Unable to execute resource query to PACS %s. Status code: %s.' % (self.server_label, r.status_code), r)
 
 		# Parse response
-		rdata = server_controloperation_json_response(r,
-			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
-
-		return resource_modelcollection_class(self.server, rdata, pacs=self, **kwargs) if expand else rdata
+		return self.server._init_dataclass(resource_modelcollection_class, r, pacs=self, **kwargs) if expand \
+			else self.server._parse_apiresponse_json(r)
 
 	def _check_query_structure(self, sfilter):
 		'''	Check the query structure to ensure that it is well formed
@@ -315,16 +311,41 @@ class SonadorImagingServer(SonadorBaseObject):
 			request_client_error('Unable to retrieve jobs from PACS %s. Status code: %s.' % (self.server_label, r.status_code), r)
 
 		# Parse response
-		rdata = server_controloperation_json_response(r,
-			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
-
-		return OrthancJobCollection(self.server, rdata, pacs=self, **kwargs)
+		return self.server._init_dataclass(OrthancJobCollection, r, pacs=self, **kwargs)
 
 	def get_job(self, jid, headers=None, **kwargs):
 		'''	Retrieve a processing job instance
 		'''
 		from .imaging.jobs import OrthancJob
 		return self.get_imaging_resource(jid, OrthancJob, headers=headers, **kwargs)
+
+	def dicomweb_push(self, rdweb, resources, op=None, headers=None, async_transfer=True, priority=None):
+		'''	Push resources from the current imaging server to the provided remote DICOMweb instance
+
+			@input rdweb (RemoteDICOMwebServer): Remote DICOMweb instances to which the resources
+				should be pushed.
+			@input resources (iterable of Orthanc resource IDs): IDs of the resources to be pushed
+				to the remote DICOMweb instance.
+		'''
+		# Ensure the provided DICOMweb instance is associated with the imaging server
+		if self.pk != rdweb.pacs.pk:
+			raise ValueError(('Unable to push resources, DICOMweb %s instance is associated with another '
+				+ 'imaging server: %s. Current server: %s') % (rdweb.pk, rdweb.pacs.server_label, self.server_label))
+
+		# Create resource operation request
+		op = rdweb._remote_resource_operation_request(
+			resources, op=op, async_transfer=async_transfer, priority=priority)
+
+		# Execute request
+		r = requests.post(self.orthanc_apiurl(posixpath.join(rdweb.dicomweb_urlbase, 'stow')), json=op,
+			headers=self.orthanc_request_headers(headers=headers))
+		if not r.ok:
+			request_client_error('Unable to push resources to DICOMweb for %s on PACS %s. Status code: %s.' 
+					% (rdweb.pk, self.server_label, r.status_code), 
+				r)
+
+		# Parse response
+		return rdweb._parse_remote_resource_operation(r, async_transfer)
 
 
 class SonadorImagingServerCollection(SonadorObjectCollection):
@@ -461,23 +482,50 @@ class RemoteDICOMwebServer(ImagingServerModalityMixin, ImagingServerBaseObject):
 				r)
 
 		# Parse response
-		rdata = server_controloperation_json_response(r,
-			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
+		return self.server._init_dataclass(REMOTE_IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES.get(resource), r, dicomweb=self, **kwargs) \
+			if expand else self.server._parse_apiresponse_json(r)
 
-		return REMOTE_IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES.get(resource)(self.server, rdata, dicomweb=self, **kwargs) if expand \
-			else rdata
+	def _remote_resource_operation_request(self, resources, op=None, async_transfer=True, priority=None):
+		'''	Structure an Orthanc DICOMweb request for a remote resource operation.
 
-	def remote_fetch(self, resources, fetch=None, headers=None, async_transfer=True):
-		''' Create a job to retrieve the resources specified in the resource list. Series should be retrieved using
-			the SeriesInstanceUID and StudyInstanceUID. The request i posted to the retrieve endpoint of Orthanc
-			and all resources will be retrieved in a single batch.
+			@input rdata (iterable or esource UIDs)
+			@input op (dict, default=new dictionary): Existing operation to which the remote resource paramters
+				should be added.
+			@input async_transer (bool, default=True): When True, the job will be queued and executed asynchronously.
+			@input priority (int, default=None): Associate a priority with the transfer
+
+			@returns JSON (dict) structure of the request
+		'''
+		op = op or {}
+		op.update({ 'Resources': resources })
+		if async_transfer:
+			op['Synchronous'] = not async_transfer
+		if priority is not None:
+			op['Priority'] = priority
+
+		return op
+
+	def _parse_remote_resource_operation(self, r, async_transfer):
+		'''	Parse a remote resource response
+
+			@input r (requests.Response): API response from server
+			@input async_transfer (bool): Indicates whether the request was synchronous or asynchronous.
+
+			@returns OrthancJob instance if the transfer was async or OrthancJobResult is synchronous
 		'''
 		from .imaging.jobs import OrthancJob, OrthancJobResult
 
-		fetch = fetch or {}
-		fetch.update({ 'Resources': resources })
-		if async_transfer:
-			fetch['Synchronous'] = not async_transfer
+		rdata = self.server._parse_apiresponse_json(r)
+		return OrthancJob(self.server, rdata, pacs=self.pacs, dicomweb=self) if async_transfer \
+			else OrthancJobResult(self.server, rdata, pacs=self.pacs, dicomweb=self)
+
+	def remote_fetch(self, resources, fetch=None, headers=None, async_transfer=True, priority=None):
+		''' Create a job to retrieve the resources specified in the resource list. Series should be retrieved using
+			the SeriesInstanceUID and StudyInstanceUID. The request is posted to the retrieve endpoint of Orthanc
+			and all resources will be retrieved in a single batch.
+		'''		
+		# Create resource operation request
+		fetch = self._remote_resource_operation_request(resources, op=fetch, async_transfer=async_transfer, priority=priority)
 
 		# Execute request
 		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.dicomweb_urlbase, 'retrieve')), json=fetch,
@@ -488,11 +536,8 @@ class RemoteDICOMwebServer(ImagingServerModalityMixin, ImagingServerBaseObject):
 				r)
 
 		# Parse response
-		rdata = server_controloperation_json_response(r,
-			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
-
-		return OrthancJob(self.server, rdata, pacs=self.pacs, dicomweb=self) if async_transfer \
-			else OrthancJobResult(self.server, rdata, pacs=self.pacs, dicomweb=self)
+		return self._parse_remote_resource_operation(r, async_transfer)
+		
 
 
 class RemoteDICOMwebServerCollection(ImagingServerChildCollection):

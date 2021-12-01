@@ -86,7 +86,8 @@ class DcmSegmentationInstance(DcmStructuredInstance):
 
 		return segments
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def segments(self):
 		'''	Cached property for retrieving the parsed components of the segmentation.
 			@returns OrderedDict with the segmentation frames, frame descriptions, and resource instance UIDs
@@ -94,7 +95,8 @@ class DcmSegmentationInstance(DcmStructuredInstance):
 		'''
 		return self.parse_segmentation(cache=True)
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def segment_reference_uids(self):
 		''' Cached property for retrieving the reference UIDs of images associated with each of the segments.
 			@returns OrderedDict with the reference UIDs of instances grouped by the segment.
@@ -102,7 +104,8 @@ class DcmSegmentationInstance(DcmStructuredInstance):
 		return OrderedDict(
 			(seg, segdata.resource_instance_uids) for seg, segdata in self.segments.items())
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def instance_reference_uids(self):
 		'''	Cached property for retrieving the reference UIDs of image instances associated with the segmentation.
 			@returns set of all unique instance UIDs referenced by the segmentation instance.
@@ -117,7 +120,8 @@ class DcmSegmentationInstance(DcmStructuredInstance):
 		
 		return instance_references
 
-	@functools.cached_property
+	@property
+	@functools.lru_cache()
 	def series_reference_uids(self):
 		'''	Cached property for retrieving the reference UIDs of image series associated with the segmentation.
 			@returns set of all unique series UIDs referenced by the segmentation instance.

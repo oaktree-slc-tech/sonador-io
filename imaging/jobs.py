@@ -1,8 +1,6 @@
 import logging, posixpath, requests
 from collections import OrderedDict
 
-from client.utils.microservices import server_controloperation_json_response
-
 from ..helpers import request_client_error, fetch_sonador_session_token
 from ..serialization import json_datetime_parser
 from ..servers import ImagingServerBaseObject, ImagingServerChildCollection
@@ -111,8 +109,7 @@ class OrthancJob(OrthancJobBaseObject):
 					% (rstub, self.pk, self.pacs.server_label, r.status_code),
 				r)
 
-		return server_controloperation_json_response(r,
-			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
+		return self.server._parse_apiresponse_json(r)
 
 	def retry(self, rdata=None, headers=None, **kwargs):
 		'''	Retry/resubmit the failed job

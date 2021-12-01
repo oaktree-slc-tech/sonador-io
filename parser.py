@@ -49,7 +49,7 @@ def add_arguments_for_api_connection(parser):
 			May also be provided as the %s shell environment variable.''' % SONADOR_URL).replace('\t', '').replace('\n', ''))
 	parser.add_argument('--api-token', dest=PARSER_SONADOR_APITOKEN, default=os.environ.get(SONADOR_APITOKEN),
 		help=('''Sonador access token which should be used to make authenticated requests. When present, 
-				takes precedence over the access ID and secret key. May also be provided as the
+				takes precedence over the access ID and secret key. May also be provided as the 
 				%s shell environment variable.''' % SONADOR_APITOKEN).replace('\t', '').replace('\n', ''))
 
 
@@ -171,3 +171,11 @@ def dicomweb_remote_server_operation_options(subparser):
 	subparser.add_argument('--remote-server', dest='remote_server', type=str, 
 		help='Remote DICOMweb server. May also be provided as the SONADOR_DICOMWEB_SERVER shell environment variable.',
 		default=os.environ.get('SONADOR_DICOMWEB_SERVER'))
+
+
+def background_job_options(subparser):
+	'''	CLI options for tasks which submit operations to the background queue
+	'''
+	subparser.add_argument('--wait', dest='synchronous', action='store_true', default=False,
+		help='When true, causes the script to wait until the server returns the result of the job. '
+			+ 'Note: There is a risk of connection timeout if the requested resources include a large number of images.')

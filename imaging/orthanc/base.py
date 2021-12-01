@@ -309,9 +309,7 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerBaseObject):
 				r)
 
 		# Parse response and return collection
-		rdata = server_controloperation_json_response(r,
-			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
-		return ImagingStudyCollection(self.server, rdata, pacs=self.pacs, patient=self, **kwargs)
+		return self.server._init_dataclass(ImagingStudyCollection, r, pacs=self.pacs, patient=self, **kwargs)
 
 	@property
 	def studies_collection(self):
@@ -336,9 +334,7 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerBaseObject):
 				r)
 
 		# Parse response and return collection
-		rdata = server_controloperation_json_response(r,
-			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
-		return ImagingSeriesCollection(self.server, rdata, pacs=self.pacs, patient=self, **kwargs)
+		return self.server._init_dataclass(ImagingSeriesCollection, r, pacs=self.pacs, patient=self, **kwargs)
 
 	@property
 	def series_collection(self):
@@ -377,7 +373,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 	def __init__(self, *args, **kwargs):
 		self._parent = kwargs.pop('patient', None)
-		super(ImagingStudy, self).__init__(*args, **kwargs)
+		super().__init__(*args, **kwargs)
 
 	@property
 	def resource_url(self):
@@ -454,9 +450,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 				r)
 
 		# Parse response and return collection
-		rdata = server_controloperation_json_response(r,
-			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
-		return ImagingSeriesCollection(self.server, rdata, pacs=self.pacs, patient=self, **kwargs)
+		return self.server._init_dataclass(ImagingSeriesCollection, r, pacs=self.pacs, patient=self, **kwargs)
 
 	@property
 	def series_collection(self):
@@ -503,13 +497,13 @@ class ImagingStudyCollection(ImagingServerChildCollection):
 
 	def __init__(self, *args, **kwargs):
 		self.parent = kwargs.pop('patient', None)
-		super(ImagingStudyCollection, self).__init__(*args, **kwargs)
+		super().__init__(*args, **kwargs)
 
 	def _init_collection_models(self, **kwargs):
 		if self.parent:
 			kwargs['patient'] = self.parent
 
-		return super(ImagingStudyCollection, self)._init_collection_models(**kwargs)
+		return super()._init_collection_models(**kwargs)
 
 
 IMAGING_SERIES_OUTPUT_COLUMNS = OrderedDict((
@@ -538,7 +532,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 
 	def __init__(self, *args, **kwargs):
 		self._parent = kwargs.pop('study', None) or kwargs.pop('patient', None)
-		super(ImagingSeriesCoreResource, self).__init__(*args, **kwargs)
+		super().__init__(*args, **kwargs)
 
 	@property
 	def resource_url(self):
@@ -668,9 +662,8 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 				r)
 
 		# Parse response and return collection
-		rdata = server_controloperation_json_response(r,
-			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict)
-		return self.dcminstance_modelcollection_class(self.server, rdata, pacs=self.pacs, series=self, **kwargs)
+		return self.server._init_dataclass(
+			self.dcminstance_modelcollection_class, r, pacs=self.pacs, series=self, **kwargs)
 
 
 class ImagingSeries(ImagingSeriesCoreResource):
@@ -732,7 +725,7 @@ class ImagingSeries(ImagingSeriesCoreResource):
 		'''
 		return sorted(
 			[dcmsr for dcmsr in self.parent.sr_collection if self.series_uid in dcmsr.series_reference_uids],
-			key=lambda dcmseg: dcmseg.ts if dcmseg.ts else datetime.datetime(year=1900, month=1, day=1),
+			key=lambda dcm: dcm.ts if dcm.ts else datetime.datetime(year=1900, month=1, day=1),
 			reverse=True)
 
 
@@ -748,7 +741,7 @@ class ImagingSeriesCollection(ImagingServerChildCollection):
 		if self.parent and not isinstance(self.parent, (ImagingPatient, ImagingStudy)):
 			raise ValueError('Unable to initialize imaging series, invalid parent type: %s' % type(self.parent))
 		
-		super(ImagingSeriesCollection, self).__init__(*args, **kwargs)
+		super().__init__(*args, **kwargs)
 
 	def _init_collection_models(self, **kwargs):
 		if self.parent:
@@ -760,7 +753,7 @@ class ImagingSeriesCollection(ImagingServerChildCollection):
 			elif isinstance(self.parent, ImagingStudy):
 				kwargs['study'] = self.parent
 
-		return super(ImagingSeriesCollection, self)._init_collection_models(**kwargs)
+		return super()._init_collection_models(**kwargs)
 		
 
 IMAGING_INSTANCE_OUTPUT_COLUMNS = OrderedDict((
@@ -778,7 +771,7 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 
 	def __init__(self, *args, **kwargs):
 		self._parent = kwargs.pop('series', None)
-		super(DcmInstanceCoreResource, self).__init__(*args, **kwargs)
+		super().__init__(*args, **kwargs)
 
 	@property
 	def series(self):
@@ -1063,7 +1056,7 @@ class DcmInstanceCoreCollection(ImagingServerChildCollection):
 	'''
 	def __init__(self, *args, **kwargs):
 		self.parent = kwargs.pop('series', None)
-		super(DcmInstanceCoreCollection, self).__init__(*args, **kwargs)
+		super().__init__(*args, **kwargs)
 
 	def _init_collection_models(self, **kwargs):
 		if self.parent:
@@ -1072,7 +1065,7 @@ class DcmInstanceCoreCollection(ImagingServerChildCollection):
 		# Return a sorted copy of the collection so that the instances are ordered
 		# by their index
 		return sorted(
-			super(DcmInstanceCoreCollection, self)._init_collection_models(**kwargs),
+			super()._init_collection_models(**kwargs),
 			key=lambda i: i.series_index or 0)
 
 	@property
