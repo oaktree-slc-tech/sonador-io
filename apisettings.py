@@ -1,3 +1,5 @@
+from collections import namedtuple
+
 IMAGING_SERVER_RESOURCE_PATIENT = 'Patient'
 IMAGING_SERVER_RESOURCE_STUDY = 'Study'
 IMAGING_SERVER_RESOURCE_SERIES = 'Series'
@@ -66,6 +68,7 @@ DCM_TIME_STRFORMAT_ALT1 = '%H%M%S'
 
 DCM_FILE_EXTENSION = 'dcm'
 DCM_EXTENSIONS_DEFAULT = ['*.dcm', '*.DCM', '*.DICOM', '*.dicom', 'IM*']
+DCM_EXTENSIONS_ALL_FILES = ['*']
 DCM_MODALITY_MR = 'MR'
 DCM_MODALITIES_MRI = ['MR', 'MRI', 'MR\\SD']
 
@@ -93,3 +96,10 @@ TESTING_VERBOSITY = {
 	'error': 0,
 	'critical': 0,
 }
+
+
+# Header cache constants and data classes
+DCM_CONTENT_TYPE = 'application/octet-stream'
+
+DicomMetaKey = namedtuple('DicomMetaKey', ('resource', 'header', 'uid'))
+DicomMeta = namedtuple('DicomMeta', ('description', 'modality'))

@@ -2,14 +2,16 @@ import six, posixpath, requests, json, csv, collections, logging
 from collections import OrderedDict
 from urllib.parse import urlencode
 
+from abc import ABCMeta, abstractmethod
+
 from tabulate import tabulate
 
 from client import apisettings as gcapicodes
 from client import auth as guru_auth
 from client.utils.urls import validate_url, build_url, resource_fullurl
-from client.utils.microservices import JsonBaseObject, JsonObjectCollection, GuruRemotePaginationMixin, RemotePage, \
-	server_controloperation_json_response
+from client.utils.microservices import JsonBaseObject, JsonObjectCollection, GuruRemotePaginationMixin, RemotePage as OakTreeRemotePage
 from client.utils.object import pick
+from client.remote import GuruBaseObject, GuruObjectCollection, fetch_dataobject_schema, fetch_data_collection, fetch_dataobject
 
 from .helpers import request_client_error
 from .serialization import json_datetime_parser, \
@@ -18,28 +20,9 @@ from .serialization import json_datetime_parser, \
 logger = logging.getLogger(__name__)
 
 
-class SonadorBaseObject(JsonBaseObject):
+class SonadorBaseObject(GuruBaseObject):
 	'''	Python representation of a Sonador object
 	'''
-	verify_ssl = False
-	pk_attr = 'token'
-
-	def __init__(self, server, *args, **kwargs):
-		self.server = server
-		self.collection = kwargs.pop('collection', None)
-		super().__init__(*args, **kwargs)
-
-	@property
-	def url(self):
-		return self._objectdata.get(gcapicodes.UPDATE_URL)
-
-	@property
-	def pk(self):
-		if self._objectdata.get(self.pk_attr):
-			return self._objectdata.get(self.pk_attr)
-
-		return self._objectdata.get('uid')
-
 	def delete(self, verify=None, **kwargs):
 		if verify is None:
 			verify = self.server.verify
@@ -54,130 +37,34 @@ class SonadorBaseObject(JsonBaseObject):
 		return r
 
 
-class SonadorObjectCollection(GuruRemotePaginationMixin, JsonObjectCollection):
+class SonadorObjectCollection(GuruObjectCollection):
 	'''	Collection of Sonador objects
 	'''
 	model = SonadorBaseObject
 
-	def __init__(self, server, *args, **kwargs):
-		self.server = server
-		self.remote_schema = kwargs.pop('remote_schema', None)
-		super().__init__(*args, **kwargs)
 
-	def _init_collection_models(self, **kwargs):
-		# Add reference to the collection
-		kwargs['collection'] = self
-
-		return map(lambda ojson: self.model(self.server, ojson, **kwargs), self._objectdata)
-
-	def append(self, value):
-		'''	Append a model to the end of the collection
-		'''
-		if not isinstance(value, self.model):
-			raise TypeError('Unable to add %s to collection, unsupported type %s' % (value, type(value)))
-
-		return self.models.append(value)
-
-	def extend(self, other):
-		'''	Add the model instances from other to the existing instance
-
-			@input other (iterable): Iterable of model instances to be added to the collection
-		'''
-		return self.models.extend(m for m in other)
-
-	def __iadd__(self, other):
-		'''	Add the members of the other collection to the the existing instance. Delegates to `extend`
-		'''
-		# Ensure that the two collections are of the same type
-		if not isinstance(other, type(self)):
-			raise TypeError('Unsupport += operation of type(s): %s and %s. Collections must be of the same type.'
-				% (type(self), type(other)))
-
-		# Extend the current collection
-		self.extend(other)
-		return self
-
-
-def fetch_sonador_dataobject_schema(sonador_server, datamodel_class, verify=False,
-		data_collection_endpoint=None):
-	'''	Retrieve a Sonador data schema.
+def fetch_sonador_dataobject_schema(*args, apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers', **kwargs):
+	'''	Retrieve a Sonador data schema
 
 		@returns dict
 	'''
-	data_collection_endpoint = data_collection_endpoint or datamodel_class.fetch_endpoint
-
-	rs = requests.options(sonador_server.sonador_apiurl(data_collection_endpoint, method='OPTIONS'),
-			verify=verify, headers=sonador_server.sonador_request_headers())
-
-	if not rs.ok:
-		request_client_error('Unable to retrieve requested schema from Sonador due to a server error.', rs)
-
-	return rs.json()
+	return fetch_dataobject_schema(*args, apiurl_callable=apiurl_callable, headers_callable=headers_callable, **kwargs)
 
 
+def fetch_sonador_data_collection(*args, apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers',
+		fetch_schema_callable=fetch_sonador_dataobject_schema, **kwargs):
+	'''	Fetch imaging object collection from Sonador
 
-def fetch_sonador_data_collection(sonador_server, datacollection_class,
-		datasources_collection=None, page=1, items=100, verify=False, filters=None,
-		fetch_remote_schema=False, data_collection_endpoint=None, **kwargs):
-	'''	Fetch property or community data sources from Sonador
+		@returns instance of data collection class
 	'''
-	data_collection_endpoint = data_collection_endpoint or datacollection_class.model.fetch_endpoint
-
-	# URL encode filter string if provided as dict
-	if isinstance(filters, dict):
-		filters = urlencode(filters)
-
-	r = requests.get(
-		sonador_server.sonador_apiurl('%s?page=%d&items=%d%s' % (data_collection_endpoint, page, items, '&%s' % filters if filters else '')),
-		verify=verify, headers=sonador_server.sonador_request_headers())
-
-	if not r.ok:
-		request_client_error('Unable to retrieve data sources from Sonador due to a server error.', r)
-
-	# Parse request data to object instances
-	rsources = RemotePage(datacollection_class(sonador_server,
-		server_controloperation_json_response(r,
-			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict),
-		**kwargs))
-
-	# If existing collection provided, add recently retrieved data sources to collection
-	if datasources_collection:
-		datasources_collection += rsources.collection
-	else: datasources_collection = rsources.collection
-
-	# Ensure that all data sources have been retrieved
-	if rsources.has_next():
-		fetch_sonador_data_collection(sonador_server, datacollection_class, datasources_collection=datasources_collection,
-			page=page + 1, items=items, verify=verify, filters=filters, **kwargs)
-
-	# Fetch the remote schema for the data source
-	if fetch_remote_schema:
-		datasources_collection.remote_schema = fetch_sonador_dataobject_schema(
-			sonador_server, datacollection_class.model, verify=verify, data_collection_endpoint=data_collection_endpoint)
-
-	return datasources_collection
+	return fetch_data_collection(*args, apiurl_callable=apiurl_callable, headers_callable=headers_callable,
+		fetch_schema_callable=fetch_schema_callable, **kwargs)
 
 
-def fetch_sonador_dataobject(sonador_server, datamodel_class, objectid, verify=False, dataobject_endpoint=None, **kwargs):
+def fetch_sonador_dataobject(*args, apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers', **kwargs):
 	'''	Retrieve the details for a single data object from Sonador
 	'''
-	dataobject_endpoint = dataobject_endpoint or posixpath.join(datamodel_class.fetch_endpoint, objectid)
-
-	r = requests.get(
-		sonador_server.sonador_apiurl(dataobject_endpoint),
-		verify=verify, headers=sonador_server.sonador_request_headers())
-
-	if not r.ok:
-		if r.status_code == 404:
-			request_client_error('%s (%s) does not exist.' % (objectid, datamodel_class), r)
-		else:
-			request_client_error('Unable to retrieve %s from server due to a server error.' % datamodel_class, r)
-
-	# Parse request data to object instance
-	return datamodel_class(
-		sonador_server, 
-		server_controloperation_json_response(r,
-			json_loads=lambda rd, mkwargs: json_datetime_parser(rd.json(**mkwargs)), object_pairs_hook=OrderedDict), **kwargs)
+	return fetch_dataobject(*args, apiurl_callable=apiurl_callable, headers_callable=headers_callable, **kwargs)
 
 
 def object2tabulate(object_data, tabulate_output_columns):

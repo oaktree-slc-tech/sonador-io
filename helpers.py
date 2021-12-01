@@ -1,5 +1,5 @@
 import six, os, logging, re, traceback, argparse, datetime, requests, shutil
-from collections import namedtuple
+from collections import namedtuple, OrderedDict
 from six.moves.urllib import parse as urlparse
 import pydicom
 
@@ -9,8 +9,11 @@ from client.utils.urls import build_url
 from client.errors import ClientOperationError
 from client.utils.format import formerrors2str
 from client.utils.conversion import str2bool
+from client.utils.microservices import server_controloperation_json_response
+from client.remote import RemoteServer, request_client_error
 
 from .apisettings import SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, SONADOR_INTERNAL_DNS
+from .serialization import json_datetime_parser
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +54,7 @@ def initenv_sonador_server(sonador_url=os.environ.get(SONADOR_URL),
 		internal_dns=internal_dns, **kwargs)
 
 
-class SonadorServer(object):
+class SonadorServer(RemoteServer):
 	'''	Sonador server client
 	'''
 
@@ -63,44 +66,24 @@ class SonadorServer(object):
 			@input access_id (str): API Access ID for the server
 			@input secret_key (str): Secret key associated with the specified access ID
 		'''
-		self.url = sonador_url
-		self.urlcomponents = urlparse.urlparse(self.url)
-		self.verify = verify
 		self.internal_dns = internal_dns
-
-		# Credentials
-		self.access_id = access_id
-		self.secret_key = secret_key
 		
 		# Auth: API token and token type
 		self.sonador_authdata = None
-		self._apitoken = apitoken
-		if apitoken:
-			self.apitoken_type = API_ACCESS_TOKEN
-		else: self.apitoken_type = None
 
-		if not self._apitoken and (not self.access_id or not self.secret_key):
-			raise ValueError('Unable to initialize Sonador server connection, invalid auth credentials. '
-				+ 'An API token or access ID and secret key must be provided.')
-
-	@property
-	def scheme(self):
-		return self.urlcomponents.scheme
-
-	@property
-	def netloc(self):
-		return self.urlcomponents.netloc
+		# Initialize parent class
+		super().__init__(sonador_url, access_id=access_id, secret_key=secret_key, apitoken=apitoken, verify=verify)
 
 	@property
 	def apitoken(self):
 		if self._apitoken is None and self.sonador_authdata is None:
-			self.sonador_authdata = fetch_sonador_session_token(self, verify=self.verify)
+			self.sonador_authdata = self.get_session_token(verify=self.verify)
 			self._apitoken = self.sonador_authdata.get(OAUTH_ACCESS_TOKEN)
 			self.apitoken_type = self.sonador_authdata.get(OAUTH_TOKEN_TYPE)
 
 		return self._apitoken
 
-	def sonador_apiurl(self, resource_endpoint, method=None):
+	def apiurl(self, resource_endpoint, method=None):
 		'''	Create a Sonador API URL which includes the parameters (AccessID, Signatures, and expirations)
 			required to access a secure resource.
 		'''
@@ -116,7 +99,7 @@ class SonadorServer(object):
 		return build_url(self.scheme, self.netloc,
 			guru_auth.create_signed_url(self.access_id, self.secret_key, resource_endpoint, **url_kwargs))
 
-	def sonador_request_headers(self, headers=None):
+	def request_headers(self, headers=None):
 		''' Add headers to a Sonador API request. If an API token is used to access Sonador
 			resources, the token and corresponding heder are added to the dictionary.
 
@@ -132,6 +115,16 @@ class SonadorServer(object):
 			headers.update({ API_ACCESS_TOKEN: self.apitoken })
 
 		return headers
+
+	def sonador_apiurl(self, *args, **kwargs):
+		'''	DEPRECATED: Compatibility method kept for code which uses the Sonador client. Use apiurl instead.
+		'''
+		return self.apiurl(*args, **kwargs)
+
+	def sonador_request_headers(self, *args, **kwargs):
+		'''	DEPRECATED: Compatibility method kept for code which uses the Sonador client. Use request_headers instead.
+		'''
+		return self.request_headers(*args, **kwargs)
 
 	def get_imageserver(self, uid, verify=None, imageserver_datamodel_class=None):
 		'''	Retrieve model data for the specified Imaging/PACS server
@@ -164,10 +157,9 @@ class SonadorServer(object):
 			@returns DataService model instance
 		'''
 		from .remote import fetch_sonador_dataobject
-		if dataservice_datamodel_class is None:
-			from .services import DataService
-			dataservice_datamodel_class = DataService
+		from .services import DataService
 		
+		dataservice_datamodel_class = dataservice_datamodel_class or DataService
 		if verify is None:
 			verify = self.verify
 		
@@ -180,34 +172,6 @@ class SonadorServer(object):
 			verify = self.verify
 		
 		return fetch_sonador_session_token(self, verify=verify)
-
-
-def request_client_error(msg, r, rdata=None, exception_class=ClientOperationError):
-	'''	Raise a ClientOperationError if the provided request was not completed successfully
-		
-		@input msg (str): Message which should be associated with the error
-		@input r (requests.Response): Response object
-		@input exception_class (Exception, default=ClientOperationError): Exception class
-			which should be used for the error.
-
-		@raises Exception
-	'''
-	rdata = rdata or {}
-
-	# Attempt to de-serialize response and retrieve server errors
-	try: rdata.update(r.json())
-	except ValueError as err:
-		logger.debug('Unable to serialize response to JSON\n%s' % err)
-		logger.debug('Server response body:\n%s' % r.content.decode('utf-8'))
-
-	edetails = {
-		gcapicodes.STATUS_CODE: r.status_code,
-		gcapicodes.SERVER_RESPONSE: r.content,
-	}
-	if rdata.get(gcapicodes.ERRORS):
-		edetails[gcapicodes.ERRORS] = rdata.get(gcapicodes.ERRORS)
-
-	raise exception_class(msg, http_code=r.status_code, details=edetails)
 	
 
 def report_operation_error(err, error_traceback=None, 
