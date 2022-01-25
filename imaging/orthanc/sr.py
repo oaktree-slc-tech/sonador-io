@@ -2,6 +2,7 @@
 	and inspecting the contents of reports with structured data and image segmentations.
 '''
 import functools
+import datetime
 from abc import ABCMeta, abstractmethod
 
 from pydicom.dataset import Dataset
