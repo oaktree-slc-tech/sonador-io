@@ -4,16 +4,22 @@ from urllib.parse import urlencode
 from tabulate import tabulate
 from collections import OrderedDict
 
+from client import apisettings as gcapicodes
 from client import auth as guru_auth
 from client.utils.urls import build_url
 from client.utils.object import pick, omit
-from client.utils.microservices import RemotePage
+from client.utils.microservices import RemotePage, server_controloperation_json_response
+from client.utils.format import formerrors2str
+from client.utils.conversion import str2bool
+from client.errors import ClientOperationError
+from client.remote import RemoteServer, request_client_error
 
 from .apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, \
 	IMAGING_SERVER_RESOURCE_SERIES, IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_RESOURCE_SUPPORTED, \
 	DCMHEADER_MODALITY, DCM_MODALITY_SR, DCM_MODALITY_SEG
 from .serialization import json_datetime_parser
-from .helpers import request_client_error, fetch_sonador_session_token
+from .helpers import request_client_error, fetch_sonador_session_token, API_ACCESS_TOKEN, OAUTH_TOKEN_RESPONSE_TYPE, \
+	OAUTH_TOKEN_IDTOKEN_RESPONSE_TYPE, OAUTH_ACCESS_TOKEN, OAUTH_TOKEN_TYPE, OAUTH_TOKEN_TYPE_BEARER, OAUTH_EXPIRATION
 from .remote import SonadorBaseObject, SonadorObjectCollection, \
 	fetch_sonador_data_collection, fetch_sonador_dataobject
 
@@ -31,6 +37,126 @@ IMAGING_SERVER_OUTPUT_COLUMNS = OrderedDict((
 		('port', 'Port'),
 		('description', 'Description'),
 	))
+
+
+class SonadorServer(RemoteServer):
+	'''	Sonador server client
+	'''
+
+	def __init__(self, sonador_url, access_id=None, secret_key=None, apitoken=None, verify=False,
+			internal_dns=False):
+		'''	Initialize the server instance
+
+			@input sonador_url (str): Full URL to the server instance
+			@input access_id (str): API Access ID for the server
+			@input secret_key (str): Secret key associated with the specified access ID
+		'''
+		self.internal_dns = internal_dns
+		
+		# Auth: API token and token type
+		self.sonador_authdata = None
+
+		# Initialize parent class
+		super().__init__(sonador_url, access_id=access_id, secret_key=secret_key, apitoken=apitoken, verify=verify)
+
+	@property
+	def apitoken(self):
+		if self._apitoken is None and self.sonador_authdata is None:
+			self.sonador_authdata = self.get_session_token(verify=self.verify)
+			self._apitoken = self.sonador_authdata.get(OAUTH_ACCESS_TOKEN)
+			self.apitoken_type = self.sonador_authdata.get(OAUTH_TOKEN_TYPE)
+
+		return self._apitoken
+
+	def apiurl(self, resource_endpoint, method=None):
+		'''	Create a Sonador API URL which includes the parameters (AccessID, Signatures, and expirations)
+			required to access a secure resource.
+		'''
+		# Add API token as a request header (if present)
+		if self.apitoken_type == API_ACCESS_TOKEN and self.apitoken:
+			return build_url(self.scheme, self.netloc, resource_endpoint)
+
+		# Add optional URL signature components
+		url_kwargs = {}
+		if method:
+			url_kwargs['method'] = method
+
+		return build_url(self.scheme, self.netloc,
+			guru_auth.create_signed_url(self.access_id, self.secret_key, resource_endpoint, **url_kwargs))
+
+	def request_headers(self, headers=None):
+		''' Add headers to a Sonador API request. If an API token is used to access Sonador
+			resources, the token and corresponding heder are added to the dictionary.
+
+			@input headers (dict, default=empty dict): Dictionary to which the Sonador auth
+				headers should be added.
+
+			@returns dict
+		'''
+		headers = headers or {}
+
+		# Add API token as a request header (if present)
+		if self.apitoken_type == API_ACCESS_TOKEN and self.apitoken:
+			headers.update({ API_ACCESS_TOKEN: self.apitoken })
+
+		return headers
+
+	def sonador_apiurl(self, *args, **kwargs):
+		'''	DEPRECATED: Compatibility method kept for code which uses the Sonador client. Use apiurl instead.
+		'''
+		return self.apiurl(*args, **kwargs)
+
+	def sonador_request_headers(self, *args, **kwargs):
+		'''	DEPRECATED: Compatibility method kept for code which uses the Sonador client. Use request_headers instead.
+		'''
+		return self.request_headers(*args, **kwargs)
+
+	def get_imageserver(self, uid, verify=None, imageserver_datamodel_class=None):
+		'''	Retrieve model data for the specified Imaging/PACS server
+
+			@input uid (str): Sonador UID/pk for the imaging server.
+			@input verify (bool, default=server default): Toggles whether SSL certificates
+				should be validated as part of the request. If no value is passed, 
+				the default setting included in the Sonador server will be used.
+			
+			@returns SonadorImagingServer model instance
+		'''
+		from .remote import fetch_sonador_dataobject
+		if imageserver_datamodel_class is None:
+			from .servers import SonadorImagingServer
+			imageserver_datamodel_class = SonadorImagingServer
+		
+		if verify is None:
+			verify = self.verify
+
+		return fetch_sonador_dataobject(self, imageserver_datamodel_class, uid, verify=verify)
+
+	def get_dataservice(self, uid, verify=None, dataservice_datamodel_class=None):
+		'''	Retrieve model data for the specified Data Service
+
+			@input uid (str): Sonador UID/pk for the data service
+			@input verify (bool, default=server default): Toggles whether SSL certificates
+				should be validated as part of the request. If no value is passed,
+				the default setting included in the Sonador server will be used.
+			
+			@returns DataService model instance
+		'''
+		from .remote import fetch_sonador_dataobject
+		from .services import DataService
+		
+		dataservice_datamodel_class = dataservice_datamodel_class or DataService
+		if verify is None:
+			verify = self.verify
+		
+		return fetch_sonador_dataobject(self, dataservice_datamodel_class, uid, verify=verify)
+	
+	def get_session_token(self, verify=None, *args, **kwargs):
+		'''	Retrieve a session token using the provided acess ID/secret
+		'''
+		if verify is None:
+			verify = self.verify
+		
+		return fetch_sonador_session_token(self, verify=verify)
 
 
 class SonadorImagingServer(SonadorBaseObject):
@@ -299,7 +425,7 @@ class SonadorImagingServer(SonadorBaseObject):
 	def fetch_jobs(self, verify=None, headers=None, limit=None, offset=None, expand=True, **kwargs):
 		'''	Retrieve the processing jobs for the server
 		'''
-		from .imaging.jobs import OrthancJobCollection
+		from .imaging.orthanc.jobs import OrthancJobCollection
 		
 		if verify is None:
 			verify = self.server.verify
@@ -316,7 +442,7 @@ class SonadorImagingServer(SonadorBaseObject):
 	def get_job(self, jid, headers=None, **kwargs):
 		'''	Retrieve a processing job instance
 		'''
-		from .imaging.jobs import OrthancJob
+		from .imaging.orthanc.jobs import OrthancJob
 		return self.get_imaging_resource(jid, OrthancJob, headers=headers, **kwargs)
 
 	def dicomweb_push(self, rdweb, resources, op=None, headers=None, async_transfer=True, priority=None):
@@ -513,7 +639,7 @@ class RemoteDICOMwebServer(ImagingServerModalityMixin, ImagingServerBaseObject):
 
 			@returns OrthancJob instance if the transfer was async or OrthancJobResult is synchronous
 		'''
-		from .imaging.jobs import OrthancJob, OrthancJobResult
+		from .imaging.orthanc.jobs import OrthancJob, OrthancJobResult
 
 		rdata = self.server._parse_apiresponse_json(r)
 		return OrthancJob(self.server, rdata, pacs=self.pacs, dicomweb=self) if async_transfer \
