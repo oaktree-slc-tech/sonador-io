@@ -7,6 +7,7 @@ from .base import parse_image_orientation, ImagingPatient, ImagingPatientCollect
 	ImageCoord, ImageSpacing, ImageOrientation, IMAGING_INSTANCE_OUTPUT_COLUMNS, \
 	IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES
 from .sr import DcmSRSeries, DcmSRSeriesCollection, IMAGING_SERVER_RESOURCE_REPORT
+from .jobs import OrthancJob, OrthancJobCollection, OrthancJobResult
 
 
 

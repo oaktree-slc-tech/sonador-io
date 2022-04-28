@@ -20,11 +20,15 @@ from client.utils.object import pick
 from client.utils.microservices import server_controloperation_json_response, RemotePage
 
 from ...apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
-	DCMHEADER_PATIENT_ID, DCMHEADER_PATIENT_NAME, DCMHEADER_PATIENT_SEX, DCMHEADER_PATIENT_BIRTHDATE, \
+	DCMHEADER_PATIENT_ID, DCMHEADER_PATIENT_NAME, \
+	DCMHEADER_PATIENT_SEX, DCMHEADER_PATIENT_BIRTHDATE, \
 	DCMHEADER_IMAGE_POSITION_PATIENT, DCMHEADER_IMAGE_ORIENTATION_PATIENT, DCM_DATE_STRFORMAT, DCM_TIME_STRFORMAT, \
-	DCMHEADER_MODALITY, DCMHEADER_STUDY_INSTANCE_UID
+	DCMHEADER_MODALITY, DCMHEADER_STUDY_INSTANCE_UID, DCMHEADER_STUDY_ID, \
+	DCMHEADER_STUDY_DATE, DCMHEADER_STUDY_TIME, \
+	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME, DCMHEADER_SERIES_DESCRIPTION, \
+	DCMHEADER_BODY_PART_EXAMINED
 from ...helpers import request_client_error, fetch_sonador_session_token
-from ...serialization import json_datetime_parser, json_str2datetime, dcm_str2time
+from ...serialization import json_datetime_parser, json_str2datetime, dcm_str2date, dcm_str2time
 from ...remote import SonadorBaseObject, SonadorObjectCollection, fetch_sonador_data_collection
 from ...servers import ImagingServerChildCollection, ImagingServerBaseObject
 
@@ -409,6 +413,10 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		return self.dicomdata.get(DCMHEADER_STUDY_INSTANCE_UID)
 
 	@property
+	def study_id(self):
+		return self.dicomdata.get(DCMHEADER_STUDY_ID)
+
+	@property
 	def patient_name(self):
 		return self.patientdata.get('PatientName')
 
@@ -426,7 +434,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 	@property
 	def study_date(self):
-		return self.dicomdata.get('StudyDate')
+		return self.dicomdata.get(DCMHEADER_STUDY_DATE)
 
 	@property
 	def physician(self):
@@ -577,7 +585,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 
 	@property
 	def description(self):
-		return self.dicomdata.get('SeriesDescription')
+		return self.dicomdata.get(DCMHEADER_SERIES_DESCRIPTION)
 
 	@property
 	def series_number(self):
@@ -587,7 +595,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 	def series_datestr(self):
 		'''	DICOM string representation of when the series was acquired. (Created from the SeriesDate header.)
 		'''
-		return self.dicomdata.get('SeriesDate')
+		return self.dicomdata.get(DCMHEADER_SERIES_DATE)
 
 	@property
 	def series_date(self):
@@ -595,7 +603,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 		'''
 		if getattr(self, '_sdate', None) is None:
 			if self.series_datestr:
-				self._sdate = datetime.datetime.strptime(self.series_datestr, DCM_DATE_STRFORMAT).date()
+				self._sdate = dcm_str2date(self.series_datestr)
 			else: self._sdate = None
 
 		return self._sdate
@@ -604,7 +612,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 	def series_timestr(self):
 		'''	DICOM string representation of when the series was acquired. (Created from the SeriesTime header.)
 		'''
-		return self.dicomdata.get('SeriesTime')
+		return self.dicomdata.get(DCMHEADER_SERIES_TIME)
 
 	@property
 	def series_time(self):
@@ -636,11 +644,11 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 
 	@property
 	def series_uid(self):
-		return self.dicomdata.get('SeriesInstanceUID')
+		return self.dicomdata.get(DCMHEADER_SERIES_INSTANCE_UID)
 
 	@property
 	def body_part(self):
-		return self.dicomdata.get('BodyPartExamined')
+		return self.dicomdata.get(DCMHEADER_BODY_PART_EXAMINED)
 
 	@property
 	@abstractmethod
@@ -1016,7 +1024,7 @@ class DcmInstance(DcmInstanceCoreResource):
 			@returns float or None
 		'''
 		thickness = self.tags.get('SliceThickness')
-		return float(thickness) if isinstance(thickness, six.string_types) else zval
+		return float(thickness) if isinstance(thickness, six.string_types) else thickness
 
 	@property
 	@functools.lru_cache()
