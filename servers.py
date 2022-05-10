@@ -166,6 +166,12 @@ class SonadorImagingServer(SonadorBaseObject):
 	tabulate_output_columns = IMAGING_SERVER_OUTPUT_COLUMNS
 	details_exclude = ('token',)
 
+	def __init__(self, *args, resource_cache=None, **kwargs):
+
+		# Cache to be used when fetching resources
+		self.resource_cache = resource_cache or {}
+		super().__init__(*args, **kwargs)
+
 	@property
 	def netloc(self):
 		'''	Return network location for the server (hostname:port)
@@ -284,9 +290,18 @@ class SonadorImagingServer(SonadorBaseObject):
 		return fetch_sonador_dataobject(self.server, RemoteDICOMwebServer, rid, verify=verify, pacs=self,
 			dataobject_endpoint=posixpath.join(self.fetch_endpoint, self.pk, 'dicom-web', rid))
 
-	def get_imaging_resource(self, rid, resource_type, headers=None, verify=None, **kwargs):
+	def get_imaging_resource(self, rid, resource_type, headers=None, verify=None, cache=False, **kwargs):
 		'''	Retrieve the requested resource
+
+			@input rid (str): Orthanc ID (resource.pk) of the resource to be retrieved.
+			@input cache (bool, default=False): toggles whether to retrieve a cached copy of the resource.
+				If True, the imaging server instance will store a reference to the imaging resource
+				which will be used in subsequent calls to `get_imaging_resource`.
 		'''
+		# Return resource instance from local cache
+		if cache and rid in self.resource_cache:
+			return self.resource_cache[rid]
+
 		if verify is None:
 			verify = self.server.verify
 
@@ -296,31 +311,48 @@ class SonadorImagingServer(SonadorBaseObject):
 			request_client_error('Unable to retrieve requested resource %s instance %s. Status code: %s'
 				% (rid, resource_type, r.status_code), r)
 
-		return self.server._init_dataclass(resource_type, r, pacs=self, **kwargs)
+		# Retrieve resource instance
+		resource = self.server._init_dataclass(resource_type, r, pacs=self, **kwargs)
 
-	def get_patient(self, pid, headers=None, **kwargs):
+		# Cache local copy
+		if cache:
+			self.resource_cache[rid] = resource
+		
+		return resource
+
+	def get_patient(self, pid, headers=None, cache=False, **kwargs):
 		'''	Retrieve patient data for the specified UID
 		'''
 		from .imaging.orthanc import ImagingPatient
-		return self.get_imaging_resource(pid, ImagingPatient, headers=headers, **kwargs)
+		return self.get_imaging_resource(pid, ImagingPatient, headers=headers, cache=cache, **kwargs)
 
-	def get_study(self, sid, headers=None, **kwargs):
+	def get_study(self, sid, headers=None, cache=False, **kwargs):
 		'''	Retrieve a study instance
 		'''
 		from .imaging.orthanc import ImagingStudy
-		return self.get_imaging_resource(sid, ImagingStudy, headers=headers, **kwargs)
+		return self.get_imaging_resource(sid, ImagingStudy, headers=headers, cache=cache, **kwargs)
 
-	def get_series(self, rid, headers=None, **kwargs):
+	def get_series(self, rid, headers=None, cache=False, **kwargs):
 		'''	Retrieve a series instance 
+
+			@input rid (str): Orthanc resource ID (resource.pk) of the imaging series to be retrieved.
+			@input cache (bool, default=False): toggles whether to retrieve a cached copy of the resource.
+				If True, the imaging server instance will store a reference to the imaging series which
+				will be used in subsequent calls to `get_series`.
 		'''
 		from .imaging.orthanc import ImagingSeries
-		return self.get_imaging_resource(rid, ImagingSeries, headers=headers, **kwargs)
+		return self.get_imaging_resource(rid, ImagingSeries, headers=headers, cache=cache, **kwargs)
 
-	def get_dcm_instance(self, rid, headers=None, **kwargs):
+	def get_dcm_instance(self, rid, headers=None, cache=False, **kwargs):
 		'''	Retrieve a DCM instance
+
+			@input rid (str): Orthanc resource ID (resource.pk) of the DICOM instance to be retrieved.
+			@input cache (bool, default=False): toggles whether to retrieve a cached copy of the resource.
+				If True, the imaging server instance will store a reference to the imaging series
+				which will be used in subsequent calls to `get_dcm_instance`.
 		'''
 		from .imaging.orthanc import DcmInstance
-		return self.get_imaging_resource(rid, DcmInstance, headers=headers, **kwargs)
+		return self.get_imaging_resource(rid, DcmInstance, headers=headers, cache=cache, **kwargs)
 
 	def query(self, sfilter, expand=True,limit=None, offset=None, query=None, headers=None, verify=None, 
 			resource=IMAGING_SERVER_RESOURCE_SERIES, resource_modelcollection_class=None, **kwargs):
