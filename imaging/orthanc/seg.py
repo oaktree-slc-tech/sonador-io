@@ -17,7 +17,7 @@ from .sr import DcmSRSeries, DcmSRSeriesCollection, DcmStructuredInstance, DcmSt
 ImageSegment = namedtuple('ImageSegment', ('dcm', 'meta', 'data'))
 
 # ImageSegmentMeta objects contain the number and labels for segments.
-ImageSegmentMeta = namedtuple('ImageSegmentMeta', ('number', 'label'))
+ImageSegmentMeta = namedtuple('ImageSegmentMeta', ('number', 'label', 'series'))
 
 # ImageSegmentData objects contain the pydicom.Dataset instances, frames/masks (numpy.ndarray),
 # and DICOM frame descriptions (needed to match the segmentation labels and masks to the correct slices).
@@ -70,7 +70,7 @@ class DcmSegmentationInstance(DcmStructuredInstance):
 		for frames, fdescriptions, description in dcmseg_iter_segments(self.dcmfile(cache=cache)):
 
 			# Unpack details of the image segment: number, label, description
-			seg = ImageSegmentMeta(description.SegmentNumber, description.SegmentLabel)
+			seg = ImageSegmentMeta(description.SegmentNumber, description.SegmentLabel, self.parent)
 			segments[seg] = ImageSegmentData(description, frames, fdescriptions, set())
 
 			# Unpack DICOM UID references
