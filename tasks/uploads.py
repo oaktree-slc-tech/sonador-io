@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 def imageserver_upload_folder(iserver, folders, tpool=None, threads=4, 
 		verify=False, fileupload_check=False, destfolder_complete=None,
-		dcm_extensions=DCM_EXTENSIONS_DEFAULT):
+		dcm_extensions=DCM_EXTENSIONS_DEFAULT, ignore_errors=False):
 	'''	Scan folders and upload all DICOM images to the provided imaging servers
 
 		@input iserver (SonadorImagingServer instance): Imaging server to which the
@@ -73,6 +73,11 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 							the method returns None.
 					'''
 					ipath = pathlib.Path(os.path.join(croot, iname))
+
+					# Operational results
+					op_mvimg = False
+					op_code = None
+
 					with open(ipath, 'rb') as img:
 						logger.debug('Upload image %s to server %s' % (iname, iserver.pk))
 
@@ -87,23 +92,49 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 								return None
 
 						# Upload image to PACS imaging server
-						r = iserver.upload_image(img)
-						
-						# Move file to the destination folder
-						if destfolder_complete and r.ok:
-							ipath_dest = pathlib.Path(
-								os.path.join(destfolder_complete, froot_path.name, ipath.relative_to(froot_path)))
+						try:
+							r = iserver.upload_image(img)
+							op_code = r.ok
 
-							# Create parent folder
-							if not ipath_dest.parent.exists():
-								ipath_dest.parent.mkdir(parents=True, exist_ok=True)
+							# Upload successful: if indicated, move the image to the results tree
+							op_mvimg = True if destfolder_complete and op_code else False
 
-							# Move the file to the destination folder
-							shutil.move(ipath, ipath_dest)
-							logger.debug(
-								'Image %s uploaded successfully, move image file to destination folder %s' % (ipath, ipath_dest))
-						
-						return r.ok
+						except pydicom.errors.InvalidDicomError as err:
+
+							# Log and suppress the error
+							if ignore_errors:
+								logger.error('Unable to upload file %s, invalid DICOM file. Skipping.' % ipath)
+								op_code = False
+								op_mvimg = True if destfolder_complete and ignore_errors else False
+
+							else: raise err
+
+						except Exception as err:
+
+							# Log and Suppress the error
+							if ignore_errors:
+								logger.error(
+									'Unable to upload file %s due to an error. Skipping file. Error:\n%s' % (iname, err))
+								op_code = False
+								op_mvimg = True if destfolder_complete and ignore_errors else False
+
+							else: raise err
+
+					# Move file to the destination folder
+					if op_mvimg:
+						ipath_dest = pathlib.Path(
+							os.path.join(destfolder_complete, froot_path.name, ipath.relative_to(froot_path)))
+
+						# Create parent folder
+						if not ipath_dest.parent.exists():
+							ipath_dest.parent.mkdir(parents=True, exist_ok=True)
+
+						# Move the file to the destination folder
+						shutil.move(ipath, ipath_dest)
+						logger.debug(
+							'Move file %s to destination folder %s' % (ipath, ipath_dest))
+					
+					return op_code
 
 				uresults = sum(filter(lambda v: v is not None, tpool.map(upload_dcmimages, dcmfiles)))
 				if uresults:
