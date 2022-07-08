@@ -26,7 +26,7 @@ from ...apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOU
 	DCMHEADER_MODALITY, DCMHEADER_STUDY_INSTANCE_UID, DCMHEADER_STUDY_ID, \
 	DCMHEADER_STUDY_DATE, DCMHEADER_STUDY_TIME, \
 	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME, DCMHEADER_SERIES_DESCRIPTION, \
-	DCMHEADER_BODY_PART_EXAMINED
+	DCMHEADER_BODY_PART_EXAMINED, DCM_VERSION_2021b
 from ...helpers import request_client_error, fetch_sonador_session_token
 from ...serialization import json_datetime_parser, json_str2datetime, dcm_str2date, dcm_str2time
 from ...remote import SonadorBaseObject, SonadorObjectCollection, fetch_sonador_data_collection
@@ -126,7 +126,7 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 			@returns requests.Response
 		'''
 		modify = modify or {}
-		if not isinstance(replace, dict):
+		if replace and not isinstance(replace, dict):
 			raise TypeError('Unable to modify DICOM resource, replace terms must be submitted as a dictonary')
 		if remove and not isinstance(remove, Iterable):
 			raise TypeError('Unable to remove requested DICOM tags, remove terms must be submitted as an interable')
@@ -246,6 +246,58 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 			setattr(self, '_filearchive', farchive)
 
 		return farchive
+
+	def anonymize(self, replace=None, keep=None, remove=None, keep_private_tags=True, 
+			dicom_version=DCM_VERSION_2021b, anonymize=None, headers=None, verify=None):
+		'''	Anonymize the resource. Anonymization erases all tags specified in Table E.1-1 from PS 3.15
+			 of the DICOM standard. (Refer to 
+			 http://dicom.nema.org/medical/dicom/current/output/chtml/part15/chapter_E.html#table_E.1-1.)
+
+			 @input replace (dict, default=None): dict of DICOM tags to replace on the resource.
+			 	Example: { 'PatientName': 'Example Patient', '0010-1011': 'Example Tag Value'}.
+			 	Replacements are applied after all the tags to anonymize have been removed. replace
+			 	may be used to add new tags to the resource.
+			 @input keep (iterable, default=None): iterable of tags to be preserved from full anonymization.
+			 @input keep_private_tags (bool, default=True): preserves private (manufacturer-specific) tag
+			 	values. The default behavior of the server is to remove the tags.
+			 @input dicom_version (str, default='2021b'): version of the DICOM standard to be used
+			 	for anonymization.
+			 @input remove (iterable, default=None): iterable ot tags to be removed outside of those
+			 	specified in the standard.
+
+			 @returns request.Response
+		'''
+		anonymize = anonymize or {}
+		if replace and not isinstance(replace, dict):
+			raise TypeError('Unable to anonymize DICOM resource, replace terms must be submitted as a dictionary.')
+		if remove and not isinstance(remove, Iterable):
+			raise TypeError('Unable to remove DICOM tags, remove terms must be submitted as an iterable.')
+
+		if verify is None:
+			verify = self.server.verify
+
+		# Create request structure
+		anonymize.update({ 'KeepPrivateTags': keep_private_tags, 'DicomVersion': dicom_version })
+		if replace:
+			anonymize['Replace'] = replace
+		if remove:
+			anonymize['Remove'] = remove
+		if keep:
+			anonymize['Keep'] = keep
+
+		# Execute operation
+		logger.debug('Structure of modification request:\n%s' % json.dumps(anonymize))
+		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'anonymize')), json=anonymize,
+			headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
+		if not r.ok:
+			request_client_error(
+				'Unable to anonymize DICOM resource tags for %s on server %s. Status code: %s.'
+					% (self.resource_url, self.pacs.server_label, r.status_code),
+				r)
+
+		logger.debug('Response from PACS imaging server:\n%s' % r.content)
+		return r
+		
 
 
 # PACS Imaging
