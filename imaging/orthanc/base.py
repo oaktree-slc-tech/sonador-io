@@ -247,6 +247,24 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 
 		return farchive
 
+	def reconstruct(self, headers=None, verify=None, rdata=None):
+		'''	Launch a job which will re-index the resource in the database.
+		'''
+		rdata = rdata or {}
+		if verify is None:
+			verify = self.server.verify
+		
+		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'reconstruct')),
+			json=rdata, headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
+		if not r.ok:
+			request_client_error(
+				'Unable to reconstruct DICOM resource for %s on server %s. Status code: %s.'
+					% (self.resource_url, self.pacs.server_label, r.status_code),
+				r)
+
+		logger.debug('Response from PACS imaging server:\n%s' % r.content)
+		return r
+
 	def anonymize(self, replace=None, keep=None, remove=None, keep_private_tags=True, 
 			dicom_version=DCM_VERSION_2021b, anonymize=None, headers=None, verify=None):
 		'''	Anonymize the resource. Anonymization erases all tags specified in Table E.1-1 from PS 3.15
