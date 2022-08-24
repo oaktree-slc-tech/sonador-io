@@ -14,19 +14,23 @@ from collections import OrderedDict
 
 from tabulate import tabulate
 
+from client import apisettings as gcapicodes
 from client import auth as guru_auth
 from client.utils.urls import build_url
 from client.utils.object import pick
 from client.utils.microservices import server_controloperation_json_response, RemotePage
 
 from ...apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
+	IMAGING_SERVER_LAST_UPDATE, IMAGING_SERVER_DICOMTAGS_SIGNATURE, \
 	DCMHEADER_PATIENT_ID, DCMHEADER_PATIENT_NAME, \
 	DCMHEADER_PATIENT_SEX, DCMHEADER_PATIENT_BIRTHDATE, \
 	DCMHEADER_IMAGE_POSITION_PATIENT, DCMHEADER_IMAGE_ORIENTATION_PATIENT, DCM_DATE_STRFORMAT, DCM_TIME_STRFORMAT, \
 	DCMHEADER_MODALITY, DCMHEADER_STUDY_INSTANCE_UID, DCMHEADER_STUDY_ID, \
 	DCMHEADER_STUDY_DATE, DCMHEADER_STUDY_TIME, \
-	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME, DCMHEADER_SERIES_DESCRIPTION, \
-	DCMHEADER_BODY_PART_EXAMINED, DCM_VERSION_2021b
+	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SERIES_NUMBER, \
+	DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME, DCMHEADER_SERIES_DESCRIPTION, \
+	DCMHEADER_BODY_PART_EXAMINED, DCM_VERSION_2021b, \
+	DCMHEADER_MODALITIES_IN_STUDY
 from ...helpers import request_client_error, fetch_sonador_session_token
 from ...serialization import json_datetime_parser, json_str2datetime, dcm_str2date, dcm_str2time
 from ...remote import SonadorBaseObject, SonadorObjectCollection, fetch_sonador_data_collection
@@ -94,6 +98,23 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 			self._meta = r.json()
 
 		return self._meta
+
+	@property
+	def lastupdate(self):
+		'''	Timestamp of last resource update
+		'''
+		if getattr(self, '_lastupdate', None) is None and self.meta.get(IMAGING_SERVER_LAST_UPDATE):
+			setattr(self, '_lastupdate', json_str2datetime(self.meta.get(IMAGING_SERVER_LAST_UPDATE)))
+
+		return getattr(self, '_lastupdate', None)
+
+	@property
+	def tags_signature(self):
+		return self.meta.get(IMAGING_SERVER_DICOMTAGS_SIGNATURE)
+
+	@property
+	def stable(self):
+		return self._objectdata.get('IsStable')
 
 	@property
 	def dicomdata(self):
@@ -206,6 +227,16 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 		''' DICOMDIR archive URL for the resource
 		'''
 
+	@property
+	@abstractmethod
+	def cache_indexurl(self):
+		'''	Sonador cache URL used to index the resource
+		'''
+
+	@property
+	def type(self):
+		return self._objectdata.get('Type')
+
 	def filearchive(self, cache=False, filearchive_type=FILEARCHIVE_TYPE_ZIPARCHIVE, verify=None):
 		'''	Retrieve a ZIP archive of all data associated with the resource.
 
@@ -247,12 +278,35 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 
 		return farchive
 
-	def reconstruct(self, headers=None, verify=None, rdata=None):
-		'''	Launch a job which will re-index the resource in the database.
+	def index(self, link=True, headers=None, verify=None, rdata=None):
+		''' Add the resouce to the Sonador resource cache.
 		'''
 		rdata = rdata or {}
 		if verify is None:
 			verify = self.server.verify
+
+		# Request components
+		rdata['link'] = link
+
+		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.cache_indexurl)),
+			json=rdata, headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
+		if not r.ok:
+			request_client_error(
+				'Unable to add DICOM resource %s on server %s to the Sonador resource cache. Status code: %s.'
+					% (self.cache_indexurl, self.pacs.server_label, r.status_code),
+				r)
+
+		logger.debug('Response from PACS imaging server:\n%s' % r.content)
+		return r
+
+	def reconstruct(self, link=True, headers=None, verify=None, rdata=None,):
+		'''	Launch a job which to re-build the resource in the database.
+		'''
+		rdata = rdata or {}
+		if verify is None:
+			verify = self.server.verify
+
+		# Request components
 		
 		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'reconstruct')),
 			json=rdata, headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
@@ -336,6 +390,7 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerBaseObject):
 	pk_attr = 'ID'
 	tabulate_output_columns = IMAGING_PATIENT_OUTPUT_COLUMNS
 	fetch_endpoint = 'patients'
+	cache_queryurl = '/cache/patients'
 
 	@property
 	def resource_url(self):
@@ -350,6 +405,10 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerBaseObject):
 		return posixpath.join(self.fetch_endpoint, self.pk, 'media')
 
 	@property
+	def cache_indexurl(self):
+		return posixpath.join(self.cache_queryurl, self.pk, 'index')
+
+	@property
 	def patient_name(self):
 		return self.dicomdata.get(DCMHEADER_PATIENT_NAME)
 
@@ -362,8 +421,19 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerBaseObject):
 		return self.dicomdata.get(DCMHEADER_PATIENT_SEX)
 
 	@property
-	def birth_date(self):
+	def birth_datestr(self):
 		return self.dicomdata.get(DCMHEADER_PATIENT_BIRTHDATE)
+
+	@property
+	def birth_date(self):
+		'''	Patient birth date
+
+			@returns datetime.date
+		'''
+		if getattr(self, '_birthdate', None) is None and self.birth_datestr:
+			setattr(self, '_birthdate', dcm_str2date(self.birth_datestr))
+
+		return getattr(self, '_birthdate', None)
 
 	@property
 	def studies(self):
@@ -379,11 +449,18 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerBaseObject):
 			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')))
 		if not r.ok:
 			request_client_error(
-				'Unable to retrieve details for patient %s studies on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
+				'Unable to retrieve details for patient %s studies on server %s. Status code: %s.' 
+					% (self.pk, self.pacs.server_label, r.status_code),
 				r)
 
 		# Parse response and return collection
 		return self.server._init_dataclass(ImagingStudyCollection, r, pacs=self.pacs, patient=self, **kwargs)
+
+	def studies_from_json(self, jdata, **kwargs):
+		'''	Initialize studies collection from JSON structure.
+		'''
+		return self.server._init_dataclass_from_json(
+			ImagingStudyCollection, jdata, pacs=self.pacs, patient=self, **kwargs)
 
 	@property
 	def studies_collection(self):
@@ -409,6 +486,12 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerBaseObject):
 
 		# Parse response and return collection
 		return self.server._init_dataclass(ImagingSeriesCollection, r, pacs=self.pacs, patient=self, **kwargs)
+
+	def series_from_json(self, jdata, **kwargs):
+		'''	Initialize series collection from JSON structure
+		'''
+		return self.server._init_dataclass_from_json(
+			ImagingSeriesCollection, jdata, pacs=self.pacs, patient=self, **kwargs)
 
 	@property
 	def series_collection(self):
@@ -444,6 +527,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 	pk_attr = 'ID'
 	tabulate_output_columns = IMAGING_STUDY_OUTPUT_COLUMNS
 	fetch_endpoint = 'studies'
+	cache_queryurl = '/cache/studies'
 
 	def __init__(self, *args, **kwargs):
 		self._parent = kwargs.pop('patient', None)
@@ -462,6 +546,10 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		return posixpath.join(self.fetch_endpoint, self.pk, 'media')
 
 	@property
+	def cache_indexurl(self):
+		return posixpath.join(self.cache_queryurl, self.pk, 'index')
+
+	@property
 	def patient(self):
 		return self._objectdata.get('ParentPatient')
 
@@ -473,6 +561,11 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 			self._parent = self.pacs.get_patient(self.patient)
 
 		return self._parent
+
+	def parent_from_json(self, jdata, **kwargs):
+		''' Initialize patient model from the provided JSON data.
+		'''
+		return self.server._init_dataclass_from_json(ImagingPatient, jdata, **kwargs)
 
 	@property
 	def model_patient(self):
@@ -503,8 +596,53 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		return self.dicomdata.get('AccessionNumber')
 
 	@property
-	def study_date(self):
+	def study_datestr(self):
 		return self.dicomdata.get(DCMHEADER_STUDY_DATE)
+
+	@property
+	def study_date(self):
+		'''	Date that the study was acquired. (Parsed from study_datestr.)
+		'''
+		if getattr(self, '_sdate', None) is None and self.study_datestr:
+			self._sdate = dcm_str2date(self.study_datestr)
+
+		return getattr(self, '_sdate', None)
+
+	@property
+	def study_timestr(self):
+		return self.dicomdata.get(DCMHEADER_STUDY_TIME)
+
+	@property
+	def study_time(self):
+		if getattr(self, '_stime', None) is None and self.study_timestr:
+			self._stime = dcm_str2time(self.study_timestr)
+
+		return getattr(self, '_stime', None)
+
+	@property
+	def ts(self):
+		'''	Date/time that the series was acquired (Created from study_date and study_time properties.)
+			Returns None is there is no sutdy date value. Study time is used if available, with midnight
+			being used if it is not.
+		'''
+		try:
+			if getattr(self, '_ts', None) is None and self.study_date:
+
+				# Create timestamp by grouping series date and series time
+				sdate = self.study_date
+				stime = self.study_time or datetime.time(0,0,0)
+				self._ts = datetime.datetime.combine(sdate, stime)
+		
+		except Exception as err:
+			self._ts = None
+
+		return getattr(self, '_ts', None)
+
+	@property
+	def modalities(self):
+		'''	List of modalities in the study
+		'''
+		return self.dicomdata.get(DCMHEADER_MODALITIES_IN_STUDY)
 
 	@property
 	def physician(self):
@@ -528,7 +666,13 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 				r)
 
 		# Parse response and return collection
-		return self.server._init_dataclass(ImagingSeriesCollection, r, pacs=self.pacs, patient=self, **kwargs)
+		return self.server._init_dataclass(ImagingSeriesCollection, r, pacs=self.pacs, study=self, **kwargs)
+
+	def series_from_json(self, jdata, **kwargs):
+		'''	Initialize series collection from JSON structure
+		'''
+		return self.server._init_dataclass_from_json(
+			ImagingSeriesCollection, jdata, pacs=self.pacs, study=self, **kwargs)
 
 	@property
 	def series_collection(self):
@@ -607,6 +751,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 	pk_attr = 'ID'
 	tabulate_output_columns = IMAGING_SERIES_OUTPUT_COLUMNS
 	fetch_endpoint = 'series'
+	cache_queryurl = '/cache/series'
 
 	def __init__(self, *args, **kwargs):
 		self._parent = kwargs.pop('study', None) or kwargs.pop('patient', None)
@@ -623,6 +768,10 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 	@property
 	def dicomdir_url(self):
 		return posixpath.join(self.fetch_endpoint, self.pk, 'media')
+
+	@property
+	def cache_indexurl(self):
+		return posixpath.join(self.cache_queryurl, self.pk, 'index')
 
 	@property
 	def study(self):
@@ -659,7 +808,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 
 	@property
 	def series_number(self):
-		return self.dicomdata.get('SeriesNumber')
+		return self.dicomdata.get(DCMHEADER_SERIES_NUMBER)
 
 	@property
 	def series_datestr(self):
@@ -671,12 +820,10 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 	def series_date(self):
 		'''	Date that the series was acquired. (Parsed from series_datestr.)
 		'''
-		if getattr(self, '_sdate', None) is None:
-			if self.series_datestr:
-				self._sdate = dcm_str2date(self.series_datestr)
-			else: self._sdate = None
+		if getattr(self, '_sdate', None) is None and self.series_datestr:
+			self._sdate = dcm_str2date(self.series_datestr)
 
-		return self._sdate
+		return getattr(self, '_sdate', None)
 
 	@property
 	def series_timestr(self):
@@ -690,27 +837,25 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 
 			@returns datetime.time
 		'''
-		if getattr(self, '_stime', None) is None:
-			if self.series_timestr:
-				self._stime = dcm_str2time(self.series_timestr)
-			else: self._stime = None
+		if getattr(self, '_stime', None) is None and self.series_timestr:
+			self._stime = dcm_str2time(self.series_timestr)
 	
-		return self._stime
+		return getattr(self, '_stime', None)
 
 	@property
 	def ts(self):
 		'''	Date/time that the series was acquired. (Created from series_date and series_time properties.)
+			Returns None is there is no series date value. Series time is used if available, with midnight
+			being used if it is not.
 		'''
-		if getattr(self, '_ts', None) is None:
+		if getattr(self, '_ts', None) is None and self.series_date:
 
 			# Create timestamp by grouping series date and series time
-			if self.series_date and self.series_time:
-				self._ts = datetime.datetime.combine(self.series_date, self.series_time)
-			
-			# Unable to create timestamp, set to None
-			else: self._ts = None
+			sdate = self.series_date
+			stime = self.series_time or datetime.time(0,0,0)				
+			self._ts = datetime.datetime.combine(sdate, stime)
 
-		return self._ts
+		return getattr(self, '_ts', None)
 
 	@property
 	def series_uid(self):
