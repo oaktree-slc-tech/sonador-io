@@ -10,7 +10,7 @@ from client.remote.serialization import json_str2datetime, json_datetime_parser,
 	DCM_DATETIME_REGEX
 
 from .apisettings import DCM_DATETIME_STRFORMAT, \
-	DCM_DATE_STRFORMAT, DCM_DATE_STRFORMAT_ALT1, \
+	DCM_DATE_STRFORMAT, DCM_DATE_STRFORMAT_ALT1, DCM_DATE_STRFORMAT_ALT2, \
 	DCM_TIME_STRFORMAT, DCM_TIME_STRFORMAT_ALT1
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,8 @@ class SonadorJsonEncoder(GuruLabsBaseJsonEncoder):
 	datetime_format = DATETIME_FORMAT1
 
 
-def dcm_str2date(v, formats=(DCM_DATE_STRFORMAT, DCM_DATE_STRFORMAT_ALT1)):
+def dcm_str2date(v, 
+		formats=(DCM_DATE_STRFORMAT, DCM_DATE_STRFORMAT_ALT1, DCM_DATE_STRFORMAT_ALT2)):
 	'''	Parse a string value to a date object. Used to parse DCM tags to datetime.date objects.
 
 		@returns datetime.date

@@ -11,7 +11,7 @@ from client.utils.object import pick, omit
 from client.utils.microservices import RemotePage, server_controloperation_json_response
 from client.utils.format import formerrors2str
 from client.utils.conversion import str2bool
-from client.errors import ClientOperationError
+from client.errors import ClientOperationError, ConfigurationError
 from client.remote import RemoteServer, request_client_error
 
 from .apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, \
@@ -354,14 +354,17 @@ class SonadorImagingServer(SonadorBaseObject):
 		from .imaging.orthanc import DcmInstance
 		return self.get_imaging_resource(rid, DcmInstance, headers=headers, cache=cache, **kwargs)
 
-	def query(self, sfilter, expand=True,limit=None, offset=None, query=None, headers=None, verify=None, 
-			resource=IMAGING_SERVER_RESOURCE_SERIES, resource_modelcollection_class=None, **kwargs):
+	def query(self, sfilter, expand=True, limit=None, offset=None, query=None, headers=None, verify=None, 
+			cache_lookup=False, resource=IMAGING_SERVER_RESOURCE_SERIES, resource_modelcollection_class=None, **kwargs):
 		'''	Submit a query to Orthanc with the provided filter terms
 
 			@input sfilter (dict): Terms to be included in the request
 			@input expand (bool, default=True): Desired response from Orthanc. If True, the full
 				record listing will be retrieved. If False, only the resource IDs will be returned.
 			@input resource (str, default='Series'): Type of resource for which the query should be executed.
+			@input cache_lookup (bool, default=False): Use the Orthanc/Sonador cache API to perform queries.
+				Cache API queries are faster than the `/tools/find` but are "eventually consistent"
+				and may return different results than the traditional endpoint.
 			@input limit (int, default=None): Number of records which should be included in the response.
 				If None, Orthanc will retrieve all records matching the query.
 			@input offset (int, default=None): Any offset to apply to the record list. Used together
@@ -383,6 +386,11 @@ class SonadorImagingServer(SonadorBaseObject):
 		if resource_modelcollection_class is None:
 			resource_modelcollection_class = IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES.get(resource)
 
+		# Check resource model properties to ensure that they are compatible with the request type.
+		if cache_lookup and not hasattr(resource_modelcollection_class.model, 'cache_queryurl'):
+			raise ConfigurationError('Unable to use Sonador cache endpoint for query for resource %s' 
+				% resource_modelcollection_class.model.__name__)
+
 		if verify is None:
 			verify = self.server.verify
 
@@ -400,7 +408,9 @@ class SonadorImagingServer(SonadorBaseObject):
 		logger.debug('Orthanc query:\n%s' % json.dumps(query))
 
 		# Execute query
-		r = requests.post(self.orthanc_apiurl('tools/find'), json=query, headers=self.orthanc_request_headers(headers=headers))
+		r = requests.post(
+			self.orthanc_apiurl(resource_modelcollection_class.model.cache_queryurl) if cache_lookup else self.orthanc_apiurl('tools/find'), 
+			json=query, headers=self.orthanc_request_headers(headers=headers))
 		if not r.ok:
 			request_client_error('Unable to execute resource query to PACS %s. Status code: %s.' % (self.server_label, r.status_code), r)
 
