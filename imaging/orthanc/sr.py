@@ -1,8 +1,7 @@
 '''	Model classes associated with DICOM-SR documents. Provides tools for querying
 	and inspecting the contents of reports with structured data and image segmentations.
 '''
-import functools
-import datetime
+import functools, datetime, logging
 from abc import ABCMeta, abstractmethod
 
 from pydicom.dataset import Dataset
@@ -13,6 +12,8 @@ from ...apisettings import IMAGING_SERVER_RESOURCE_REPORT, DCMHEADER_SERIES_INST
 	DCMHEADER_SR_REF_SOP_SEQ, DCMHEADER_SR_REF_INSTANCE_UID
 from .base import ImagingSeriesCoreResource, ImagingSeriesCollection, ImagingServerChildCollection, \
 	DcmInstanceCoreResource, DcmInstanceCoreCollection
+
+logger = logging.getLogger(__name__)
 
 
 def dcmmencode_procedure_code(val, scheme_designator, meaning, scheme_version=None, 

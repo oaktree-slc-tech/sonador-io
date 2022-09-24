@@ -42,6 +42,36 @@ class SonadorObjectCollection(GuruObjectCollection):
 	'''
 	model = SonadorBaseObject
 
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self._model_lookup = kwargs.get('lookup') or {}
+	
+	def _init_collection_modelinstance(self, *args, **kwargs):
+		'''	Initialize collection model instances. As part of the init, models
+			are indexed to an internal hashmap that enables rapid lookup using
+			the collection `get_modelinstance` method.
+
+			@returns initialize model instance
+		'''
+		model = super()._init_collection_modelinstance(*args, **kwargs)
+		self._model_lookup[model.pk] = model
+		return model
+	
+	def get_modelinstance(self, pk):
+		'''	Retrieve model instance from the collection using the model's unique identifier (primary key).
+
+			@input pk (str): primary key of the model.
+
+			@returns model instance or None: returns the instance of the model which corresponds 
+				to the provided primary key.
+		'''
+		# Collection models are lazily initialized. Check to see if the collection models have been
+		# initialized and indexed before attempting to retrieve an instance. Attempting to retrieve 
+		# the length of the collection will force it to initialize.
+		if not self._model_lookup and self._objectdata: len(self)
+
+		m = self._model_lookup.get(pk)
+		return m
 
 def fetch_sonador_dataobject_schema(*args, apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers', **kwargs):
 	'''	Retrieve a Sonador data schema
