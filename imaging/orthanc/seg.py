@@ -24,8 +24,6 @@ ImageSegmentMeta = namedtuple('ImageSegmentMeta', ('number', 'label', 'series'))
 ImageSegmentData = namedtuple('ImageSegmentData', 
 	('description','frames', 'frame_descriptions', 'resource_instance_uids'))
 
-
-
 class DcmSegmentationSeries(DcmSRSeries):
 	'''	DICOM-SEG: structured report instance containing image segmentations
 	'''
@@ -124,6 +122,7 @@ class DcmSegmentationInstance(DcmStructuredInstance):
 	@functools.lru_cache()
 	def series_reference_uids(self):
 		'''	Cached property for retrieving the reference UIDs of image series associated with the segmentation.
+			
 			@returns set of all unique series UIDs referenced by the segmentation instance.
 		'''
 		return set([refset.get(DCMHEADER_SERIES_INSTANCE_UID) for refset in self.tags.get(DCMHEADER_SR_REF_SERIES_SEQ, [])

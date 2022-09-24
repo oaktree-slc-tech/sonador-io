@@ -21,7 +21,7 @@ from client.utils.object import pick
 from client.utils.microservices import server_controloperation_json_response, RemotePage
 
 from ...apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
-	IMAGING_SERVER_LAST_UPDATE, IMAGING_SERVER_DICOMTAGS_SIGNATURE, \
+	IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_LAST_UPDATE, IMAGING_SERVER_DICOMTAGS_SIGNATURE, \
 	DCMHEADER_PATIENT_ID, DCMHEADER_PATIENT_NAME, \
 	DCMHEADER_PATIENT_SEX, DCMHEADER_PATIENT_BIRTHDATE, \
 	DCMHEADER_IMAGE_POSITION_PATIENT, DCMHEADER_IMAGE_ORIENTATION_PATIENT, DCM_DATE_STRFORMAT, DCM_TIME_STRFORMAT, \
@@ -30,11 +30,12 @@ from ...apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOU
 	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SERIES_NUMBER, \
 	DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME, DCMHEADER_SERIES_DESCRIPTION, \
 	DCMHEADER_BODY_PART_EXAMINED, DCM_VERSION_2021b, \
-	DCMHEADER_MODALITIES_IN_STUDY
+	DCMHEADER_MODALITIES_IN_STUDY, DCM_MODALITY_SR, DCM_MODALITY_SEG
+
 from ...helpers import request_client_error, fetch_sonador_session_token
 from ...serialization import json_datetime_parser, json_str2datetime, dcm_str2date, dcm_str2time
 from ...remote import SonadorBaseObject, SonadorObjectCollection, fetch_sonador_data_collection
-from ...servers import ImagingServerChildCollection, ImagingServerBaseObject
+from ...servers import ImagingServerChildCollection, ImagingServerBaseObject, SonadorImagingServer
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +281,8 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 
 	def index(self, link=True, headers=None, verify=None, rdata=None):
 		''' Add the resouce to the Sonador resource cache.
+
+			@returns requests.Response
 		'''
 		rdata = rdata or {}
 		if verify is None:
@@ -299,14 +302,23 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 		logger.debug('Response from PACS imaging server:\n%s' % r.content)
 		return r
 
-	def reconstruct(self, link=True, headers=None, verify=None, rdata=None,):
-		'''	Launch a job which to re-build the resource in the database.
+	def reconstruct(self, reconstruct_files=False, headers=None, verify=None, rdata=None):
+		'''	Launch a job which to re-build the resource in the database. Refer to 
+			https://api.orthanc-server.com/ for endpoint details.
+
+			@input reconstruct_files (bool, default=False): When true, the reconstruction will
+				also reconstruct the files of resources, which will re-code the instances to use 
+				the server's "ingest transcoding" and "storage compression."
+
+			@returns requests.Response
 		'''
 		rdata = rdata or {}
 		if verify is None:
 			verify = self.server.verify
 
 		# Request components
+		if reconstruct_files:
+			rdata['ReconstructFiles'] = reconstruct_files
 		
 		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'reconstruct')),
 			json=rdata, headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
@@ -369,7 +381,20 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 
 		logger.debug('Response from PACS imaging server:\n%s' % r.content)
 		return r
-		
+
+
+
+# Imaging Resource Base Collection
+class ImagingResourceBaseCollection(ImagingServerChildCollection):
+	'''	Collection of imaging resources stored in a Sonador managed PACS imaging server.
+		The base collection defines an interface that can be used to bulk populate
+		models related to the instances within the collection.
+	'''
+	@abstractmethod
+	def bulkpopulate_related(self, *args, **kwargs):
+		'''	Populate models related to collection instances in the most efficient manner possible
+			via the Orthanc /tools/bulk-content endpoint.
+		'''
 
 
 # PACS Imaging
@@ -503,10 +528,59 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerBaseObject):
 		return self._series
 
 
-class ImagingPatientCollection(ImagingServerChildCollection):
+class ImagingPatientCollection(ImagingResourceBaseCollection):
 	'''	Collection of patients
 	'''
 	model = ImagingPatient
+
+	def bulkpopulate_related(self, child_studies=True, child_series=True):
+		'''	Populate models related to collection instances in the most efficient manner possible.
+
+			@input child_studies (bool, default=True): bulk populate "studies_collection" of collection instances.
+			@input child_series (bool, default=True): bulk populate "series_collection" of child studies.
+		'''
+		if child_series and not child_studies:
+			raise ValueError('Unable to populate series data, option rquires that study be retrieved.')
+
+		if child_studies:
+			studies_uids = []
+
+			# Aggregate patient UIDs
+			for p in self:
+				studies_uids.extend(p.studies)
+
+			# Retrieve child studies and unpack
+			bdata = self.pacs.fetch_bulk_content(studies_uids, *args, **kwargs)
+			bdata_study = bdata.get(IMAGING_SERVER_RESOURCE_STUDY)
+
+			# Unpack data
+			for p in self:
+
+				# Study
+				if bdata_study:
+					p.studies_from_json([bdata_study.get_modelinstance(sid)._objectdata for sid in p.studies if bdata_study.get_modelinstance(sid)])
+
+		if child_series:
+			series_uids = []
+
+			# Aggregate series UIDs
+			for p in self:
+				for s in p.studies_collection:
+					series_uids.extend(s.series)
+
+			# Retrieve child series and unpack
+			bdata = self.pacs.fetch_bulk_content(series_uids, *args, **kwargs)
+			bdata_series = bdata.get(IMAGING_SERVER_RESOURCE_SERIES)
+
+			# Unpack data
+			for p in self:
+				for s in p.studies_collection:
+
+					# Child series
+					if bdata_series:
+						s.series_collection = s.series_from_json(
+							[bdata_series.get_modelinstance(sid)._objectdata for sid in s.series if bdata_series.get_modelinstance(sid)])
+						s._populate_subcollections()
 
 
 IMAGING_STUDY_OUTPUT_COLUMNS = OrderedDict((
@@ -560,12 +634,25 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		if getattr(self, '_parent', None) is None:
 			self._parent = self.pacs.get_patient(self.patient)
 
+			# Propagate cache lookup settings of current instance
+			if getattr(self, 'resource_cache_lookup', None) is not None:
+				setattr(self._parent, 'resource_cache_lookup', self.resource_cache_lookup)
+
 		return self._parent
+		
+	@parent.setter
+	def parent(self, patient_model):
+		'''	Sets the parent patient for the study
+		'''
+		if not isinstance(patient_model, ImagingPatient):
+			raise ValueError("Input must be a instance of a patient")
+
+		setattr(self, '_parent', patient_model)
 
 	def parent_from_json(self, jdata, **kwargs):
 		''' Initialize patient model from the provided JSON data.
 		'''
-		return self.server._init_dataclass_from_json(ImagingPatient, jdata, **kwargs)
+		return self.server._init_dataclass_from_json(ImagingPatient, jdata, pacs=self.pacs, **kwargs)
 
 	@property
 	def model_patient(self):
@@ -678,15 +765,33 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 	def series_collection(self):
 		'''	Series instances associated with the study
 		'''
+		
 		if getattr(self, '_series', None) is None:
 			setattr(self, '_series', self.fetch_series())
 
 		return self._series
+	
+	@series_collection.setter
+	def series_collection(self, series_collection):
+		'''	Series instances associated with the study
+		'''
+		if not isinstance(series_collection, ImagingSeriesCollection):
+			raise ValueError("Series must be a instance of the Series Collection")
+
+		setattr(self, '_series', series_collection)
 
 	def fetch_sr(self, **kwargs):
 		'''	Fetch the DICOM-SR instances that are associated with the study
 		'''
-		return self.pacs.query_sr({ DCMHEADER_STUDY_INSTANCE_UID: self.study_uid, }, **kwargs)
+		return self.pacs.query_sr({ DCMHEADER_STUDY_INSTANCE_UID: self.study_uid, }, 
+			cache_lookup=getattr(self, 'resource_cache_lookup', None), pacs=self.pacs, study=self, **kwargs)
+
+	def sr_from_json(self, jdata, **kwargs):
+		''' Initialize segmentation collection from JSON structure
+		'''
+		from .sr import DcmSRSeriesCollection
+		return self.server._init_dataclass_from_json(
+			DcmSRSeriesCollection, jdata, pacs=self.pacs, study=self, **kwargs)
 
 	@property
 	def sr_collection(self):
@@ -697,10 +802,28 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 		return self._sr
 
+	@sr_collection.setter
+	def sr_collection(self, sr_collection):
+		'''	Set SR collection instances which belong to the study
+		'''
+		from .sr import DcmSRSeriesCollection
+		if not isinstance(sr_collection, DcmSRSeriesCollection):
+			raise ValueError('Input must be an instance of a DcmSRSeriesCollection')
+
+		setattr(self, '_sr', sr_collection)
+
 	def fetch_seg(self, **kwargs):
 		'''	Fetch the DICOM-SEG instances that are associated with the study
 		'''
-		return self.pacs.query_seg({ DCMHEADER_STUDY_INSTANCE_UID: self.study_uid }, **kwargs)
+		return self.pacs.query_seg({ DCMHEADER_STUDY_INSTANCE_UID: self.study_uid },
+			cache_lookup=getattr(self, 'resource_cache_lookup', None), pacs=self.pacs, study=self, **kwargs)
+
+	def seg_from_json(self, jdata, **kwargs):
+		'''	Initialize segmentation collection from JSON structure
+		'''
+		from .seg import DcmSegmentationSeriesCollection
+		return self.server._init_dataclass_from_json(
+			DcmSegmentationSeriesCollection, jdata, pacs=self.pacs, study=self, **kwargs)
 
 	@property
 	def seg_collection(self):
@@ -711,8 +834,155 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 		return self._seg
 
+	@seg_collection.setter
+	def seg_collection(self, seg_collection):
+		'''	Set segmentation instances which belong to the study
+		'''
+		from .seg import DcmSegmentationSeriesCollection
+		if not isinstance(seg_collection, DcmSegmentationSeriesCollection):
+			raise ValueError('Input must be an instance of a DcmSegmentationSeriesCollection')
 
-class ImagingStudyCollection(ImagingServerChildCollection):
+		setattr(self, '_seg', seg_collection)
+
+	def _populate_subcollections(self, populate_sr=True, populate_seg=True):
+		'''	Populate study SR and SEG collections from the series collection
+		'''
+		if populate_sr:
+			self.sr_collection = self.sr_from_json(
+				[sx._objectdata for sx in self.series_collection if sx.modality == DCM_MODALITY_SR])
+
+		if populate_seg:
+			self.seg_collection = self.seg_from_json(
+				[sx._objectdata for sx in self.series_collection if sx.modality == DCM_MODALITY_SEG])
+	
+	def merge_resources(self, resources: list, asynchronous=False, keep_source=False, permissive=False, 
+			priority=0, merge=None, verify=None, headers=None):
+		'''	Merge the specified resources into a the current study. This is done by updating 
+			the following DICOM tags of the provided resources: StudyInstanceUID (0x0020, 0x000d), 
+			SeriesInstanceUID (0x0020, 0x000e), and SOPInstanceUID (0x0008, 0x0018). 
+			Additionally, all the DICOM tags that are part of the “Patient Module Attributes” and 
+			the “General Study Module Attributes” (as specified by the DICOM 2011 standard in 
+			Tables C.7-1 and C.7-3), are modified to match the target study. 
+			(Refer to https://book.orthanc-server.com/users/anonymization.html#split-merge-of-dicom-studies)
+
+			 @input resources (list): The UIDS of DICOM resources (studies, series, and/or instances) 
+			 	to be merged into the study of interest.
+			 @input asynchronous (boolean, default=False): If true, run the job in asynchronous mode.
+			 	When run asynchronously, the REST API call will immediately return, reporting the identifier 
+			 	of a job. The job instance can be used to retrieve the status of the job.
+			 @input keep_source (bool, default=False): If set to true, instructs Orthanc to keep 
+			 	a copy of the original series in the source study. By default, the original 
+			 	resources are deleted from Orthanc.
+			 @input permissive (permissive, default=False): If true, ignore errors during the individual 
+			 	steps of the job.
+			 @input priority (int, default=0): The priority of the job. The lower the number, 
+			 	the higher the priority.
+			 @input merge (iterable, default=None): iterable ot tags to be removed outside of those
+			 	specified in the standard.
+
+			 @returns requests.Response
+		'''
+		merge = merge or {}
+		if verify is None:
+			verify = self.server.verify
+
+		# Create request structure
+		merge.update({ 
+			'Asynchronous': asynchronous, 
+			'Permissive': permissive,
+			'KeepSource': keep_source,
+			'Priority': priority,
+			'Resources': resources,
+			'Synchronous': False
+		})
+
+		return self._merge_split_request(merge, 'merge', asynchronous, headers, verify)
+	
+	def split_study(self, resources: list, asynchronous: bool=False, keep_source: bool=False, permissive: bool=True, priority: int=0, 
+			remove: list=None, replace: dict=None, split: dict=None, verify=None, headers=None, **kwargs):
+		'''	Remove the DICOM series specified in resources from the current study and placing them in a new study.
+			The new study is created by setting the StudyInstanceUID of the specified series to a new value.
+			(Refer to https://book.orthanc-server.com/users/anonymization.html#split-merge-of-dicom-studies.)
+
+			 @input resources (list): the list of series UIDs to be split from the current study. (Must
+			 	be part of the current study.)
+			 @input asynchronous (boolean, default=False): If true, run the job in asynchronous mode. When asynchronously,
+			 	REST API call will immediately return, reporting the identifier of a job. The job instance can be used
+			 	to retrieve the status of the job.
+			 @input keep_source (bool, default=False): If set to true, instructs Orthanc to keep a copy of 
+			 	the original resources in their source study. By default, the original resources are deleted from Orthanc.
+			 @input permissive (permissive, default=False): If true, ignore errors during the individual steps of the job.
+			 @input priority (iterable, default=None): In asynchronous mode, the priority of the job. 
+			 	The lower the value, the higher the priority.
+			 @input remove (list, default=None): List of tags that must be removed in the new study 
+			 	(from the same modules as in the Replace option).
+			 @input replace (dict, default=None): Associative array to change the value of some 
+			 	DICOM tags in the new study. The tags must be part of the "Patient Module Attributes" 
+			 	or the "General Study Module Attributes",  as specified by the DICOM 2011 standard in Tables 
+			 	C.7-1 and C.7-3.
+
+			 @returns requests.Response
+		'''
+		
+		# Check resources are available
+		for series in resources:
+			if series not in self.series:
+				raise ValueError('Invalid series UID. %s not in study.' % (series))
+
+		# Request options
+		split = split or {}
+		if verify is None:
+			verify = self.server.verify
+
+		# Create request structure adding the series retrieved from the search
+		split.update({ 
+			'Asynchronous': asynchronous, 
+			'Permissive': permissive,
+			'KeepSource': keep_source,
+			'Priority': priority,
+			'Series': resources,
+		})
+
+		# DICOM tags to be replaced
+		if replace:
+			split.update({'Replace': replace})
+
+		# DICOM tags to be removed 
+		if remove:
+			split.update({'Remove': remove})
+
+		return self._merge_split_request(split, 'split', asynchronous, headers, verify)
+		
+	def _merge_split_request(self, data_send: dict, endpoint: str, asynchronous=False, headers=None, verify=None, **kwargs):
+		'''	Function that is responsible for communication with the server and executing the request
+		'''
+		# Execute operation
+		logger.debug('Structure of merge/split request:\n%s' % json.dumps(data_send))
+		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, endpoint)), json=data_send,
+			headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
+		
+		# Check operation results
+		if not r.ok:
+			request_client_error(
+				'Unable to merge DICOM resource tags for %s on server %s. Status code: %s.'
+					% (self.resource_url, self.pacs.server_label, r.status_code),
+				r)
+
+		logger.debug('Response from PACS imaging server:\n%s' % r.content)
+
+		# Retrieve job instance 
+		if asynchronous:
+			response_json = r.json()
+			from .jobs import OrthancJob
+			return self.pacs.get_imaging_resource(response_json['ID'], OrthancJob, headers=headers, **kwargs)
+		
+		# Retrieve new imaging study
+		else:
+			response_json = r.json()
+			return self.pacs.get_imaging_resource(response_json['TargetStudy'], ImagingStudy, headers=headers, **kwargs)
+
+
+class ImagingStudyCollection(ImagingResourceBaseCollection):
 	'''	Collection of imaging studies
 	'''
 	model = ImagingStudy
@@ -726,6 +996,43 @@ class ImagingStudyCollection(ImagingServerChildCollection):
 			kwargs['patient'] = self.parent
 
 		return super()._init_collection_models(**kwargs)
+
+	def bulkpopulate_related(self, *args, parent_patient=True, child_series=True, **kwargs):
+		'''	Populate models related to collection instances in the most efficient manner possible.
+
+			@input parent_patient (bool, default=True): bulk populate "parent" attribute of collection instances.
+			@input child_series (bool, default=True): bulk populate the "series_collection" attribute
+				of model instances.
+		'''
+		# Retrieve patient and sibling series data. Both types of resources can be retrieved in a single request.
+		if parent_patient or child_series:
+
+			# Aggregate resouce UIDs
+			patient_uids = []
+			child_uids = []
+
+			for s in self:
+				if parent_patient: patient_uids.append(s.patient)
+				if child_series: child_uids.extend(s.series)
+
+			# Retrieve bulk resources and unpack
+			bdata = self.pacs.fetch_bulk_content(patient_uids+child_uids, *args, **kwargs)
+			bdata_patient = bdata.get(IMAGING_SERVER_RESOURCE_PATIENT)
+			bdata_series = bdata.get(IMAGING_SERVER_RESOURCE_SERIES)
+
+			# Unpack data
+			for s in self:
+
+				# Patient
+				if bdata_patient and bdata_patient.get_modelinstance(s.patient):
+					s.parent = s.parent_from_json(
+						bdata_patient.get_modelinstance(s.patient)._objectdata)
+
+				# Sibling series, DICOM-SR, and DICOM-SEG attributes
+				if bdata_series:
+					s.series_collection = s.series_from_json(
+						[bdata_series.get_modelinstance(sid)._objectdata for sid in s.series if bdata_series.get_modelinstance(sid)])
+					s._populate_subcollections()
 
 
 IMAGING_SERIES_OUTPUT_COLUMNS = OrderedDict((
@@ -784,7 +1091,25 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 		if getattr(self, '_parent', None) is None:
 			self._parent = self.pacs.get_study(self.study)
 
+			# Propagate cache lookup settings of current instance
+			if getattr(self, 'resource_cache_lookup', None) is not None:
+				setattr(self._parent, 'resource_cache_lookup', self.resource_cache_lookup)
+
 		return self._parent
+
+	@parent.setter
+	def parent(self, study_model):
+		'''	Sets the parent study for the series
+		'''
+		if not isinstance(study_model, ImagingStudy):
+			raise ValueError('Input must be an instance of a study')
+
+		setattr(self, '_parent', study_model)
+
+	def parent_from_json(self, jdata, **kwargs):
+		'''	Initialize study model from the provided JSON data.
+		'''
+		return self.server._init_dataclass_from_json(ImagingStudy, jdata, pacs=self.pacs, **kwargs)
 
 	@property
 	def model_study(self):
@@ -875,7 +1200,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 		'''	Retrieve details for slices in the series
 
 			@returns collection of DICOM instances
-		'''
+		'''		
 		# Retrieve instances details
 		r = requests.get(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'instances')),
 			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')))
@@ -887,6 +1212,14 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 		# Parse response and return collection
 		return self.server._init_dataclass(
 			self.dcminstance_modelcollection_class, r, pacs=self.pacs, series=self, **kwargs)
+
+	def dcminstances_from_json(self, **kwargs):
+		'''	Retrieve details for slices in the series
+
+			@returns collection of DICOM instances
+		'''
+		return self.server._init_dataclass_from_json(
+			self.dcminstance_modelcollection_class, jdata, pacs=self.pacs, series=self, **kwargs)
 
 
 class ImagingSeries(ImagingSeriesCoreResource):
@@ -922,6 +1255,15 @@ class ImagingSeries(ImagingSeriesCoreResource):
 
 		return self._slices
 
+	@slices_collection.setter
+	def slices_collection(self, instances_collection):
+		'''	Set slice/image instances which belong to the series
+		'''
+		if not isinstance(instances_collection, self.dcminstance_modelcollection_class):
+			raise ValueError("Input must be a instance of a DICOM instances collection")
+
+		setattr(self, '_slices', instances_collection)
+		
 	@property
 	@functools.lru_cache()
 	def shape(self):
@@ -934,7 +1276,7 @@ class ImagingSeries(ImagingSeriesCoreResource):
 	@property
 	@functools.lru_cache()
 	def segmentations(self):
-		'''	DICOM-SEG segmentations associated with the series with most recent segmentations first.
+		'''	DICOM-SEG segmentations associated with the imaging series. Sorted with the most recent segmentations first.
 		'''
 		return sorted(
 			[dcmseg for dcmseg in self.parent.seg_collection if self.series_uid in dcmseg.series_reference_uids],
@@ -952,7 +1294,7 @@ class ImagingSeries(ImagingSeriesCoreResource):
 			reverse=True)
 
 
-class ImagingSeriesCollection(ImagingServerChildCollection):
+class ImagingSeriesCollection(ImagingResourceBaseCollection):
 	''' Collection of imaging series
 	'''
 	model = ImagingSeries
@@ -977,7 +1319,64 @@ class ImagingSeriesCollection(ImagingServerChildCollection):
 				kwargs['study'] = self.parent
 
 		return super()._init_collection_models(**kwargs)
-		
+
+	def bulkpopulate_related(self, *args, parent_study=True, parent_patient=True, sibling_series=True, **kwargs):
+		'''	Populate models related to collection instances in the most efficient manner possible.
+
+			@input parent_study (bool, default=True): bulk populate the "parent" attribute of 
+				collection instances.
+			@input parent_patient (bool, default=True): bulk populate the "model_patient" attribue
+				of collection instances. Requires that parent_study option be True.
+			@input sibling_series (bool, default=True): bulk populate the "series_collection" attribute
+				of the parent study. Requires that parent_study option be True.
+		'''
+		# For populating patient or sibling data, ensure that the parent study will be available.
+		if (parent_patient or sibling_series) and not parent_study:
+			raise ValueError('Unable to populate patient or sibling data, options requires parent study.')
+
+		# Retrieve paarent study data. Study instances are required to populate the patient and 
+		# sibling series properties, and must be retreived first.
+		if parent_study:
+			bdata = self.pacs.fetch_bulk_content([sx.study for sx in self], *args, **kwargs)
+			bdata_study = bdata.get(IMAGING_SERVER_RESOURCE_STUDY)
+			
+			# Unpack study data and add to series
+			if bdata_study:
+				for sx in self:
+					s = bdata_study.get_modelinstance(sx.study)
+					if s: sx.parent = sx.parent_from_json(s._objectdata)
+
+		# Retrieve patient and sibling series data. Both types of resources can be retrieved
+		# in a single request.
+		if parent_patient or sibling_series:
+
+			# Aggregate resource UIDs
+			patient_uids = []
+			sibling_uids = []
+
+			for sx in self:
+				if parent_patient: patient_uids.append(sx.parent.patient)
+				if sibling_series: sibling_uids.extend(sx.parent.series)
+
+			# Retrieve bulk resources and unpack
+			bdata = self.pacs.fetch_bulk_content(patient_uids+sibling_uids, *args, **kwargs)
+			bdata_patient = bdata.get(IMAGING_SERVER_RESOURCE_PATIENT)
+			bdata_series = bdata.get(IMAGING_SERVER_RESOURCE_SERIES)
+
+			# Unpack data
+			for sx in self:
+
+				# Patient
+				if bdata_patient and bdata_patient.get_modelinstance(sx.parent.patient):
+					sx.parent.parent = sx.parent.parent_from_json(
+						bdata_patient.get_modelinstance(sx.parent.patient)._objectdata)
+
+				# Sibling series, DICOM-SR, and DICOM-SEG attributes
+				if bdata_series:
+					sx.parent.series_collection = sx.parent.series_from_json(
+						[bdata_series.get_modelinstance(sid)._objectdata for sid in sx.parent.series if bdata_series.get_modelinstance(sid)])
+					sx.parent._populate_subcollections()
+
 
 IMAGING_INSTANCE_OUTPUT_COLUMNS = OrderedDict((
 		('series', 'Series'),
@@ -1014,6 +1413,10 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 		'''
 		if self._parent is None:
 			self._parent = self.pacs.get_series(self.series)
+
+			# Propagate cache lookup settings of current instance
+			if getattr(self, 'resource_cache_lookup', None) is not None:
+				setattr(self._parent, 'resource_cache_lookup', self.resource_cache_lookup)
 
 		return self._parent
 
