@@ -43,8 +43,10 @@ class SonadorObjectCollection(GuruObjectCollection):
 	model = SonadorBaseObject
 
 	def __init__(self, *args, **kwargs):
+		self._model_lookup = kwargs.pop('lookup', {})
+		if kwargs:
+			print('Args: %s. Keyword args: %s.' % (args, kwargs))
 		super().__init__(*args, **kwargs)
-		self._model_lookup = kwargs.get('lookup') or {}
 	
 	def _init_collection_modelinstance(self, *args, **kwargs):
 		'''	Initialize collection model instances. As part of the init, models
@@ -56,6 +58,14 @@ class SonadorObjectCollection(GuruObjectCollection):
 		model = super()._init_collection_modelinstance(*args, **kwargs)
 		self._model_lookup[model.pk] = model
 		return model
+
+	def _check_modelinit(self):
+		'''	Collection models are lazily initialized on first access. Check to see if 
+			a persistent 'models" structure has been created and whether or not
+			the lookup is available.
+		'''
+		# Attempting to retriev the length of the collection will force it to initialize
+		if not self._model_lookup and self._objectdata: len(self)
 	
 	def get_modelinstance(self, pk):
 		'''	Retrieve model instance from the collection using the model's unique identifier (primary key).
@@ -65,13 +75,34 @@ class SonadorObjectCollection(GuruObjectCollection):
 			@returns model instance or None: returns the instance of the model which corresponds 
 				to the provided primary key.
 		'''
-		# Collection models are lazily initialized. Check to see if the collection models have been
-		# initialized and indexed before attempting to retrieve an instance. Attempting to retrieve 
-		# the length of the collection will force it to initialize.
-		if not self._model_lookup and self._objectdata: len(self)
+		self._check_modelinit()
+		return self._model_lookup.get(pk)
 
-		m = self._model_lookup.get(pk)
-		return m
+	def extend(self, other):
+		'''	Add model instances in other to the existing collection, indexes model instances to lookup.
+		'''
+		self._check_modelinit()
+
+		# In-case other is an iterator, un-pack to a persistent structue
+		for m in other:
+			if not m.pk in self._model_lookup:
+				self._model_lookup[m.pk] = m
+
+		return super().extend(other)
+
+	def append(self, value):
+		'''	Add model instance to the collection, indexes model instances to lookup.
+		'''
+		self._check_modelinit()
+
+		if not m.pk in self._model_lookup:
+			self._model_lookup[m.pk] = m
+
+		return super().append(value)
+
+	def __add__(self, other):
+		return self.__iadd__(other)
+
 
 def fetch_sonador_dataobject_schema(*args, apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers', **kwargs):
 	'''	Retrieve a Sonador data schema

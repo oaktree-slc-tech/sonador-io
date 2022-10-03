@@ -398,8 +398,10 @@ class SonadorImagingServer(SonadorBaseObject):
 
 		# Initialize collection instances for each resource type
 		for rtype, rdata in resources.items():
+			if not kwargs.get('pacs'):
+				kwargs['pacs'] = self
 			resources[rtype] = self.server._init_dataclass_from_json(
-				self.get_resource_modelcollection_class(rtype), rdata, pacs=self, **kwargs)
+				self.get_resource_modelcollection_class(rtype), rdata, **kwargs)
 
 		# Add resources to local cache
 		if cache:
@@ -657,7 +659,9 @@ class SonadorImagingServer(SonadorBaseObject):
 				% (rid, resource_type, r.status_code), r)
 
 		# Retrieve resource instance
-		resource = self.server._init_dataclass(resource_type, r, pacs=self, **kwargs)
+		if not kwargs.get('pacs'): 
+			kwargs['pacs'] = self
+		resource = self.server._init_dataclass(resource_type, r, **kwargs)
 
 		# Cache local copy
 		if cache:
@@ -769,7 +773,9 @@ class SonadorImagingServer(SonadorBaseObject):
 			request_client_error('Unable to execute resource query to PACS %s. Status code: %s.' % (self.server_label, r.status_code), r)
 
 		# Parse response
-		rcollection = self.server._init_dataclass(resource_modelcollection_class, r, pacs=self, rapid_lookup=rapid_lookup, **kwargs) if expand \
+		if not kwargs.get('pacs'):
+			kwargs['pacs'] = self
+		rcollection = self.server._init_dataclass(resource_modelcollection_class, r, rapid_lookup=rapid_lookup, **kwargs) if expand \
 			else self.server._parse_apiresponse_json(r)
 
 		# Populate related resources
@@ -821,9 +827,6 @@ class SonadorImagingServer(SonadorBaseObject):
 		'''
 		from .imaging.orthanc.seg import DcmSegmentationSeriesCollection
 
-		if not kwargs.get('rapid_lookup'):
-			raise ConfigurationError('This thing is supposed to be using the lookup cache to speed up!')
-
 		self._check_query_structure(sfilter)
 		sfilter.update({ DCMHEADER_MODALITY: DCM_MODALITY_SEG })
 
@@ -845,7 +848,9 @@ class SonadorImagingServer(SonadorBaseObject):
 			request_client_error('Unable to retrieve jobs from PACS %s. Status code: %s.' % (self.server_label, r.status_code), r)
 
 		# Parse response
-		return self.server._init_dataclass(OrthancJobCollection, r, pacs=self, **kwargs)
+		if not kwargs.get('pacs'):
+			kwargs['pacs'] = self
+		return self.server._init_dataclass(OrthancJobCollection, r, **kwargs)
 
 	def get_job(self, jid, headers=None, **kwargs):
 		'''	Retrieve a processing job instance

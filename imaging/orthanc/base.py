@@ -784,7 +784,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		'''	Fetch the DICOM-SR instances that are associated with the study
 		'''
 		return self.pacs.query_sr({ DCMHEADER_STUDY_INSTANCE_UID: self.study_uid, }, 
-			cache_lookup=getattr(self, 'resource_cache_lookup', None), pacs=self.pacs, study=self, **kwargs)
+			rapid_lookup=getattr(self, 'resource_cache_lookup', None), pacs=self.pacs, study=self, **kwargs)
 
 	def sr_from_json(self, jdata, **kwargs):
 		''' Initialize segmentation collection from JSON structure
@@ -816,7 +816,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		'''	Fetch the DICOM-SEG instances that are associated with the study
 		'''
 		return self.pacs.query_seg({ DCMHEADER_STUDY_INSTANCE_UID: self.study_uid },
-			cache_lookup=getattr(self, 'resource_cache_lookup', None), pacs=self.pacs, study=self, **kwargs)
+			rapid_lookup=getattr(self, 'resource_cache_lookup', None), pacs=self.pacs, study=self, **kwargs)
 
 	def seg_from_json(self, jdata, **kwargs):
 		'''	Initialize segmentation collection from JSON structure
@@ -1294,32 +1294,11 @@ class ImagingSeries(ImagingSeriesCoreResource):
 			reverse=True)
 
 
-class ImagingSeriesCollection(ImagingResourceBaseCollection):
-	''' Collection of imaging series
+
+class ImagingSeriesBulkPopulateMixin:
+	'''	Mixin class which adds methods to enable efficient population of related models 
+		(parent study and patient) on instances within series collections.
 	'''
-	model = ImagingSeries
-
-	def __init__(self, *args, **kwargs):
-
-		# Retrieve parent of the collection, ensure that it is an imaging patient or study
-		self.parent = kwargs.pop('study', None) or kwargs.pop('patient', None)
-		if self.parent and not isinstance(self.parent, (ImagingPatient, ImagingStudy)):
-			raise ValueError('Unable to initialize imaging series, invalid parent type: %s' % type(self.parent))
-		
-		super().__init__(*args, **kwargs)
-
-	def _init_collection_models(self, **kwargs):
-		if self.parent:
-
-			# Determine which keyword should be used for the parent. ImagingSeriesCollections
-			# can be initialized either from a study or patient.
-			if isinstance(self.parent, ImagingPatient):
-				kwargs['patient'] = self.parent
-			elif isinstance(self.parent, ImagingStudy):
-				kwargs['study'] = self.parent
-
-		return super()._init_collection_models(**kwargs)
-
 	def bulkpopulate_related(self, *args, parent_study=True, parent_patient=True, sibling_series=True, **kwargs):
 		'''	Populate models related to collection instances in the most efficient manner possible.
 
@@ -1376,6 +1355,35 @@ class ImagingSeriesCollection(ImagingResourceBaseCollection):
 					sx.parent.series_collection = sx.parent.series_from_json(
 						[bdata_series.get_modelinstance(sid)._objectdata for sid in sx.parent.series if bdata_series.get_modelinstance(sid)])
 					sx.parent._populate_subcollections()
+
+
+class ImagingSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingResourceBaseCollection):
+	''' Collection of imaging series
+	'''
+	model = ImagingSeries
+
+	def __init__(self, *args, **kwargs):
+
+		# Retrieve parent of the collection, ensure that it is an imaging patient or study
+		self.parent = kwargs.pop('study', None) or kwargs.pop('patient', None)
+		if self.parent and not isinstance(self.parent, (ImagingPatient, ImagingStudy)):
+			raise ValueError('Unable to initialize imaging series, invalid parent type: %s' % type(self.parent))
+		
+		super().__init__(*args, **kwargs)
+
+	def _init_collection_models(self, **kwargs):
+		if self.parent:
+
+			# Determine which keyword should be used for the parent. ImagingSeriesCollections
+			# can be initialized either from a study or patient.
+			if isinstance(self.parent, ImagingPatient):
+				kwargs['patient'] = self.parent
+			elif isinstance(self.parent, ImagingStudy):
+				kwargs['study'] = self.parent
+
+		return super()._init_collection_models(**kwargs)
+
+
 
 
 IMAGING_INSTANCE_OUTPUT_COLUMNS = OrderedDict((
