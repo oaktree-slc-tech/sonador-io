@@ -156,7 +156,7 @@ def imageserver_upload_archive(iserver, archive, tpool=None, threads=4, verify=F
 			- dcmfile (pydicom.dataset.Dataset): PyDicom dataset object, containing a 
 				dictionary of the DICOM data elements.
 
-			and returns a file-like binary object with the data  to be sent to Sonador.
+			and returns a file-like binary object with the data to be sent to Sonador.
 
 		@input callback_postupload (callable): Function that is invoked immediately following
 			a DICOM file is sent to Orthanc. The callback should accept the following

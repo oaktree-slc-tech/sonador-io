@@ -11,7 +11,7 @@ from ...apisettings import IMAGING_SERVER_RESOURCE_REPORT, DCMHEADER_SERIES_INST
 	DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE, DCMHEADER_SR_REF_SERIES_SEQ, \
 	DCMHEADER_SR_REF_SOP_SEQ, DCMHEADER_SR_REF_INSTANCE_UID
 from .base import ImagingSeriesCoreResource, ImagingSeriesCollection, ImagingServerChildCollection, \
-	DcmInstanceCoreResource, DcmInstanceCoreCollection
+	DcmInstanceCoreResource, DcmInstanceCoreCollection, ImagingSeriesBulkPopulateMixin
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ class DcmSRSeries(ImagingSeriesCoreResource):
 			reverse=True)
 
 
-class DcmSRSeriesCollection(ImagingServerChildCollection):
+class DcmSRSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingServerChildCollection):
 	model = DcmSRSeries
 
 	def __init__(self, *args, **kwargs):
