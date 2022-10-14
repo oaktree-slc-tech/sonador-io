@@ -15,6 +15,8 @@ from .imaging.orthanc import FILEARCHIVE_TYPE_ZIPARCHIVE, FILEARCHIVE_TYPE_DICOM
 # General Commands
 SONADOR_COMMAND_LIST = 'list'
 SONADOR_COMMAND_DETAILS = 'details'
+SONADOR_COMMAND_CREATE = 'create'
+SONADOR_COMMAND_UPDATE = 'update'
 
 
 PARSER_SONADOR_ACCESSID = 'accessid'
@@ -179,3 +181,32 @@ def background_job_options(subparser):
 	subparser.add_argument('--wait', dest='synchronous', action='store_true', default=False,
 		help='When true, causes the script to wait until the server returns the result of the job. '
 			+ 'Note: There is a risk of connection timeout if the requested resources include a large number of images.')
+
+
+def general_transfer_options(subparser):
+	'''	CLI options for tasks associated with the transfer of resources
+	'''
+	subparser.add_argument('--sync', dest='dicomweb_sync',
+		action='store_true', default=False, help='Before queing for transfer, check the destination to determine if '
+			+ 'the resource is already present.')
+
+
+def study_transfer_options(subparser):
+	'''	CLI options for study focused tasks which transfer data
+	'''
+	subparser.add_argument('--transfer-series', dest='dicomweb_study_series_transfer', 
+		action='store_true', default=False, help='Modifies how the transfer job is submitted to the server. '
+			+ 'When enabled, Orthanc sends each series as its own job rather than a single job for the entire study. '
+			+ 'This helps improve transfer reliability for connections susceptible to timeouts.')
+
+
+def resource_cache_options(subparser):
+	'''	CLI options for resource cache
+	'''
+	subparser.add_argument('--rapid-lookup', dest='rapid_lookup', action='store_true', default=False,
+		help='When present, uses the Sonador resource cache for query operations. The resource cache provides '
+			+ 'a set of tables for series, studyies, and patients that are more optimized than the traditional '
+			+ '/tools/find endpoint of Orthanc. Requests using the resource cache may be as much as 100 times faster '
+			+ 'than the equivalent query to the primary Orthanc database. Responses from the resource cache will only contain '
+			+ 'headers which are part of Orthanc instance MainDicomTags or ExtraMainDicomTags.')
+	

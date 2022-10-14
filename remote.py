@@ -154,18 +154,27 @@ def sonador_dataobject_schema_display(sonador_server, output_dest, datamodel_cla
 		output_dest.write('\n\n')
 
 
-def sonador_datacollection_serialize(datacollection, output_dest, output_type=OUTPUT_TYPE_TABULATE):
+def sonador_datacollection_serialize(datacollection, output_dest, output_type=OUTPUT_TYPE_TABULATE, **kwargs):
 	'''	Write collection data to the provided output in the desired output type
 
 		@input datacollection (collection of data objects): Collection to be serialized to the provided output.
 		@input output_dest: Output destination to which the data should be written
 		@input output_type (str, default='tabulate'): Format which should be used for the output
 	'''
+
+	# Apply sort/ordering
+	if getattr(datacollection, 'model', None) and getattr(datacollection.model, 'order_by', None):
+		dcollection = sorted(datacollection, 
+			key=lambda m: getattr(m, datacollection.model.order_by, None),
+			reverse=kwargs.get('reverse', False))
+	else: dcollection = datacollection
+
 	# Convert data source (JSON) to desired output format and write to the specified destination
 	if output_type == OUTPUT_TYPE_TABULATE:
 		tabulate_output_columns = datacollection.model.tabulate_output_columns
+
 		output_dest.write(
-			tabulate((object2tabulate(s, tabulate_output_columns) for s in datacollection),
+			tabulate((object2tabulate(s, tabulate_output_columns) for s in dcollection),
 				headers=tuple(six.itervalues(tabulate_output_columns))))
 	
 	elif output_type == OUTPUT_TYPE_CSV:
@@ -178,7 +187,7 @@ def sonador_datacollection_serialize(datacollection, output_dest, output_type=OU
 		w.writeheader()
 
 		# Output data
-		for d in datacollection:
+		for d in dcollection:
 			w.writerow(pick(d._objectdata, tuple(datacollection.remote_schema.get('fields', []))))
 
 
@@ -236,12 +245,64 @@ def sonador_dataobject_extendattrs(dataobject, output_dest, extended_attrs):
 
 
 def sonador_dataobject_details(sonador_server, output_dest, datamodel_class, objectid, verify=False,
-		dataobject_endpoint=None, included_extended_attrs=True, **kwargs):
+		dataobject_endpoint=None, included_extended_attrs=True, dobject=None, **kwargs):
 	'''	Retrieve details for Sonador cata object and output to provided destination
 	'''
-	dobject = fetch_sonador_dataobject(sonador_server, datamodel_class, objectid, 
-		verify=verify, dataobject_endpoint=dataobject_endpoint, **kwargs)
+	# Retrieve data object (if not already provided). dobject is included in signature to allow
+	# for output of details of already existing objects.
+	dobject = dobject or fetch_sonador_dataobject(
+		sonador_server, datamodel_class, objectid, verify=verify, dataobject_endpoint=dataobject_endpoint, **kwargs)
 
 	sonador_dataobject_serialize(dobject, output_dest, include_extended_attrs=included_extended_attrs)
 	logger.debug('Object Resource Data:\n%s' % json.dumps(dobject._objectdata))
 	return dobject
+
+
+def sonador_dataobject_create(sonador_server, datamodel_class, object_data, verify=False, dataobject_endpoint=None, 
+		apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers', rkwargs=None, **kwargs):
+	'''	Create an instance of the data object using the provided object data.
+		Throws an operation error if the model cannot be created.
+
+		@input sonador_server (sonador.servers.SonadorServer): Sonador server instance
+		@input datamodel_class (subclass of remote.SonadorBaseObject): data model class
+			which will be used to create the object instance.
+		@input object_data (dict): data to be used for creating the model instance
+		@input verify (bool, default=False): when True SSL connections will be verified
+
+		@returns server response
+	'''
+	dataobject_endpoint = dataobject_endpoint or datamodel_class.fetch_endpoint
+
+	# Create request components: URL, headers, keyword arguments
+	rurl = getattr(sonador_server, apiurl_callable)(dataobject_endpoint)
+	rheaders = getattr(sonador_server, headers_callable)()
+	rkwargs = rkwargs or {}
+
+	# Create object instance on the server
+	r = requests.post(rurl, json=object_data, verify=verify, headers=rheaders, **kwargs)
+
+	if not r.ok:
+		request_client_error('Unable to create instance of model type %s due to a server error' % datamodel_class.__name__, r)
+
+	return sonador_server._parse_apiresponse_json(r)
+
+
+def sonador_dataobject_update(datamodel_instance, object_data, dataobject_endpoint=None, verify=False,
+		apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers', rkwargs=None, **kwargs):
+	'''	Update the data model instance with the parameters container in object data.
+	'''
+	dataobject_endpoint = dataobject_endpoint or posixpath.join(datamodel_instance.fetch_endpoint, datamodel_instance.pk)
+
+	# Create request components: URL, headers, keyword arguments
+	rurl = getattr(datamodel_instance.server, apiurl_callable)(dataobject_endpoint)
+	rheaders = getattr(datamodel_instance.server, headers_callable)()
+	rkwargs = rkwargs or {}
+
+	# Update object instance on the server
+	r = requests.put(rurl, json=object_data, headers=rheaders, verify=verify, **rkwargs)
+
+	if not r.ok:
+		request_client_error('Unable to update instance of model type %s (pk=%s) due to a server error' 
+			% (type(datamodel_instance).__name__, datamodel_instance.pk))
+
+	return datamodel_instance.server._parse_apiresponse_json(r)
