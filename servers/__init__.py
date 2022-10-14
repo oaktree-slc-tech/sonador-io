@@ -1,8 +1,7 @@
-from io import BytesIO
-from pprint import pprint
-import time
-import six, requests, json, csv, collections, logging, posixpath, zipfile
+import six, requests, json, csv, collections, logging, posixpath, zipfile, time
 from urllib.parse import urlencode
+from pprint import pprint
+from io import BytesIO
 
 from tabulate import tabulate
 from collections import OrderedDict
@@ -18,14 +17,16 @@ from client.utils.conversion import str2bool
 from client.errors import ClientOperationError, ConfigurationError
 from client.remote import RemoteServer, request_client_error
 
-from .apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, \
+from ..apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, \
 	IMAGING_SERVER_RESOURCE_SERIES, IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_RESOURCE_SUPPORTED, \
 	DCMHEADER_MODALITY, DCM_MODALITY_SR, DCM_MODALITY_SEG, DCM_VERSION_2021b
-from .serialization import json_datetime_parser
-from .helpers import request_client_error, fetch_sonador_session_token, API_ACCESS_TOKEN, OAUTH_TOKEN_RESPONSE_TYPE, \
+from ..serialization import json_datetime_parser
+from ..helpers import request_client_error, fetch_sonador_session_token, API_ACCESS_TOKEN, OAUTH_TOKEN_RESPONSE_TYPE, \
 	OAUTH_TOKEN_IDTOKEN_RESPONSE_TYPE, OAUTH_ACCESS_TOKEN, OAUTH_TOKEN_TYPE, OAUTH_TOKEN_TYPE_BEARER, OAUTH_EXPIRATION
-from .remote import SonadorBaseObject, SonadorObjectCollection, \
-	fetch_sonador_data_collection, fetch_sonador_dataobject
+from ..remote import SonadorBaseObject, SonadorObjectCollection, \
+	fetch_sonador_data_collection, fetch_sonador_dataobject, sonador_dataobject_update
+
+from .base import OrthancImagingMixin
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +126,8 @@ class SonadorServer(RemoteServer):
 			
 			@returns SonadorImagingServer model instance
 		'''
-		from .remote import fetch_sonador_dataobject
+		from ..remote import fetch_sonador_dataobject
 		if imageserver_datamodel_class is None:
-			from .servers import SonadorImagingServer
 			imageserver_datamodel_class = SonadorImagingServer
 		
 		if verify is None:
@@ -145,8 +145,8 @@ class SonadorServer(RemoteServer):
 			
 			@returns DataService model instance
 		'''
-		from .remote import fetch_sonador_dataobject
-		from .services import DataService
+		from ..remote import fetch_sonador_dataobject
+		from ..services import DataService
 		
 		dataservice_datamodel_class = dataservice_datamodel_class or DataService
 		if verify is None:
@@ -163,7 +163,7 @@ class SonadorServer(RemoteServer):
 		return fetch_sonador_session_token(self, verify=verify)
 
 
-class SonadorImagingServer(SonadorBaseObject):
+class SonadorImagingServer(OrthancImagingMixin, SonadorBaseObject):
 	'''	Object representation of a Sonador imaging server
 	'''
 	fetch_endpoint = '/visionaire/api/pacs'
@@ -268,14 +268,13 @@ class SonadorImagingServer(SonadorBaseObject):
 		returned_objects = []
 		if asynchronous:
 			response_json = r.json()
-			from .imaging.orthanc.jobs import OrthancJob
+			from ..imaging.orthanc.jobs import OrthancJob
 			return self.get_imaging_resource(response_json['ID'], OrthancJob, headers=headers, **kwargs)
 		
 		else:
 			
 			# Returns the model object of the new resources created (based on the level executed)
 			return r
-			
 
 	def bulk_delete(self, resources: list, headers: dict=None, verify: bool=False, **kwargs) ->dict:
 		''' Delete all of the provided DICOM patients, studies, series, and instances whose identifiers.
@@ -335,7 +334,7 @@ class SonadorImagingServer(SonadorBaseObject):
 		# to the archive
 		if asynchronous:
 			response_json = r.json()
-			from .imaging.orthanc.jobs import OrthancJob
+			from ..imaging.orthanc.jobs import OrthancJob
 			return self.get_imaging_resource(response_json['ID'], OrthancJob, headers=headers, **kwargs)
 		else:
 			zbuffer = BytesIO(r.content)
@@ -510,7 +509,7 @@ class SonadorImagingServer(SonadorBaseObject):
 		returned_objects = []
 		if asynchronous:
 			response_json = r.json()
-			from .imaging.orthanc.jobs import OrthancJob
+			from ..imaging.orthanc.jobs import OrthancJob
 			return self.get_imaging_resource(response_json['ID'], OrthancJob, headers=headers, **kwargs)
 			
 		else:
@@ -530,7 +529,7 @@ class SonadorImagingServer(SonadorBaseObject):
 	def get_resource_modelcollection_class(self, resource_type: str):
 		'''	Retrieve the collection class for the provided resource type
 		'''
-		from .imaging.orthanc import IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES
+		from ..imaging.orthanc import IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES
 		if not resource_type in IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES:
 			raise ValueError('Invalid resource type: %s' % resource_type)
 
@@ -672,13 +671,13 @@ class SonadorImagingServer(SonadorBaseObject):
 	def get_patient(self, pid, headers=None, cache=False, **kwargs):
 		'''	Retrieve patient data for the specified UID
 		'''
-		from .imaging.orthanc import ImagingPatient
+		from ..imaging.orthanc import ImagingPatient
 		return self.get_imaging_resource(pid, ImagingPatient, headers=headers, cache=cache, **kwargs)
 
 	def get_study(self, sid, headers=None, cache=False, **kwargs):
 		'''	Retrieve a study instance
 		'''
-		from .imaging.orthanc import ImagingStudy
+		from ..imaging.orthanc import ImagingStudy
 		return self.get_imaging_resource(sid, ImagingStudy, headers=headers, cache=cache, **kwargs)
 
 	def get_series(self, rid, headers=None, cache=False, **kwargs):
@@ -689,7 +688,7 @@ class SonadorImagingServer(SonadorBaseObject):
 				If True, the imaging server instance will store a reference to the imaging series which
 				will be used in subsequent calls to `get_series`.
 		'''
-		from .imaging.orthanc import ImagingSeries
+		from ..imaging.orthanc import ImagingSeries
 		return self.get_imaging_resource(rid, ImagingSeries, headers=headers, cache=cache, **kwargs)
 
 	def get_dcm_instance(self, rid, headers=None, cache=False, **kwargs):
@@ -700,7 +699,7 @@ class SonadorImagingServer(SonadorBaseObject):
 				If True, the imaging server instance will store a reference to the imaging series
 				which will be used in subsequent calls to `get_dcm_instance`.
 		'''
-		from .imaging.orthanc import DcmInstance
+		from ..imaging.orthanc import DcmInstance
 		return self.get_imaging_resource(rid, DcmInstance, headers=headers, cache=cache, **kwargs)
 
 	def query(self, sfilter, expand=True, limit=None, offset=None, query=None, headers=None, verify=None, 
@@ -734,7 +733,7 @@ class SonadorImagingServer(SonadorBaseObject):
 			@returns iterable of resource IDs if expanded is False, collection of the matching resource type if 
 				expanded is True
 		'''
-		from .imaging.orthanc import IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES
+		from ..imaging.orthanc import IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES
 		if not isinstance(sfilter, dict):
 			raise TypeError('Unable to execute query, terms must be submitted as a dictionary')
 		if not resource in IMAGING_SERVER_RESOURCE_SUPPORTED:
@@ -814,7 +813,7 @@ class SonadorImagingServer(SonadorBaseObject):
 	def query_sr(self, sfilter, **kwargs):
 		'''	Query DICOM-SR resources on the imaging server. (Wrapper function for "query".)
 		'''
-		from .imaging.orthanc.sr import DcmSRSeriesCollection
+		from ..imaging.orthanc.sr import DcmSRSeriesCollection
 
 		self._check_query_structure(sfilter)
 		sfilter.update({ DCMHEADER_MODALITY: DCM_MODALITY_SR })
@@ -825,7 +824,7 @@ class SonadorImagingServer(SonadorBaseObject):
 	def query_seg(self, sfilter, **kwargs):
 		'''	Query DICOM-SEG resources on the imaging server. (Wrapper function for "query".)
 		'''
-		from .imaging.orthanc.seg import DcmSegmentationSeriesCollection
+		from ..imaging.orthanc.seg import DcmSegmentationSeriesCollection
 
 		self._check_query_structure(sfilter)
 		sfilter.update({ DCMHEADER_MODALITY: DCM_MODALITY_SEG })
@@ -836,7 +835,7 @@ class SonadorImagingServer(SonadorBaseObject):
 	def fetch_jobs(self, verify=None, headers=None, limit=None, offset=None, expand=True, **kwargs):
 		'''	Retrieve the processing jobs for the server
 		'''
-		from .imaging.orthanc.jobs import OrthancJobCollection
+		from ..imaging.orthanc.jobs import OrthancJobCollection
 		
 		if verify is None:
 			verify = self.server.verify
@@ -855,7 +854,7 @@ class SonadorImagingServer(SonadorBaseObject):
 	def get_job(self, jid, headers=None, **kwargs):
 		'''	Retrieve a processing job instance
 		'''
-		from .imaging.orthanc.jobs import OrthancJob
+		from ..imaging.orthanc.jobs import OrthancJob
 		return self.get_imaging_resource(jid, OrthancJob, headers=headers, **kwargs)
 
 	def dicomweb_push(self, rdweb, resources, op=None, headers=None, async_transfer=True, priority=None):
@@ -885,6 +884,20 @@ class SonadorImagingServer(SonadorBaseObject):
 
 		# Parse response
 		return rdweb._parse_remote_resource_operation(r, async_transfer)
+
+	def update(self, odata, *args, **kwargs):
+		''' Update the image server with the provided parameters.
+
+			@input odata (dict): new attributes/values for the image server
+
+			@returns updated SonadorImagingServer instance
+		'''
+		if kwargs.get('verify') is None:
+			kwargs['verify'] = self.server.verify
+
+		# Send update to server and retrieve updated instance
+		rdata = sonador_dataobject_update(self, odata, *args, **kwargs)
+		return self.server.get_imageserver(self.pk)
 
 
 class SonadorImagingServerCollection(SonadorObjectCollection):
@@ -999,7 +1012,7 @@ class RemoteDICOMwebServer(ImagingServerModalityMixin, ImagingServerBaseObject):
 			@returns iterable of resource IDs is expand is False, colleciton of th matching resource type if 
 				expand is True
 		'''
-		from .imaging.dicomweb import REMOTE_IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES, \
+		from ..imaging.dicomweb import REMOTE_IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES, \
 			REMOTE_DICOMWEB_RESOURCE_TYPE
 		if not isinstance(sfilter, dict):
 			raise TypeError('Unable to execute query, terms must be submitted as a dictionary')
@@ -1059,7 +1072,7 @@ class RemoteDICOMwebServer(ImagingServerModalityMixin, ImagingServerBaseObject):
 
 			@returns OrthancJob instance if the transfer was async or OrthancJobResult is synchronous
 		'''
-		from .imaging.orthanc.jobs import OrthancJob, OrthancJobResult
+		from ..imaging.orthanc.jobs import OrthancJob, OrthancJobResult
 
 		rdata = self.server._parse_apiresponse_json(r)
 		return OrthancJob(self.server, rdata, pacs=self.pacs, dicomweb=self) if async_transfer \

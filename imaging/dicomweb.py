@@ -1,7 +1,11 @@
 import six, logging
 from collections import OrderedDict
 
-from ..apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES
+from ..apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
+	DCMHEADER_STUDY_INSTANCE_UID, DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SEQUENCE_NAME, DCMHEADER_MODALITY, \
+	DCMHEADER_SERIES_DESCRIPTION, DCMHEADER_SERIES_NUMBER, DCMHEADER_BODY_PART_EXAMINED, \
+	DCMHEADER_ACCESSION_NUMBER, DCMHEADER_STUDY_DATE, DCMHEADER_STUDY_TIME, DCMHEADER_REFERRING_PHYSICIAN, \
+	DCMHEADER_PATIENT_SEX, DCMHEADER_PATIENT_ID, DCMHEADER_PATIENT_NAME
 from ..remote import SonadorBaseObject, SonadorObjectCollection
 
 logger = logging.getLogger(__name__)
@@ -58,15 +62,15 @@ class RemoteImagingPatientDataMixin(object):
 
 	@property
 	def patient_name(self):
-		return self._objectdata.get('PatientName')
+		return self._objectdata.get(DCMHEADER_PATIENT_NAME)
 
 	@property
 	def patientid(self):
-		return self._objectdata.get('PatientID')
+		return self._objectdata.get(DCMHEADER_PATIENT_ID)
 
 	@property
 	def patient_sex(self):
-		return self._objectdata.get('PatientSex')
+		return self._objectdata.get(DCMHEADER_PATIENT_SEX)
 
 
 class RemoteImagingStudyMixin(object):
@@ -75,21 +79,19 @@ class RemoteImagingStudyMixin(object):
 	'''
 	@property
 	def accession_number(self):
-		return self._objectdata.get('AccessionNumber')
+		return self._objectdata.get(DCMHEADER_ACCESSION_NUMBER)
 
 	@property
 	def study_date(self):
-		return self._objectdata.get('StudyDate')
+		return self._objectdata.get(DCMHEADER_STUDY_DATE)
 
 	@property
 	def study_time(self):
-		return self._objectdata.get('StudyTime')
+		return self._objectdata.get(DCMHEADER_STUDY_TIME)
 
 	@property
 	def physician(self):
-		return self._objectdata.get('ReferringPhysicianName')
-
-
+		return self._objectdata.get(DCMHEADER_REFERRING_PHYSICIAN)
 
 
 
@@ -109,12 +111,36 @@ REMOTE_IMAGING_STUDY_OUTPUT_COLUMNS = OrderedDict((
 class RemoteImagingStudy(RemoteImagingStudyMixin, RemoteImagingPatientDataMixin, RemoteImagingBaseObject):
 	'''	Imaging study: set of sequeneces/series/scans
 	'''
-	pk_attr = 'StudyInstanceUID'
+	pk_attr = DCMHEADER_STUDY_INSTANCE_UID
 	tabulate_output_columns = REMOTE_IMAGING_STUDY_OUTPUT_COLUMNS
 
 	@property
 	def description(self):
 		return self._objectdata.get('StudyDescription')
+
+	def fetch_series(self, **kwargs):
+		'''	Retrieve details of series on the DICOMweb remote associated with the study
+
+			@returns RemoteImagingSeriesCollection: collection of DICOM series models associated with the study.
+		'''
+		# Create query structure
+		query = kwargs.get('query') or {}
+		query.update({ self.pk_attr: self.pk })
+
+		# Ensure that the resource type is "Series"
+		kwargs.update({ 'resource': IMAGING_SERVER_RESOURCE_SERIES })
+
+		# Retrieve imaging series collection
+		return self.dicomweb.remote_query(query, **kwargs)
+
+	@property
+	def series_collection(self):
+		'''	Series instances associated with the study
+		'''
+		if getattr(self, '_series', None) is None:
+			setattr(self, '_series', self.fetch_series())			
+
+		return self._series
 
 
 class RemoteImagingStudyCollection(RemoteImagingObjectCollection):
@@ -139,28 +165,28 @@ class RemoteImagingSeries(
 		RemoteImagingStudyMixin, RemoteImagingPatientDataMixin, RemoteImagingBaseObject):
 	'''	Remote imaging series: set of grouped images
 	'''
-	pk_attr = 'SeriesInstanceUID'
+	pk_attr = DCMHEADER_SERIES_INSTANCE_UID
 	tabulate_output_columns = IMAGING_SERIES_OUTPUT_COLUMNS
 
 	@property
 	def sequence_name(self):
-		return self._objectdata.get('SequenceName')
+		return self._objectdata.get(DCMHEADER_SEQUENCE_NAME)
 
 	@property
 	def modality(self):
-		return self._objectdata.get('Modality')
+		return self._objectdata.get(DCMHEADER_MODALITY)
 
 	@property
 	def description(self):
-		return self._objectdata.get('SeriesDescription')
+		return self._objectdata.get(DCMHEADER_SERIES_DESCRIPTION)
 
 	@property
 	def study(self):
-		return self._objectdata.get('StudyInstanceUID')
+		return self._objectdata.get(DCMHEADER_STUDY_INSTANCE_UID)
 
 	@property
 	def series_number(self):
-		return self._objectdata.get('SeriesNumber')
+		return self._objectdata.get(DCMHEADER_SERIES_NUMBER)
 
 	@property
 	def series_date(self):
@@ -172,7 +198,7 @@ class RemoteImagingSeries(
 
 	@property
 	def body_part(self):
-		return self._objectdata.get('BodyPartExamined')
+		return self._objectdata.get(DCMHEADER_BODY_PART_EXAMINED)
 
 
 class RemoteImagingSeriesCollection(RemoteImagingObjectCollection):

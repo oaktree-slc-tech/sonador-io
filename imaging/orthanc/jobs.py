@@ -34,6 +34,7 @@ class OrthancJob(OrthancJobBaseObject):
 	pk_attr = 'ID'
 	fetch_endpoint = '/jobs'
 	tabulate_output_columns = JOBS_OUTPUT_COLUMNS
+	order_by = 'ctime'
 
 	@property
 	def resource_url(self):
