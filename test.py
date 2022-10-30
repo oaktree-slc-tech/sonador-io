@@ -1,8 +1,11 @@
 import os, logging, unittest, pkgutil
 
+from client.utils.conversion import str2bool
+
 from .helpers import initenv_sonador_server
 from .servers import sonador_apitoken_fetch
-from .apisettings import SONADOR_IMAGING_SERVER, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES
+from .apisettings import SONADOR_IMAGING_SERVER, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
+	SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, SONADOR_INTERNAL_DNS
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +34,34 @@ def load_testcases(mpath, loader, suite, pattern=None):
 class SonadorBaseTestCase(unittest.TestCase):
 	'''	Unit TestCase with helper methods for working Sonador/Orthanc instances
 	'''
+
+	def initenv_sonador_server(self, sonador_url=None, access_id=None, secret_key=None, apitoken=None,
+							   internal_dns=None, **kwargs):
+		''' Initialize Sonador Server connection. The method reads the standard Sonador environment
+			variables for default arguments. If the environment variable is not defined, the default
+			for the argument will be None.
+		'''
+		sonador_url = sonador_url or os.environ.get(SONADOR_URL)
+		access_id = access_id or os.environ.get(SONADOR_ACCESS_ID)
+		secret_key = secret_key or os.environ.get(SONADOR_SECRET_KEY)
+		apitoken = apitoken or os.environ.get(SONADOR_APITOKEN)
+		internal_dns = internal_dns or str2bool(os.environ.get(SONADOR_INTERNAL_DNS))
+
+		from .servers import SonadorServer
+		return SonadorServer(sonador_url, access_id=access_id, secret_key=secret_key, apitoken=apitoken,
+			internal_dns=internal_dns, **kwargs)
+
+	def getSonadorConnection(self, *args, **kwargs):
+		return self.initenv_sonador_server(*args, **kwargs)
+
 	def getImageServer(self, *args, **kwargs):
 		'''	Retrieve an image server using the provided arguments or values defined in the environment
 		'''
+		iserverid = kwargs.get('iserverid') or os.environ.get(SONADOR_IMAGING_SERVER)
+		if iserverid is None:
+			raise ValueError('Invalid imaging server ID: "%s". Imaging server environment variable ("%s"): "%s".'
+				% (iserverid, SONADOR_IMAGING_SERVER, os.environ.get(SONADOR_IMAGING_SERVER)))
+
 		sconn = initenv_sonador_server(*args, **kwargs)
 		iserver = sconn.get_imageserver(
 			kwargs.get('iserverid') or os.environ.get(SONADOR_IMAGING_SERVER))

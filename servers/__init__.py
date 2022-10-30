@@ -153,7 +153,7 @@ class SonadorServer(RemoteServer):
 			verify = self.verify
 		
 		return fetch_sonador_dataobject(self, dataservice_datamodel_class, uid, verify=verify)
-	
+
 	def get_session_token(self, verify=None, *args, **kwargs):
 		'''	Retrieve a session token using the provided acess ID/secret
 		'''
@@ -161,6 +161,19 @@ class SonadorServer(RemoteServer):
 			verify = self.verify
 		
 		return fetch_sonador_session_token(self, verify=verify)
+
+	def fetch_imageservers(self, *args, verify=None, imageserver_collection_class=None, **kwargs):
+		''' Retrieve collection of PACS servers for a given Sonador instance
+		'''
+		from ..remote import fetch_sonador_data_collection
+		if imageserver_collection_class is None:
+			imageserver_collection_class = SonadorImagingServerCollection
+
+		if verify is None:
+			verify = self.verify
+
+		return fetch_sonador_data_collection(
+			self, imageserver_collection_class, *args, verify=verify, **kwargs)
 
 
 class SonadorImagingServer(OrthancImagingMixin, SonadorBaseObject):

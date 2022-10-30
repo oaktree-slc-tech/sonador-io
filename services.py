@@ -50,4 +50,3 @@ class DataService(SonadorBaseObject):
             request_client_error('Unable to retrieve API credentials from Sonador due to an error.', r)
         
         return r.json()
-    
