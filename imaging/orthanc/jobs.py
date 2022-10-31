@@ -3,12 +3,12 @@ from collections import OrderedDict
 
 from ...helpers import request_client_error, fetch_sonador_session_token
 from ...serialization import json_datetime_parser
-from ...servers import ImagingServerBaseObject, ImagingServerChildCollection
+from ...servers import ImagingServerChildBaseObject, ImagingServerChildCollection
 
 logger = logging.getLogger(__name__)
 
 
-class OrthancJobBaseObject(ImagingServerBaseObject):
+class OrthancJobBaseObject(ImagingServerChildBaseObject):
 	'''	Orthanc processing job base object. Used for reporting jobs and their results.
 	'''
 	def __init__(self, *args, **kwargs):
