@@ -9,7 +9,7 @@ from abc import ABCMeta, abstractmethod
 from urllib.parse import urlencode
 
 from collections import namedtuple
-from collections import Iterable
+from collections.abc import Iterable
 from collections import OrderedDict
 
 from tabulate import tabulate
@@ -35,7 +35,7 @@ from ...apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOU
 from ...helpers import request_client_error, fetch_sonador_session_token
 from ...serialization import json_datetime_parser, json_str2datetime, dcm_str2date, dcm_str2time
 from ...remote import SonadorBaseObject, SonadorObjectCollection, fetch_sonador_data_collection
-from ...servers import ImagingServerChildCollection, ImagingServerBaseObject, SonadorImagingServer
+from ...servers import ImagingServerChildCollection, ImagingServerChildBaseObject, SonadorImagingServer
 
 logger = logging.getLogger(__name__)
 
@@ -409,7 +409,7 @@ IMAGING_PATIENT_OUTPUT_COLUMNS = OrderedDict((
 	))
 
 
-class ImagingPatient(ImagingResourceMixin, ImagingServerBaseObject):
+class ImagingPatient(ImagingResourceMixin, ImagingServerChildBaseObject):
 	'''	Patient 
 	'''
 	pk_attr = 'ID'
@@ -595,7 +595,7 @@ IMAGING_STUDY_OUTPUT_COLUMNS = OrderedDict((
 	))
 
 
-class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServerBaseObject):
+class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServerChildBaseObject):
 	'''	Imaging study: set of sequences/series/scans
 	'''
 	pk_attr = 'ID'
@@ -1052,7 +1052,7 @@ IMAGING_SERIES_OUTPUT_COLUMNS = OrderedDict((
 FileDataResponse = namedtuple('FileDataRequest', ('buffer', 'response'))
 
 
-class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServerBaseObject):
+class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServerChildBaseObject):
 	'''	Imaging series: set of grouped images
 	'''
 	pk_attr = 'ID'
@@ -1393,7 +1393,7 @@ IMAGING_INSTANCE_OUTPUT_COLUMNS = OrderedDict((
 	))
 
 
-class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMixin, ImagingServerBaseObject):
+class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMixin, ImagingServerChildBaseObject):
 	'''	Model used for DCM instance data
 	'''
 	pk_attr = 'ID'
