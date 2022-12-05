@@ -268,3 +268,5 @@ DicomMeta = namedtuple('DicomMeta', ('description', 'modality'))
 
 
 
+ORTHANC_JOB_STATUS_SUCCESS = 'Success'
+ORTHANC_JOB_STATUS_FAILED = 'Failed'
