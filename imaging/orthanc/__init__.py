@@ -8,6 +8,7 @@ from .base import parse_image_orientation, ImagingPatient, ImagingPatientCollect
 	IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, IMAGING_SERVER_RESOURCE_IMAGE
 from .sr import DcmSRSeries, DcmSRSeriesCollection, IMAGING_SERVER_RESOURCE_REPORT
 from .jobs import OrthancJob, OrthancJobCollection, OrthancJobResult
+from .m3d import DcmM3DSeries, DcmM3DSeriesCollection
 
 
 IMAGING_SERVER_RESOURCE_DATAMODEL_COLLECTIONTYPES = OrderedDict((

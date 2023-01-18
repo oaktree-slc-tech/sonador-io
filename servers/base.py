@@ -20,6 +20,7 @@ from client.remote import RemoteServer, request_client_error
 from ..apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, \
 	IMAGING_SERVER_RESOURCE_SERIES, IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_RESOURCE_SUPPORTED, \
 	DCMHEADER_MODALITY, DCM_MODALITY_SR, DCM_MODALITY_SEG, DCM_VERSION_2021b
+from ..apisettings.media import DCMEDIA_M3D_MODALITY
 from ..serialization import json_datetime_parser
 from ..helpers import request_client_error, fetch_sonador_session_token, API_ACCESS_TOKEN, OAUTH_TOKEN_RESPONSE_TYPE, \
 	OAUTH_TOKEN_IDTOKEN_RESPONSE_TYPE, OAUTH_ACCESS_TOKEN, OAUTH_TOKEN_TYPE, OAUTH_TOKEN_TYPE_BEARER, OAUTH_EXPIRATION
@@ -389,6 +390,17 @@ class OrthancServerBase(SonadorBaseObject):
 
 		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_SERIES,
 			resource_modelcollection_class=DcmSegmentationSeriesCollection, **kwargs)
+
+	def query_m3d(self, sfilter, **kwargs):
+		'''	Query M3D resources on the imaging server. (Wrapper function for "query".)
+		'''
+		from ..imaging.orthanc.m3d import DcmM3DSeriesCollection
+		
+		self._check_query_structure(sfilter)
+		sfilter.update({ DCMHEADER_MODALITY: DCMEDIA_M3D_MODALITY })
+
+		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_SERIES,
+			resource_modelcollection_class=DcmM3DSeriesCollection, **kwargs)
 
 	def fetch_jobs(self, verify=None, headers=None, limit=None, offset=None, expand=True, **kwargs):
 		'''	Retrieve the processing jobs for the server

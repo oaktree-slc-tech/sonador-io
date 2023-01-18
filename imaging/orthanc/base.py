@@ -19,6 +19,7 @@ from client import auth as guru_auth
 from client.utils.urls import build_url
 from client.utils.object import pick
 from client.utils.microservices import server_controloperation_json_response, RemotePage
+from client.utils.colors import RGB
 
 from ...apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
 	IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_LAST_UPDATE, IMAGING_SERVER_DICOMTAGS_SIGNATURE, \
@@ -29,8 +30,10 @@ from ...apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOU
 	DCMHEADER_STUDY_DATE, DCMHEADER_STUDY_TIME, \
 	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SERIES_NUMBER, \
 	DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME, DCMHEADER_SERIES_DESCRIPTION, \
+	DCMHEADER_SLICE_THICKNESS, DCMHEADER_SLICE_LOCATION, DCMHEADER_PIXEL_SPACING, \
 	DCMHEADER_BODY_PART_EXAMINED, DCM_VERSION_2021b, \
-	DCMHEADER_MODALITIES_IN_STUDY, DCM_MODALITY_SR, DCM_MODALITY_SEG
+	DCMHEADER_MODALITIES_IN_STUDY, DCM_MODALITY_SR, DCM_MODALITY_SEG, \
+	DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID
 
 from ...helpers import request_client_error, fetch_sonador_session_token
 from ...serialization import json_datetime_parser, json_str2datetime, dcm_str2date, dcm_str2time
@@ -49,6 +52,12 @@ ImageCoord = namedtuple('ImageCoord', ('x', 'y', 'z'))
 ImageSpacing = namedtuple('ImageSpacing', ('x', 'y', 'thickness'))
 ImageOrientation = namedtuple('ImageOrientation', ('row', 'col'))
 ImageStackShape = namedtuple('ImageStackShape', ('slices', 'rows', 'cols'))
+
+
+# DICOM Color Representations
+RGBColor = RGB
+LABColor = namedtuple('LABColor', ('L', 'a', 'b'))
+XYZColor = namedtuple('XYZColor', ('x', 'y', 'z'))
 
 
 EUCLID_COORD_ORIGIN = ImageCoord(0, 0, 0)
@@ -844,6 +853,38 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 		setattr(self, '_seg', seg_collection)
 
+	def fetch_m3d(self, **kwargs):
+		'''	Fetch the M3D instances associated with the study	
+		'''
+		return self.pacs.query_m3d({ DCMHEADER_STUDY_INSTANCE_UID: self.study_uid },
+			rapid_lookup=getattr(self, 'resource_cache_lookup', None), pacs=self.pacs, study=self, **kwargs)
+
+	def m3d_from_json(self, jdata, **kwargs):
+		'''	Initialize M3D collection from JSON structure
+		'''
+		from .m3d import DcmM3DSeriesCollection
+		return self.server._init_dataclass_from_json(
+			DcmM3DSeriesCollection, jdata, pacs=self.pacs, study=self, **kwargs)
+
+	@property
+	def m3d_collection(self):
+		'''	M3D series associated with the study	
+		'''
+		if getattr(self, '_m3d', None) is None:
+			setattr(self, '_m3d', self.fetch_m3d())
+
+		return self._m3d
+
+	@m3d_collection.setter
+	def m3d_collection(self, m3d_collection):
+		'''	Set M3D series which belong to the study
+		'''
+		from .m3d import DcmM3DSeriesCollection
+		if not isinstance(m3d_collection, DcmM3DSeriesCollection):
+			raise ValueError('Input must be an instance of a DcmM3DSeriesCollection')
+
+		setattr(self, '_m3d', m3d_collection)
+
 	def _populate_subcollections(self, populate_sr=True, populate_seg=True):
 		'''	Populate study SR and SEG collections from the series collection
 		'''
@@ -1293,6 +1334,14 @@ class ImagingSeries(ImagingSeriesCoreResource):
 			key=lambda dcm: dcm.ts if dcm.ts else datetime.datetime(year=1900, month=1, day=1),
 			reverse=True)
 
+	@property
+	def m3d_models(self):
+		'''	M3D models associated with the series. Sorted with the most recent models first.	
+		'''
+		return sorted(
+			[dcm3d for dcm3d in self.parent.m3d_collection if self.series_uid in dcm3d.series_reference_uids],
+			key=lambda dcm: dcm.ts if dcm.ts else datetime.datetime(year=1900, month=1, day=1),
+			reverse=True)
 
 
 class ImagingSeriesBulkPopulateMixin:
@@ -1412,8 +1461,12 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 		return self._objectdata.get('IndexInSeries')
 
 	@property
+	def sop_class_uid(self):
+		return self.dicomdata.get(DCMHEADER_SOP_CLASS_UID)
+
+	@property
 	def sop_instance_uid(self):
-		return self.dicomdata.get('SOPInstanceUID')
+		return self.dicomdata.get(DCMHEADER_SOP_INSTANCE_UID)
 
 	@property
 	def parent(self):
@@ -1638,7 +1691,7 @@ class DcmInstance(DcmInstanceCoreResource):
 			and will return None if the header is not present.
 		@returns float or None
 		'''
-		zval = self.tags.get('SliceLocation')		
+		zval = self.tags.get(DCMHEADER_SLICE_LOCATION)		
 		return float(zval) if isinstance(zval, six.string_types) else zval
 
 	@property
@@ -1649,7 +1702,7 @@ class DcmInstance(DcmInstanceCoreResource):
 
 			@returns float or None
 		'''
-		thickness = self.tags.get('SliceThickness')
+		thickness = self.tags.get(DCMHEADER_SLICE_THICKNESS)
 		return float(thickness) if isinstance(thickness, six.string_types) else thickness
 
 	@property
@@ -1660,7 +1713,7 @@ class DcmInstance(DcmInstanceCoreResource):
 
 			@returns tuple or None
 		'''
-		spacing = self.tags.get('PixelSpacing')
+		spacing = self.tags.get(DCMHEADER_PIXEL_SPACING)
 
 		# Split the spacing into x and y components
 		if isinstance(spacing, six.string_types):

@@ -3,7 +3,11 @@
 import six, os, logging, re, traceback, argparse, datetime, requests, shutil
 from collections import namedtuple, OrderedDict
 from six.moves.urllib import parse as urlparse
+
 import pydicom
+from pydicom.dataset import Dataset
+from pydicom.sequence import Sequence
+from highdicom.sr.templates import Code as DcmCode, CodedConcept as DcmCodedConcept
 
 from client import apisettings as gcapicodes
 from client import auth as guru_auth
@@ -14,8 +18,15 @@ from client.utils.conversion import str2bool
 from client.utils.microservices import server_controloperation_json_response
 from client.remote import RemoteServer, request_client_error
 
-from .apisettings import SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, SONADOR_INTERNAL_DNS
-from .serialization import json_datetime_parser
+from ..apisettings import SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, SONADOR_INTERNAL_DNS, \
+	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SR_REF_SERIES_SEQ, DCMHEADER_SR_REF_INSTANCE_SEQ, DCMHEADER_SR_REF_SOP_SEQ, \
+	DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_SR_SOP_CLASS_UID, DCMHEADER_SR_REF_INSTANCE_UID
+from ..apisettings.sr import DCM_CODED_CONCEPT_HEADERS, DCM_CODED_CONCEPT_MAPPING
+from ..apisettings.media import DCMEDIA_PDF_MIMETYPE, DCMEDIA_PDF_EXTENSION, \
+	DCMEDIA_STL_MIMETPYE, DCMEDIA_STL_EXTENSION, \
+	DCMEDIA_OBJ_MIMETYPE, DCMEDIA_OBJ_EXTENSION, DCMEDIA_GLB_MIMETYPE, DCMEDIA_GLB_EXTENSION, \
+	DCMEDIA_MTL_MIMETYPE, DCMEDIA_MTL_EXTENSION
+from ..serialization import json_datetime_parser
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +63,7 @@ def initenv_sonador_server(sonador_url=os.environ.get(SONADOR_URL),
 		variables for default arguments. If the environment variable is not defined, the default 
 		for the argument will be None.
 	'''
-	from .servers import SonadorServer
+	from ..servers import SonadorServer
 	return SonadorServer(sonador_url, access_id=access_id, secret_key=secret_key, apitoken=apitoken,
 		internal_dns=internal_dns, **kwargs)
 	
@@ -211,3 +222,93 @@ def reindex_slicelocation(dcmimage_dir, index_start=0, tmp_prefix='tmp', indexfn
 	# Re-index/re-order the images
 	reindex_dcm_images(dcmimage_dir, dcmimg_list, index_start=index_start, tmp_prefix=tmp_prefix)
 
+
+def srcode2dataset(dcmcode: DcmCode, dcm_mdata=None, codedconcept_mapping=DCM_CODED_CONCEPT_MAPPING):
+	'''	Convert the provided DICOM code or coded concept to a pydicom.dataset.Dataset instance.
+
+		@input dcmcode (highdicom.sr.template.Code): code instance to convert to a Dataset.
+		@input dcm_mdata (pydicom.dataset.Dataset, default=blank dataset instance): 
+			dataset to which the code data should be added.
+
+		@returns pydicom.dataset.Dataset
+	'''
+	# Initialize dataset instance
+	dcm_mdata = dcm_mdata or Dataset()
+
+	# Map values from Code/CodedConcept to Dataset
+	for k,v in codedconcept_mapping.items():
+		setattr(dcm_mdata, v, getattr(dcmcode, k, None))
+
+	return dcm_mdata
+
+
+def dcm_encode_instance_ref(instance, dcm_mdata=None):
+	'''	Create a DICOM ReferencedInstanceSequence element for the provided instance.
+
+		@input instance (sonador.imaging.orthanc.base.DcmInstance):
+			instance for which the instance reference should be created.
+		@input dcm_mdata (pydicom.dataset.Dataset, default=blank dataset instance):
+			dataset to which the reference should be added
+
+		@returns pydicom.dataset.Dataset
+	'''
+	from ..imaging.orthanc.base import DcmInstance
+
+	# Ensure that the provided instance is an Orthanc imaging instance
+	if not isinstance(instance, DcmInstance):
+		raise ValueError('Unable to create reference for the instance, input must be '
+			+ 'a DcmInstance.')
+
+	# Initialize dataset and add instance class and UID references
+	dcm_mdata = dcm_mdata or Dataset()
+	setattr(dcm_mdata, DCMHEADER_SR_SOP_CLASS_UID, instance.sop_class_uid)
+	setattr(dcm_mdata, DCMHEADER_SR_REF_INSTANCE_UID, instance.sop_instance_uid)
+
+	return dcm_mdata
+
+
+def dcm_encode_series_ref(series, dcm_mdata=None):
+	'''	Create a DICOM ReferencedSeriesSequence for the provided series and associated instances.
+
+		@input series (sonador.imaging.orthanc.base.ImagingSeries): series for which the series
+			reference should be created.
+		@input dcm_mdata (pydicom.dataset.Dataset, default=blank dataset instance):
+			dataset to which the references should be added
+
+		@returns pydicom.dataset.Dataset
+	'''
+	from ..imaging.orthanc.base import ImagingSeries
+
+	# Ensure that the provided series is an Orthanc imaging series
+	if not isinstance(series, ImagingSeries):
+		raise ValueError('Unable to create reference series for series, reference series must be '
+			+ 'an ImagingSeries instance.')
+
+	# Initialize dataset and add series
+	dcm_mdata = dcm_mdata or Dataset()
+	setattr(dcm_mdata, DCMHEADER_SERIES_INSTANCE_UID, series.series_uid)
+	setattr(dcm_mdata, DCMHEADER_SR_REF_INSTANCE_SEQ, Sequence(
+		[dcm_encode_instance_ref(dcm) for dcm in series.slices_collection]))
+
+	return dcm_mdata
+
+
+
+DCM_MIMETYPE_EXTENSION_MAPPING = {
+	DCMEDIA_PDF_MIMETYPE: DCMEDIA_PDF_EXTENSION,
+	DCMEDIA_STL_MIMETPYE: DCMEDIA_STL_EXTENSION,
+	DCMEDIA_OBJ_MIMETYPE: DCMEDIA_OBJ_EXTENSION,
+	DCMEDIA_GLB_MIMETYPE: DCMEDIA_GLB_EXTENSION,
+	DCMEDIA_MTL_MIMETYPE: DCMEDIA_MTL_EXTENSION,
+}
+
+def dcm_mimetype_guess_extension(mtype):
+	'''	Guess the extension for a file from its MIME type. The return value is a
+		filename extension, including the leading dot (`.`). If no extension can be 
+		guessed for the provied mimetype, None is returned.
+
+		@input mtype (str): MIME type for which the file extension should be guessed
+
+		@returns str or None
+	'''
+	return DCM_MIMETYPE_EXTENSION_MAPPING.get(mtype)
