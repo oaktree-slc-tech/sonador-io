@@ -3,8 +3,7 @@
 ## Installation
 
 ```bash
-pip install git+https://code.oak-tree.tech/guru-labs/packages/guru-client.git
-pip install git+https://code.oak-tree.tech/oak-tree/medical-imaging/packages/sonador.git
+pip install sonador --extra-index-url https://code.oak-tree.tech/api/v4/projects/335/packages/pypi/simple
 ```
 
 ## Usage

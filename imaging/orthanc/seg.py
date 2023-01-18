@@ -24,6 +24,7 @@ ImageSegmentMeta = namedtuple('ImageSegmentMeta', ('number', 'label', 'series'))
 ImageSegmentData = namedtuple('ImageSegmentData', 
 	('description','frames', 'frame_descriptions', 'resource_instance_uids'))
 
+
 class DcmSegmentationSeries(DcmSRSeries):
 	'''	DICOM-SEG: structured report instance containing image segmentations
 	'''
