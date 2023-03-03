@@ -463,6 +463,17 @@ class ImagingServerChildCollection(SonadorObjectCollection):
 		
 		super().__init__(*args, **kwargs)
 
+	def _init_empty_collection(self, *args, **kwargs):
+		'''	Initialize empty collection: propagates PACS and resource cache lookup
+			settings to the new collection instance.
+		'''
+		if kwargs.get('pacs') is None and self.pacs:
+			kwargs['pacs'] = self.pacs
+		if kwargs.get('resource_cache_lookup') is None:
+			kwargs['rapid_lookup'] = self.resource_cache_lookup
+
+		return super()._init_empty_collection(*args, **kwargs)
+
 	def _init_collection_models(self, **kwargs):
 		if self.pacs:
 			kwargs['pacs'] = self.pacs
