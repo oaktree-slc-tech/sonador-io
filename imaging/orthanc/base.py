@@ -140,13 +140,19 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 	def url(self):
 		return self.resource_url
 
-	def modify(self, replace=None, remove=None, remove_private_tags=False, force=False, transcode=None, private_creator=None,
+	def modify(self, replace=None, remove=None, keep=None, keep_source=None,
+			remove_private_tags=False, force=False, transcode=None, private_creator=None,
 			modify=None, headers=None, verify=None, **kwargs):
 		'''	Modify tags or metadata associated with a DICOM resource.  The modified DICOM instances will be stored into a brand 
 			new resource, whose Orthanc identifiers will be returned by the job. 
 
 			@input replace (dict): Dictionary of DICOM tags to be replaced for the resource
 			@input remove (iterable of tags): Iterable of tag names to be removed for the resource
+			@input keep (iterable of tags, default=None): Iterable of tag names for which the 
+				original values should be kept. If None, new values will be generated
+				for StudyInstanceUID, SeriesInstanceUID, and SOPInstanceUID.
+			@input keep_source (bool, default=true): if set to False, instructs Orthanc to remove
+				the original sources. By default, the original resources are kept.
 			@input remove_private_tags (bool, default=False): Flag that, when true, will cause
 				private tags (i.e., manufacturer-specific tags) to be removed
 			@input force (bool, default=False): Flag that, when true, allows modification of DICOM identifiers
@@ -177,6 +183,10 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 			modify['Transcode'] = transcode
 		if private_creator:
 			modify['PrivateCreator'] = private_creator
+		if keep:
+			modify['Keep'] = keep
+		if keep_source is not None:
+			modify['KeepSource'] = keep_source
 
 		# Execute operation
 		logger.debug('Structure of modification request:\n%s' % json.dumps(modify))
@@ -1032,6 +1042,14 @@ class ImagingStudyCollection(ImagingResourceBaseCollection):
 		self.parent = kwargs.pop('patient', None)
 		super().__init__(*args, **kwargs)
 
+	def _init_empty_collection(self, *args, **kwargs):
+		'''	Initialize empty collection: propagates patient to new collection instance.
+		'''
+		if kwargs.get('patient') is None and self.parent:
+			kwargs['patient'] = self.parent
+
+		return super()._init_empty_collection(*args, **kwargs)
+
 	def _init_collection_models(self, **kwargs):
 		if self.parent:
 			kwargs['patient'] = self.parent
@@ -1420,6 +1438,17 @@ class ImagingSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingResourceBas
 		
 		super().__init__(*args, **kwargs)
 
+	def __init_empty_collection(self, *args, **kwargs):
+		'''	Initialize empty collection: propagates parent (either study or patient) to the
+			new collection instance.
+		'''
+		if kwargs.get('patient') is None and isinstance(self.parent, ImagingPatient):
+			kwargs['patient'] = self.parent
+		elif kwargs.get('study') is None and isinstance(self.parent, ImagingStudy):
+			kwargs['study'] = self.parent
+
+		return super()._init_empty_collection(*args, **kwargs)
+
 	def _init_collection_models(self, **kwargs):
 		if self.parent:
 
@@ -1744,6 +1773,14 @@ class DcmInstanceCoreCollection(ImagingServerChildCollection):
 	def __init__(self, *args, **kwargs):
 		self.parent = kwargs.pop('series', None)
 		super().__init__(*args, **kwargs)
+
+	def _init_empty_collection(self, *args, **kwargs):
+		'''	Initialize empty collection: propagates series to the new collection instance.
+		'''
+		if kwargs.get('series') is None and self.parent:
+			kwargs['series'] = self.parent
+
+		return super()._init_empty_collection(*args, **kwargs)
 
 	def _init_collection_models(self, **kwargs):
 		if self.parent:

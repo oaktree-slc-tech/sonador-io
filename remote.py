@@ -47,6 +47,12 @@ class SonadorObjectCollection(GuruObjectCollection):
 		if kwargs:
 			print('Args: %s. Keyword args: %s.' % (args, kwargs))
 		super().__init__(*args, **kwargs)
+
+	def _init_empty_collection(self, *args, **kwargs):
+		'''	Initialize an empty collection of the same type. Used by collection methods
+			for filtering, slicing, and other operations.
+		'''
+		return type(self)(self.server, *args, **kwargs)
 	
 	def _init_collection_modelinstance(self, *args, **kwargs):
 		'''	Initialize collection model instances. As part of the init, models
@@ -64,7 +70,7 @@ class SonadorObjectCollection(GuruObjectCollection):
 			a persistent 'models" structure has been created and whether or not
 			the lookup is available.
 		'''
-		# Attempting to retriev the length of the collection will force it to initialize
+		# Attempting to retrieve the length of the collection will force it to initialize
 		if not self._model_lookup and self._objectdata: len(self)
 	
 	def get_modelinstance(self, pk):
@@ -102,6 +108,16 @@ class SonadorObjectCollection(GuruObjectCollection):
 
 	def __add__(self, other):
 		return self.__iadd__(other)
+
+	def filter(self, fn):
+		'''	Return a copy of the collection with models filtered by the provided function.
+			(Collection includes new copies of the model instances initialized using model._objectdata.)
+
+			@input fn (callable): function used to filter collection models
+
+			@returns filtered copy of collection
+		'''
+		return self._init_empty_collection([m._objectdata for m in filter(fn, self)])
 
 
 def fetch_sonador_dataobject_schema(*args, apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers', **kwargs):
