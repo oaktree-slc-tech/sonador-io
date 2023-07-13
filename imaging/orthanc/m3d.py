@@ -7,52 +7,28 @@ from ...apisettings import DCMHEADER_SERIES_INSTANCE_UID, \
 
 from .base import DcmInstanceCoreResource, DcmInstanceCoreCollection, ImagingSeriesBulkPopulateMixin
 from .sr import DcmSRSeries, DcmSRSeriesCollection, DcmStructuredInstance, DcmStructuredInstanceCollection
+from .media import DcmEncapsulatedDocumentSeries, DcmEncapsulatedDocumentSeriesCollection, \
+	DcmEncapsulatedDocumentInstance, DcmEncapsulatedDocumentInstanceCollection
 
 
-class DcmM3DSeries(DcmSRSeries):
+class DcmM3DSeries(DcmEncapsulatedDocumentSeries):
 	''' Model representation of DICOM encoded 3D models (STL/GLB)
 	'''
 	@property
 	def dcminstance_modelcollection_class(self): return DcmM3DInstanceCollection
 
 
-class DcmM3DSeriesCollection(DcmSRSeriesCollection):
+class DcmM3DSeriesCollection(DcmEncapsulatedDocumentSeriesCollection):
 	'''	Collection of M3D models
 	'''
 	model = DcmM3DSeries
 
 
-class DcmM3DInstance(DcmStructuredInstance):
+class DcmM3DInstance(DcmEncapsulatedDocumentInstance):
 	'''	DCM instance model used for 3D models (STL/GLB)
 	'''
-	@property
-	@functools.lru_cache()
-	def instance_reference_uids(self):
-		'''	Cached property for retrieving the reference UIDs of image instances associated with the segmentation.
-			@returns set of all unique instance UIDs referenced by the segmentation instance.
-		'''
-		instance_references = set()
 
-		# Iterate through all references in the sequence, unpack reference UIDs
-		for refset in self.tags.get(DCMHEADER_SR_REF_SERIES_SEQ, []):
-			for ref in refset.get(DCMHEADER_SR_REF_INSTANCE_SEQ, []):
-				if ref.get(DCMHEADER_SR_REF_INSTANCE_UID):
-					instance_references.add(ref.get(DCMHEADER_SR_REF_INSTANCE_UID))
-		
-		return instance_references
-
-	@property
-	@functools.lru_cache()
-	def series_reference_uids(self):
-		'''	Cached property for retrieving the reference UIDs of image series associated with the segmentation.
-			
-			@returns set of all unique series UIDs referenced by the segmentation instance.
-		'''
-		return set([refset.get(DCMHEADER_SERIES_INSTANCE_UID) for refset in self.tags.get(DCMHEADER_SR_REF_SERIES_SEQ, [])
-			if refset.get(DCMHEADER_SERIES_INSTANCE_UID)])
-
-
-class DcmM3DInstanceCollection(DcmStructuredInstanceCollection):
+class DcmM3DInstanceCollection(DcmEncapsulatedDocumentInstanceCollection):
 	'''	Collection of 3D model instances	
 	'''
 	model = DcmM3DInstance

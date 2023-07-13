@@ -1,8 +1,9 @@
-import os, sys, six, argparse
+import os, sys, six, argparse, logging
 from collections import OrderedDict
 
 from client.utils.logs import LOGGING_LEVELS
 from client.utils.object import pick
+from client.errors import OperationError
 
 from .apisettings import SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, \
 	SONADOR_IMAGING_SERVER
@@ -10,6 +11,8 @@ from .apisettings import SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SON
 from .validate import argparse_type_directory, argparse_keyval
 from .serialization import OUTPUT_TYPE_TABULATE, OUTPUT_TYPE_CSV, OUTPUT_TYPE_SUPPORTED
 from .imaging.orthanc import FILEARCHIVE_TYPE_ZIPARCHIVE, FILEARCHIVE_TYPE_DICOMDIR, FILEARCHIVE_TYPE_SUPPORTED 
+
+logger = logging.getLogger(__name__)
 
 
 # General Commands
@@ -209,4 +212,12 @@ def resource_cache_options(subparser):
 			+ '/tools/find endpoint of Orthanc. Requests using the resource cache may be as much as 100 times faster '
 			+ 'than the equivalent query to the primary Orthanc database. Responses from the resource cache will only contain '
 			+ 'headers which are part of Orthanc instance MainDicomTags or ExtraMainDicomTags.')
-	
+
+
+class SonadorApplicationCommandParser(argparse.ArgumentParser):
+	'''	Argument parser instance which can be used to parse strings without existing.
+	'''
+	def error(self, message):
+		''' Raise an argument error with the message value
+		'''
+		raise OperationError('Unable to parse provided arguments due to an error', details=message)
