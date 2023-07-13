@@ -19,7 +19,7 @@ from client.remote import RemoteServer, request_client_error
 
 from ..apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, \
 	IMAGING_SERVER_RESOURCE_SERIES, IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_RESOURCE_SUPPORTED, \
-	DCMHEADER_MODALITY, DCM_MODALITY_SR, DCM_MODALITY_SEG, DCM_VERSION_2021b
+	DCMHEADER_MODALITY, DCM_MODALITY_SR, DCM_MODALITY_SEG, DCM_MODALITY_DOC, DCM_VERSION_2021b
 from ..apisettings.media import DCMEDIA_M3D_MODALITY
 from ..serialization import json_datetime_parser
 from ..helpers import request_client_error, fetch_sonador_session_token, API_ACCESS_TOKEN, OAUTH_TOKEN_RESPONSE_TYPE, \
@@ -176,7 +176,7 @@ class OrthancServerBase(SonadorBaseObject):
 		'''
 		r = requests.post(
 			self.orthanc_apiurl('instances'), files={ 'file': img }, 
-			headers=self.orthanc_request_headers(headers=headers))
+			headers=self.orthanc_request_headers(headers=headers), verify=self.server.verify)
 
 		if not r.ok:
 
@@ -326,7 +326,7 @@ class OrthancServerBase(SonadorBaseObject):
 		# Execute query
 		r = requests.post(
 			self.orthanc_apiurl(resource_modelcollection_class.model.cache_queryurl) if rapid_lookup else self.orthanc_apiurl('tools/find'), 
-			json=query, headers=self.orthanc_request_headers(headers=headers))
+			json=query, headers=self.orthanc_request_headers(headers=headers), verify=verify)
 		if not r.ok:
 			request_client_error('Unable to execute resource query to PACS %s. Status code: %s.' % (self.server_label, r.status_code), r)
 
@@ -401,6 +401,17 @@ class OrthancServerBase(SonadorBaseObject):
 
 		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_SERIES,
 			resource_modelcollection_class=DcmM3DSeriesCollection, **kwargs)
+
+	def query_doc(self, sfilter, **kwargs):
+		'''	Query DOC resources on the imaging server. (Wrapper function for "query".)
+		'''
+		from ..imaging.orthanc.media import DcmEncapsulatedDocumentSeriesCollection
+
+		self._check_query_structure(sfilter)
+		sfilter.update({ DCMHEADER_MODALITY: DCM_MODALITY_DOC })
+
+		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_SERIES,
+			resource_modelcollection_class=DcmEncapsulatedDocumentSeriesCollection, **kwargs)
 
 	def fetch_jobs(self, verify=None, headers=None, limit=None, offset=None, expand=True, **kwargs):
 		'''	Retrieve the processing jobs for the server

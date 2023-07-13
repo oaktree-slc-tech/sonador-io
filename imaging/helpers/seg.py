@@ -27,11 +27,11 @@ from highdicom.sr.templates import Code, CodedConcept
 from ..orthanc.base import ImagingSeries
 from ...apisettings import dcmcodes, SONADOR_DEVELOPMENT_TEAM, SONADOR_CLIENT, \
 	HIGHDICOM_MANUFACTURER, HIGHDICOM_DEVELOPMENT_TEAM, HIGHDICOM_VERSION, \
-	DCMSR_SONADOR_SEG, DCMSR_SONADOR_SR
+	DCMSR_SONADOR_SEG, DCMSR_SONADOR_SR, DCM_PATIENT_POSITION_FFS
 
 
 def dcmseg_encode_segment_description(snumber: int, slabel: str, tracking_id: str, 
-		property_category: Code, property_type: Code, 
+		property_category: Code=None, property_type: Code=None, 
 		segment_attrs=None, tracking_uid=None, algorithm_type=SegmentAlgorithmTypeValues.MANUAL):
 	'''	Encode DICOM-SEG segment description
 
@@ -65,7 +65,8 @@ def dcmseg_encode_segmentation(series: ImagingSeries, pixel_array: np.ndarray,
 		sop_instance_uid=None, instance_number=1,
 		segmentation_type=SegmentationTypeValues.BINARY,
 		manufacturer=HIGHDICOM_DEVELOPMENT_TEAM, manufacturer_model_name=HIGHDICOM_MANUFACTURER,
-		software_versions=str(HIGHDICOM_VERSION), device_serial_number=None):
+		software_versions=str(HIGHDICOM_VERSION), device_serial_number=None, omit_empty_frames=True,
+		source_dcmimages=None):
 	'''	Encode DICOM-SEG document
 
 		@input series (sonador.imaging.orthanc.ImagingSeries): ImagingSeries with which
@@ -78,8 +79,13 @@ def dcmseg_encode_segmentation(series: ImagingSeries, pixel_array: np.ndarray,
 
 		@returns highdicom.seg.Segmentation
 	'''
+	dcm0 = series.slices_collection[0]
+
 	# Retrieve images
-	source_dcmimages = [s.dcmfile(cache=True) for s in series.slices_collection]
+	source_dcmimages = source_dcmimages or [
+		dcm.dcmfile(cache=True) for dcm in sorted(series.slices_collection,
+			key=lambda v: float(v.image_position_patient.x) if v.image_position_patient else float(v.slice_location),
+			reverse=True if series.patient_position == DCM_PATIENT_POSITION_FFS else False)]
 
 	# Check DICOM images for fields required by the segmentation, backfill if needed.
 	# 1. FrameOfReferenceUID: https://dicom.innolitics.com/ciods/mr-image/frame-of-reference/00200052
@@ -106,6 +112,7 @@ def dcmseg_encode_segmentation(series: ImagingSeries, pixel_array: np.ndarray,
 
         # Source images attributes contains the list of pydicom datasets for the source images
         'source_images': source_dcmimages,
+        'omit_empty_frames': omit_empty_frames,
 
         # Pixel arrays and segmentation descriptions
         'pixel_array': pixel_array,
@@ -117,7 +124,7 @@ def dcmseg_encode_segmentation(series: ImagingSeries, pixel_array: np.ndarray,
         'sop_instance_uid': sop_instance_uid or generate_uid(),
         'series_number': series_number, 
         'series_description': series_description, 
-        'instance_number': instance_number
+        'instance_number': instance_number,
 	})
 
 	return Segmentation(**segmentation_attrs)

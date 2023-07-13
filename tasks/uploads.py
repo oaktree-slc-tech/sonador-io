@@ -19,20 +19,47 @@ logger = logging.getLogger(__name__)
 
 def imageserver_upload_folder(iserver, folders, tpool=None, threads=4, 
 		verify=False, fileupload_check=False, destfolder_complete=None,
-		dcm_extensions=DCM_EXTENSIONS_DEFAULT, ignore_errors=False):
+		dcm_extensions=DCM_EXTENSIONS_DEFAULT, ignore_errors=False,
+		callback_preupload=None, callback_postupload=None, callback_onerror=None,
+		dry_run=False):
 	'''	Scan folders and upload all DICOM images to the provided imaging servers
 
 		@input iserver (SonadorImagingServer instance): Imaging server to which the
 			images should be uploaded.
 		@input folders (iterable of folder paths): Paths for which all matching files
 			should be uploaded to the provided imaging server.
-		@fileuploa_check (bool, default=False): Toggles whether a check for the series UID
+		@fileupload_check (bool, default=False): Toggles whether a check for the series UID
 			should be performed prior to uploading the files.
+
+		@input callback_preupload (callable): Function  that is invoked
+			immediately prior to uploading a DICOM file to Orthanc. The callback 
+			should accept the following signature:
+			- ifile (file-like object): DICOM data
+			- dcmfile (pydicom.dataset.Dataset): PyDicom dataset object, containing a 
+				dictionary of the DICOM data elements.
+
+			and returns a file-like binary object with the data to be sent to Sonador.
+
+		@input callback_postupload (callable): Function that is invoked immediately following
+			a DICOM file is sent to Orthanc. The callback should accept the following
+			signature:
+			- uresults (requests.Response): HTTP response which contains the results
+				of the upload and the server response.
+			- ifile (file-like object): DICOM data
+			- dcmfile (pydicom.dataset.Dataset): PyDicom dataset object, containing a
+				dictionarry of the DICOM  data  elements.
+
+		@input dry_run (bool, default=False): when True, the file scanning process executes
+			but no files are transferred to the server.
 
 		@returns OrderedDict of all files uploaded to Sonador
 	'''
 	# Create thread pool
 	tpool = tpool or ThreadPoolExecutor(max_workers=threads)
+
+	# Cache of image metadata for files processed
+	hcache = OrderedDict()
+	fcount = 0
 
 	# Create cache of previously uploaded files to check upload status
 	# before re-transmitting
@@ -56,7 +83,7 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 			if fileupload_check:
 				fmeta = dcmcache_scanfiles([os.path.join(croot, iname) for iname in dcmfiles], study_meta=False)
 
-				# Check Orthanc to determine if the data has already been.
+				# Check Orthanc to determine if the data has already been uploaded.
 				fseries_meta = set(mkey.uid for mkey, mdata in fmeta.items() 
 					if len(iserver.query_series({ mkey.header: mkey.uid })))
 
@@ -93,13 +120,34 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 
 						# Upload image to PACS imaging server
 						try:
-							r = iserver.upload_image(img)
-							op_code = r.ok
+							# Parse image to ensure that it is well formed prior to upload
+							ifile = BytesIO(img.read())
+							dcmfile = dcmcache_imgmeta(ifile, hcache)
+
+							# Invoke preupload hook
+							if callable(callback_preupload):
+								ifile = callback_preupload(iname, ifile, dcmfile)
+
+							# Upload file to Orthanc
+							if not dry_run:
+								r = iserver.upload_image(ifile)
+								op_code = r.ok
+								logger.debug('File %s uploaded to server "%s" successfuly' % (ipath, iserver.pk))
+							else:
+								logger.debug('Dry Run: file %s processed successfully' % ipath)
+
+							# Invoke postupload hook
+							if callable(callback_postupload):
+								callback_postupload(r, iname, ifile, dcmfile)
 
 							# Upload successful: if indicated, move the image to the results tree
 							op_mvimg = True if destfolder_complete and op_code else False
 
 						except pydicom.errors.InvalidDicomError as err:
+
+							# Invoke onerror callback
+							if callable(callback_onerror):
+								callback_onerror(err, iname, img)
 
 							# Log and suppress the error
 							if ignore_errors:
@@ -110,6 +158,10 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 							else: raise err
 
 						except Exception as err:
+
+							# Invoke onerror callback
+							if callable(callback_onerror):
+								pass
 
 							# Log and Suppress the error
 							if ignore_errors:
@@ -136,9 +188,13 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 					
 					return op_code
 
+				# Upload images and add successful number of transfers to overall file count
 				uresults = sum(filter(lambda v: v is not None, tpool.map(upload_dcmimages, dcmfiles)))
+				fcount += uresults
 				if uresults:
 					logger.info('Transfer results (%s): %s images uploaded successfully' % (croot, uresults))
+
+	return hcache, fcount		
 
 
 def imageserver_upload_archive(iserver, archive, tpool=None, threads=4, verify=False, 

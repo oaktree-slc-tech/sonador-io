@@ -606,6 +606,22 @@ class SonadorImagingServer(OrthancServerBase):
 		rdata = super().update(odata, *args, **kwargs)
 		return self.server.get_imageserver(self.pk)
 
+	def connection_state(self, *args, headers=None, verify=None, **kwargs):
+		'''	Retrieve the connection state for the server
+		'''
+		if verify is None:
+			verify = self.server.verify
+
+		rstatus = requests.get(
+			self.orthanc_apiurl('/system/status'), headers=self.orthanc_request_headers(headers=headers), verify=verify)
+		if not rstatus.ok:
+			request_client_error(
+				'Unable to retrieve connection status for server %s. Status code: %s.'
+					% (self.server_label, rstatus.status_code),
+				rstatus)
+
+		return rstatus		
+
 
 class SonadorImagingServerCollection(SonadorObjectCollection):
 	'''	Collection of Orthanc/PACS imaging servers managed by Sonador

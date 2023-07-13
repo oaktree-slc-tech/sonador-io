@@ -29,13 +29,15 @@ from ...apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOU
 	DCMHEADER_MODALITY, DCMHEADER_STUDY_INSTANCE_UID, DCMHEADER_STUDY_ID, \
 	DCMHEADER_STUDY_DATE, DCMHEADER_STUDY_TIME, \
 	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SERIES_NUMBER, \
-	DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME, DCMHEADER_SERIES_DESCRIPTION, \
+	DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME, DCMHEADER_SERIES_DESCRIPTION, DCMHEADER_PATIENT_POSITION, \
 	DCMHEADER_SLICE_THICKNESS, DCMHEADER_SLICE_LOCATION, DCMHEADER_PIXEL_SPACING, \
 	DCMHEADER_BODY_PART_EXAMINED, DCM_VERSION_2021b, \
-	DCMHEADER_MODALITIES_IN_STUDY, DCM_MODALITY_SR, DCM_MODALITY_SEG, \
-	DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID
+	DCMHEADER_MODALITIES_IN_STUDY, DCM_MODALITY_SR, DCM_MODALITY_SEG, DCM_MODALITY_DOC, \
+	DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_CONTENT_DESCRIPTION, DCMHEADER_INSTANCE_NUMBER
+from ...apisettings.media import DCMEDIA_M3D_MODALITY
 
 from ...helpers import request_client_error, fetch_sonador_session_token
+from ...helpers.valuerep import str2name
 from ...serialization import json_datetime_parser, json_str2datetime, dcm_str2date, dcm_str2time
 from ...remote import SonadorBaseObject, SonadorObjectCollection, fetch_sonador_data_collection
 from ...servers import ImagingServerChildCollection, ImagingServerChildBaseObject, SonadorImagingServer
@@ -453,6 +455,11 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerChildBaseObject):
 		return posixpath.join(self.cache_queryurl, self.pk, 'index')
 
 	@property
+	def patient_name_vr(self):
+		if self.patient_name:
+			return str2name(self.patient_name)			
+
+	@property
 	def patient_name(self):
 		return self.dicomdata.get(DCMHEADER_PATIENT_NAME)
 
@@ -488,9 +495,13 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerChildBaseObject):
 
 			@returns collection of DICOM study instances associated with the current patient
 		'''
+		verify = kwargs.get('verify', None)
+		if verify is None:
+			verify = self.server.verify
+
 		# Retrieve study details
 		r = requests.get(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'studies')),
-			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')))
+			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')), verify=verify)
 		if not r.ok:
 			request_client_error(
 				'Unable to retrieve details for patient %s studies on server %s. Status code: %s.' 
@@ -520,9 +531,14 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerChildBaseObject):
 
 			@returns collection of DICOM series instances that associated with the current patient
 		'''
+
+		verify = kwargs.get('verify', None)
+		if verify is None:
+			verify = self.server.verify
+
 		# Retrieve series details
 		r = requests.get(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'series')),
-			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')))
+			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')), verify=verify)
 		if not r.ok:
 			request_client_error(
 				'Unable to retrieve details for patient %s series on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
@@ -763,9 +779,13 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 			@returns collection of DICOM series instances that associated with the current study
 		'''
+		verify = kwargs.get('verify', None)
+		if verify is None:
+			verify = self.server.verify
+
 		# Retrieve series details
 		r = requests.get(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'series')),
-			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')))
+			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')), verify=verify)
 		if not r.ok:
 			request_client_error(
 				'Unable to retrieve details for study %s series on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
@@ -895,7 +915,38 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 		setattr(self, '_m3d', m3d_collection)
 
-	def _populate_subcollections(self, populate_sr=True, populate_seg=True):
+	def fetch_doc(self, **kwargs):
+		return self.pacs.query_doc({ DCMHEADER_STUDY_INSTANCE_UID: self.study_uid },
+			rapid_lookup=getattr(self, 'resource_cache_lookup', None), pacs=self.pacs, study=self, **kwargs)
+
+	def doc_from_json(self, jdata, **kwargs):
+		'''	Initialize DOC collection from JSON structure
+		'''
+		from .media import DcmEncapsulatedDocumentSeriesCollection
+		return self.server._init_dataclass_from_json(
+			DcmEncapsulatedDocumentSeriesCollection, jdata, pacs=self.pacs, study=self, **kwargs)
+
+	@property
+	def doc_collection(self):
+		'''	Encapsulated document series associated with the study
+		'''
+		if getattr(self, '_doc', None) is None:
+			setattr(self, '_doc', self.fetch_doc())
+
+		return self._doc
+
+	@doc_collection.setter
+	def doc_collection(self, doc_collection):
+		'''	Set DOC series which belong to the study
+		'''
+		from .media import DcmEncapsulatedDocumentSeriesCollection
+		if not isinstance(doc_collection, DcmEncapsulatedDocumentSeriesCollection):
+			raise ValueError('Input must be an instance of DcmEncapsulatedDocumentSeriesCollection')
+
+		setattr(self, '_doc', DcmEncapsulatedDocumentSeriesCollection)
+
+	def _populate_subcollections(self, 
+			populate_sr=True, populate_seg=True, populate_m3d=True, populate_doc=True):
 		'''	Populate study SR and SEG collections from the series collection
 		'''
 		if populate_sr:
@@ -905,6 +956,14 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		if populate_seg:
 			self.seg_collection = self.seg_from_json(
 				[sx._objectdata for sx in self.series_collection if sx.modality == DCM_MODALITY_SEG])
+
+		if populate_m3d:
+			self.m3d_collection = self.m3d_from_json(
+				[sx._objectdata for sx in self.series_collection if sx.modality == DCMEDIA_M3D_MODALITY])
+
+		if populate_doc:
+			self.doc_collection = self.doc_from_json(
+				[sx._objectdata for sx in self.series_collection if sx.modality == DCM_MODALITY_DOC])
 	
 	def merge_resources(self, resources: list, asynchronous=False, keep_source=False, permissive=False, 
 			priority=0, merge=None, verify=None, headers=None):
@@ -1259,10 +1318,14 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 		'''	Retrieve details for slices in the series
 
 			@returns collection of DICOM instances
-		'''		
+		'''
+		verify = kwargs.get('verify', None)
+		if verify is None:
+			verify = self.server.verify		
+
 		# Retrieve instances details
 		r = requests.get(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'instances')),
-			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')))
+			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')), verify=verify)
 		if not r.ok:
 			request_client_error(
 				'Unable to retrieve details for series %s instances on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
@@ -1360,6 +1423,10 @@ class ImagingSeries(ImagingSeriesCoreResource):
 			[dcm3d for dcm3d in self.parent.m3d_collection if self.series_uid in dcm3d.series_reference_uids],
 			key=lambda dcm: dcm.ts if dcm.ts else datetime.datetime(year=1900, month=1, day=1),
 			reverse=True)
+
+	@property
+	def patient_position(self):
+		return self.dicomdata.get(DCMHEADER_PATIENT_POSITION)
 
 
 class ImagingSeriesBulkPopulateMixin:
@@ -1496,6 +1563,14 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 	@property
 	def sop_instance_uid(self):
 		return self.dicomdata.get(DCMHEADER_SOP_INSTANCE_UID)
+
+	@property
+	def instance_number(self):
+		return self.dicomdata.get(DCMHEADER_INSTANCE_NUMBER)
+
+	@property
+	def description(self):
+		return self.dicomdata.get(DCMHEADER_CONTENT_DESCRIPTION)
 
 	@property
 	def parent(self):

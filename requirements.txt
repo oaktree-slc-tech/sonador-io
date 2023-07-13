@@ -1,4 +1,5 @@
 tabulate>=0.8.7
 pydicom
-highdicom>=0.11.0
+highdicom>=0.21.1
 pytz
+nameparser

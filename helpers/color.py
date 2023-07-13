@@ -57,11 +57,15 @@ def gamma_correction_inverse(x):
 	return pow((x+0.055)/1.055, 2.4)
 
 
-def dcm2cielab(val):
+def dcm2cielab(val, sep='\\'):
 	'''	Parse the provided DICOM encoded color to a CIELAB representation.
 
 		@returns sonador.imiaging.orthanc.base.LABColor
 	'''
+	# Convert string values to float
+	if isinstance(val, str) and sep in val:
+		val = tuple(float(c) for c in val.split(sep))
+
 	L = (val[0]/65535.0)*100.0 					# Valid range: 0 <= L <= 100
 	a = ((val[1]-32896.0)/65535.0)*255.0 		# Valid range: -128 <= a <= 127
 	b = ((val[2]-32896.0)/65535.0)*255.0 		# Valid range: -128 <= b <= 127

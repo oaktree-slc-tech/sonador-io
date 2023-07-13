@@ -132,7 +132,7 @@ def dcm_encode_pdf(pdf_dcmattrs, pdf_file, *args, dcmfile_meta=None, **kwargs):
 
 
 def dcm_encode_glb(glb_dcmattrs, glb_file, *args, dcmfile_meta=None, **kwargs):
-	'''	Create a DICOM file that encapsulates a GLTF document. Delegates to dcm_encode_media.
+	'''	Create a DICOM file that encapsulates a GLB document. Delegates to dcm_encode_media.
 
 		@input glb_dcmattrs (dict): DICOM attributes to be added to the file.
 		@input glb_file (file-like-object): GLB file to be encoded
@@ -170,10 +170,10 @@ def dcm_encode_glb(glb_dcmattrs, glb_file, *args, dcmfile_meta=None, **kwargs):
 
 
 def dcm_encode_stl(stl_dcmattrs, stl_file, *args, dcmfile_meta=None, **kwargs):
-	'''	Create a DICOM file tht encapsulates a GLTF document. Delegates to dcm_encode_media.
+	'''	Create a DICOM file that encapsulates an STL document. Delegates to dcm_encode_media.
 
 		@input stl_dcmattrs (dict): DICOM attributes to be added to the file
-		@input glb_file (like-like-object): GLB file to be encoded
+		@input stl_file (like-like-object): STL file to be encoded
 		@input dcmfile_meta (pydicom.dataset.Dataset, default=empty dataset): pre-existing
 			set of headers to which media files should be added.
 
