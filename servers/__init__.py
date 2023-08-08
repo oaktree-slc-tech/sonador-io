@@ -128,7 +128,7 @@ class SonadorServer(RemoteServer):
 		'''
 		return self.request_headers(*args, **kwargs)
 
-	def get_imageserver(self, uid, verify=None, imageserver_datamodel_class=None):
+	def get_imageserver(self, uid, verify=None, imageserver_datamodel_class=None, **kwargs):
 		'''	Retrieve model data for the specified Imaging/PACS server
 
 			@input uid (str): Sonador UID/pk for the imaging server.
@@ -145,7 +145,7 @@ class SonadorServer(RemoteServer):
 		if verify is None:
 			verify = self.verify
 
-		return fetch_sonador_dataobject(self, imageserver_datamodel_class, uid, verify=verify)
+		return fetch_sonador_dataobject(self, imageserver_datamodel_class, uid, verify=verify, **kwargs)
 
 	def get_gateway(self, uid, verify=None, gateway_datamodel_class=None):
 		'''	Retrieve model data for the specified Clinical Gateway
@@ -214,10 +214,61 @@ class SonadorImagingServer(OrthancServerBase):
 	tabulate_output_columns = IMAGING_SERVER_OUTPUT_COLUMNS
 	tools_endpoint = 'tools'
 
-	def __init__(self, *args, resource_cache=None, **kwargs):
+	def _request_get(self, resource_endpoint, error_msg, headers=None, verify=None, **kwargs):
+		''' Send a GET request to the imaging server. Raises an exception with the provided error message
+			if the request could not be completed successfully.
+
+			@input resource_endpoint (str): Resource endpoint to which the request should be sent.
+			@input error_msg (str or callable): Error message (or callable function) to be triggered in the 
+				case of a failed request.
+
+			@returns request.Response or JSON object (dict/array)
+		'''
+		if verify is None:
+			verify = self.server.verify
+
+		r = requests.get(resource_endpoint, headers=headers, verify=verify, **kwargs)
+		if not r.ok:
+			if callable(error_msg): error_msg(r)
+			else: request_client_error(error_msg, r)
+
+		return r
+
+	def _request_post(self, resource_endpoint, error_msg, headers=None, verify=None, **kwargs):
+		'''	Send a POST request to the imaging server. Raises an exception with the provided error message
+			if the request could not be completed successfully.
+
+			@returns request.Response or JSON object (dict/array)
+		'''
+		if verify is None:
+			verify = self.server.verify
+
+		r = requests.post(resource_endpoint, headers=headers, verify=verify, **kwargs)
+		if not r.ok:
+			if callable(error_msg): error_msg(r)
+			else: request_client_error(error_msg, r)
+
+		return r
+
+	def _request_delete(self, resource_endpoint, error_msg, headers=None, verify=None, **kwargs):
+		'''	Send a DELETE request to the imaging server. Raises an exception with the provided error message
+			if the request could not be completed successfully.
+
+			@returns request.Response or JSON object (dict/array)
+		'''
+		if verify is None:
+			verify= self.server.verify
+
+		r = requests.delete(resource_endpoint, headers=headers, verify=verify, **kwargs)
+		if not r.ok:
+			if callable(error_msg): error_msg(r)
+			else: request_client_error(error_msg, r)
+
+		return r
+
+	def __init__(self, *args, **kwargs):
 
 		# Cache to be used when fetching resources
-		self.resource_cache = resource_cache or {}
 		super().__init__(*args, **kwargs)
 
 	@property
@@ -278,9 +329,6 @@ class SonadorImagingServer(OrthancServerBase):
 		if remove and not isinstance(remove, Iterable):
 			raise TypeError('Unable to remove DICOM tags, remove terms must be submitted as an iterable.')
 
-		if verify is None:
-			verify = self.server.verify
-
 		# Structure of anonymize request
 		bulk_anonymize_dict.update({
 			'Asynchronous': asynchronous, 
@@ -330,8 +378,6 @@ class SonadorImagingServer(OrthancServerBase):
 			raise ValueError('You must set resources to be deleted')
         
 		bulk_delete_dict = {'Resources': resources,}
-		if verify is None:
-			verify = self.server.verify
 
 		# Execute operation
 		r = self._bulk_content_request(posixpath.join(self.tools_endpoint, 'bulk-delete'),
@@ -353,8 +399,6 @@ class SonadorImagingServer(OrthancServerBase):
         	@returns OrthancJob if async is True, otherwise zipfile.ZipFile archive.
 		'''
 		create_archive_dict = create_archive_dict or {}
-		if verify is None:
-			verify = self.server.verify
 
 		# Create request structure
 		create_archive_dict.update({ 
@@ -370,7 +414,7 @@ class SonadorImagingServer(OrthancServerBase):
 
 		# Execute operation
 		r = self._bulk_content_request(posixpath.join(self.tools_endpoint, 'create-archive'),
-			create_archive_dict, headers=headers, verify=verify, )
+			create_archive_dict, headers=headers, verify=verify)
 
 		# Initialize file archive from request data, attach the raw content of the request
 		# to the archive
@@ -403,8 +447,6 @@ class SonadorImagingServer(OrthancServerBase):
 			@input short (bool, default=False): If set to true, report the DICOM tags in hexadecimal format.
 		'''	
 		bulk_content_dict = bulk_content_dict or {}
-		if verify is None:
-			verify = self.server.verify
 
 		# Create request structure
 		bulk_content_dict.update({ 
@@ -458,15 +500,12 @@ class SonadorImagingServer(OrthancServerBase):
 			headers=None, verify=None, **kwargs):
 		''' Function that wraps the tools endpoint and make requests against it, returning the response.
 		'''
-		bulk_request = requests.post(self.orthanc_apiurl(bulk_content_url), 
+		bulk_request = self._request_post(
+			self.orthanc_apiurl(bulk_content_url), 
+			lambda r: request_client_error(
+				'Unable to retrieve/modify DICOM resource on server %s. Status code: %s.' % (self.server_label, r.status_code),
+				r),
 			json=bulk_content_dict, headers=self.orthanc_request_headers(headers=headers), verify=verify)
-		
-		if not bulk_request.ok:
-			
-			request_client_error(
-				'Unable to retrieve/modify DICOM resource on server %s. Status code: %s.'
-					% (self.server_label, bulk_request.status_code),
-				bulk_request)
 
 		logger.debug('Response from PACS imaging server:\n%s' % bulk_request.content)
 		return bulk_request
@@ -510,8 +549,6 @@ class SonadorImagingServer(OrthancServerBase):
 			@returns request.Response
 		'''
 		bulk_modify_dict = bulk_modify_dict or {}
-		if verify is None:
-			verify = self.server.verify
 
 		# Create request structure
 		bulk_modify_dict.update({ 
@@ -538,13 +575,12 @@ class SonadorImagingServer(OrthancServerBase):
 
 		# Execute operation
 		logger.debug('Structure of modification request:\n%s' % json.dumps(bulk_modify_dict))
-		r = requests.post(self.orthanc_apiurl(posixpath.join(self.tools_endpoint, 'bulk-modify')), json=bulk_modify_dict,
-			headers=self.orthanc_request_headers(headers=headers), verify=verify)
-		if not r.ok:
-			request_client_error(
-				'Unable to modify resources %s on server %s. Status code: %s.'
-					% (resources, self.server_label, r.status_code),
-				r)
+		r = self._request_post(
+			self.orthanc_apiurl(posixpath.join(self.tools_endpoint, 'bulk-modify')), 
+			lambda r: request_client_error(
+				'Unable to modify resources %s on server %s. Status code: %s.' % (resources, self.server_label, r.status_code),
+				r),
+			json=bulk_modify_dict, headers=self.orthanc_request_headers(headers=headers), verify=verify)
 
 		# Initialize file archive from request data, attach the raw content of the request
 		# to the archive
@@ -555,7 +591,7 @@ class SonadorImagingServer(OrthancServerBase):
 			return self.get_imaging_resource(response_json['ID'], OrthancJob, headers=headers, **kwargs)
 			
 		else:
-			#Returns the model object of the new resources created (based on the level executed)
+			# Return the model object of the new resources created (based on the level executed)
 			response_json = r.json()
 			return_instances = {}
 			for resource in response_json['Resources']:
@@ -612,15 +648,14 @@ class SonadorImagingServer(OrthancServerBase):
 		if verify is None:
 			verify = self.server.verify
 
-		rstatus = requests.get(
-			self.orthanc_apiurl('/system/status'), headers=self.orthanc_request_headers(headers=headers), verify=verify)
-		if not rstatus.ok:
-			request_client_error(
-				'Unable to retrieve connection status for server %s. Status code: %s.'
-					% (self.server_label, rstatus.status_code),
-				rstatus)
+		rstatus = self._request_get(
+			self.orthanc_apiurl('/system/status'), 
+			lambda r: request_client_error(
+				'Unable to retrieve connection status for server %s. Status code: %s.' % (self.server_label, r.status_code),
+				r),
+			headers=self.orthanc_request_headers(headers=headers), verify=verify)
 
-		return rstatus		
+		return rstatus	
 
 
 class SonadorImagingServerCollection(SonadorObjectCollection):

@@ -27,6 +27,16 @@ DCMSR_SONADOR_SR = Code(SONADOR_SR, SONADOR_CLIENT, SONADOR_SR_DESCRIPTION,
 	scheme_version=SONADOR_SCHEME_VERSION)
 
 
+# Header cache constants and data classes
+DCM_CONTENT_TYPE = 'application/octet-stream'
+
+DicomMetaKey = namedtuple('DicomMetaKey', ('resource', 'header', 'uid'))
+DicomMeta = namedtuple('DicomMeta', ('description', 'modality'))
+DicomPrivateHeaderData = namedtuple('DicomPrivateHeaderData', ('header', 'hex', 'int', 'dtype'))
+
+
+# DICOM Header Definitions
+
 DCMCODE_CODE_VALUE = ('0008', '0100')
 DCMHEADER_CODE_VALUE = 'CodeValue'
 
@@ -361,13 +371,6 @@ TESTING_VERBOSITY = {
 	'error': 0,
 	'critical': 0,
 }
-
-
-# Header cache constants and data classes
-DCM_CONTENT_TYPE = 'application/octet-stream'
-
-DicomMetaKey = namedtuple('DicomMetaKey', ('resource', 'header', 'uid'))
-DicomMeta = namedtuple('DicomMeta', ('description', 'modality'))
 
 
 

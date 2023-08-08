@@ -35,6 +35,34 @@ class OrthancServerBase(SonadorBaseObject):
 	'''
 	details_exclude = ('token',)
 
+	def __init__(self, *args, resource_cache=None, **kwargs):
+		self.resource_cache = resource_cache or {}
+		super().__init__(*args, **kwargs)
+
+	@abc.abstractmethod
+	def _request_get(self, resource_endpoint, error_msg, headers=None, verify=None, **kwargs):
+		''' Send a GET request to the imaging server. Raises an exception with the provided error message
+			if the request could not be completed successfully.
+
+			@returns request.Response or JSON object (dict/array)
+		'''
+
+	@abc.abstractmethod
+	def _request_post(self, resource_endpoint, error_msg, headers=None, verify=None, **kwargs):
+		'''	Send a POST request to the imaging server. Raises an exception with the provided error message
+			if the request could not be completed successfully.
+
+			@returns request.Response or JSON object (dict/array)
+		'''
+
+	@abc.abstractmethod
+	def _request_delete(self, resource_endpoint, error_msg, headers=None, verify=None, **kwargs):
+		'''	Send a DELETE request to the imaging server. Raises an exception with the provided error message
+			if the request could not be completed successfully.
+
+			@returns request.Response or JSON object (dict/array)
+		'''
+
 	@property
 	@abc.abstractmethod
 	def fetch_endpoint(self):
@@ -115,7 +143,7 @@ class OrthancServerBase(SonadorBaseObject):
 			dataobject_endpoint=posixpath.join(
 				self.fetch_endpoint, self.pk, self.dicomweb_remote_datacollection_class.model.dcmweb_urlroot, rid))
 
-	def dicomweb_push(self, rdweb, resources, op=None, headers=None, async_transfer=True, priority=None):
+	def dicomweb_push(self, rdweb, resources, op=None, headers=None, verify=None, async_transfer=True, priority=None):
 		'''	Push resources from the current imaging server to the provided remote DICOMweb instance
 
 			@input rdweb (RemoteDICOMwebServer): Remote DICOMweb instances to which the resources
@@ -133,12 +161,13 @@ class OrthancServerBase(SonadorBaseObject):
 			resources, op=op, async_transfer=async_transfer, priority=priority)
 
 		# Execute request
-		r = requests.post(self.orthanc_apiurl(posixpath.join(rdweb.dicomweb_urlbase, 'stow')), json=op,
-			headers=self.orthanc_request_headers(headers=headers))
-		if not r.ok:
-			request_client_error('Unable to push resources to DICOMweb for %s on PACS %s. Status code: %s.' 
-					% (rdweb.pk, self.server_label, r.status_code), 
-				r)
+		r = self._request_post(
+			self.orthanc_apiurl(posixpath.join(rdweb.dicomweb_urlbase, 'stow')),
+			lambda r: request_client_error(
+				'Unable to push resources to DICOMweb for %s on PACS %s. Status code: %s.' % (
+					rdweb.pk, self.server_label, getattr(r, 'status_code')),
+				r),
+			json=op, headers=self.orthanc_request_headers(headers=headers))
 
 		# Parse response
 		return rdweb._parse_remote_resource_operation(r, async_transfer)
@@ -166,34 +195,48 @@ class OrthancServerBase(SonadorBaseObject):
 		'''
 		return self.get_resource_modelcollection_class(resource_type).model
 
-	def upload_image(self, img, headers=None, retry_count=0, retry_limit=3):
-		'''	Upload the provided image to via Orthanc REST API
+	def upload_image(self, img, headers=None, retry_count=0, retry_limit=3, verify=None, **kwargs):
+		'''	Upload the provided image to via Orthanc REST API. Raises ClientOperationError is not able 
+			to successfully complete the request. Will retry the request up to the provided retry_limit.
 
 			@input img (file-like object): Image data to be uploaded
 			@input headers (dict, default=empty dict): Headers to be added to the upload request
 
 			@returns requests.Response
 		'''
-		r = requests.post(
-			self.orthanc_apiurl('instances'), files={ 'file': img }, 
-			headers=self.orthanc_request_headers(headers=headers), verify=self.server.verify)
+		try:
+			r = self._request_post(
+				self.orthanc_apiurl('instances'),
+				lambda r: request_client_error(
+					'Unable to upload image to PACS %s. Status code: %s. Retry transfer: %s/%s' % (
+						self.server_label, getattr(r, 'status_code'), retry_count+1, retry_limit),
+					r),
+				files={ 'file': img }, headers=self.orthanc_request_headers(headers=headers), verify=verify)
+			
+			return r
 
-		if not r.ok:
+		except ClientOperationError as err:
+			r = getattr(err, 'response', None)
 
-			# Retry upload
-			if retry_count < retry_limit:
+			if r and not r.ok:
 
-				logger.warning('Unable to upload image to PACS %s. Status code: %s. Retry transfer: %s/%s.'
-					% (self.server_label, r.status_code, retry_count+1, retry_limit))
+				# Retry upload
+				if retry_count < retry_limit:
 
-				# Reset position of image before attempting upload
-				img.seek(0)
-				r = self.upload_image(img, headers=headers, retry_count=retry_count+1, retry_limit=retry_limit)
+					logger.warning('Unable to upload image to PACS %s. Status code: %s. Retry transfer: %s/%s.'
+						% (self.server_label, r.status_code, retry_count+1, retry_limit))
 
-			# Retry limit exceeded: notify user of failed transfer
-			else:  request_client_error('Unable to upload image to PACS %s. Status code: %s.' % (self.server_label, r.status_code), r)
+					# Reset position of image before attempting upload
+					img.seek(0)
+					r = self.upload_image(
+						img, headers=headers, retry_count=retry_count+1, retry_limit=retry_limit, verify=verify)
 
-		return r
+				# Retry limit exceeded: notify user of failed transfer
+				else: 
+					request_client_error(
+						'Unable to upload image to PACS %s. Status code: %s.' % (self.server_label, r.status_code), r)
+
+			else: raise err
 
 	def get_imaging_resource(self, rid, resource_type, headers=None, verify=None, cache=False, **kwargs):
 		'''	Retrieve the requested resource
@@ -207,14 +250,13 @@ class OrthancServerBase(SonadorBaseObject):
 		if cache and rid in self.resource_cache:
 			return self.resource_cache[rid]
 
-		if verify is None:
-			verify = self.server.verify
-
-		r = requests.get(self.orthanc_apiurl(posixpath.join(resource_type.fetch_endpoint, rid)),
-				headers=self.orthanc_request_headers(headers=headers), verify=verify)
-		if not r.ok:
-			request_client_error('Unable to retrieve requested resource %s instance %s. Status code: %s'
-				% (rid, resource_type, r.status_code), r)
+		r = self._request_get(
+			self.orthanc_apiurl(posixpath.join(resource_type.fetch_endpoint, rid)), 
+			lambda r: request_client_error(
+				'Unable to retrieve requested resource %s instance %s. Status code: %s' % (
+					rid, resource_type, r.status_code),
+				r),
+			headers=self.orthanc_request_headers(headers=headers), verify=verify)
 
 		# Retrieve resource instance
 		if not kwargs.get('pacs'): 
@@ -307,9 +349,6 @@ class OrthancServerBase(SonadorBaseObject):
 			raise ConfigurationError('Unable to use Sonador cache endpoint for query for resource %s' 
 				% resource_modelcollection_class.model.__name__)
 
-		if verify is None:
-			verify = self.server.verify
-
 		# Create query structure
 		query = query or {}
 		query.update({
@@ -324,11 +363,10 @@ class OrthancServerBase(SonadorBaseObject):
 		logger.debug('Orthanc query:\n%s' % json.dumps(query))
 
 		# Execute query
-		r = requests.post(
-			self.orthanc_apiurl(resource_modelcollection_class.model.cache_queryurl) if rapid_lookup else self.orthanc_apiurl('tools/find'), 
+		r = self._request_post(
+			self.orthanc_apiurl(resource_modelcollection_class.model.cache_queryurl) if rapid_lookup else self.orthanc_apiurl('tools/find'),
+			lambda r: request_client_error('Unable to execute resource query to PACS %s. Status code: %s.' % (self.server_label, r.status_code), r),
 			json=query, headers=self.orthanc_request_headers(headers=headers), verify=verify)
-		if not r.ok:
-			request_client_error('Unable to execute resource query to PACS %s. Status code: %s.' % (self.server_label, r.status_code), r)
 
 		# Parse response
 		if not kwargs.get('pacs'):
@@ -418,14 +456,12 @@ class OrthancServerBase(SonadorBaseObject):
 		'''
 		from ..imaging.orthanc.jobs import OrthancJobCollection
 		
-		if verify is None:
-			verify = self.server.verify
-		
 		# Retrieve jobs
-		r = requests.get(self.orthanc_apiurl(OrthancJobCollection.model.fetch_endpoint, query_params={ 'expand': expand }), 
+		r = self._request_get(
+			self.orthanc_apiurl(OrthancJobCollection.model.fetch_endpoint, query_params={ 'expand': expand }),
+			error_msg=lambda r: request_client_error(
+				'Unable to retrieve jobs from PACS %s. Status code: %s.' % (self.server_label, r.status_code), r),
 			headers=self.orthanc_request_headers(headers=headers), verify=verify)
-		if not r.ok:
-			request_client_error('Unable to retrieve jobs from PACS %s. Status code: %s.' % (self.server_label, r.status_code), r)
 
 		# Parse response
 		if not kwargs.get('pacs'):

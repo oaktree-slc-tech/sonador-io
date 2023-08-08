@@ -34,6 +34,7 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 		@input callback_preupload (callable): Function  that is invoked
 			immediately prior to uploading a DICOM file to Orthanc. The callback 
 			should accept the following signature:
+			- iname (str): name of the file
 			- ifile (file-like object): DICOM data
 			- dcmfile (pydicom.dataset.Dataset): PyDicom dataset object, containing a 
 				dictionary of the DICOM data elements.
@@ -45,6 +46,7 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 			signature:
 			- uresults (requests.Response): HTTP response which contains the results
 				of the upload and the server response.
+			- iname (str): name of the file
 			- ifile (file-like object): DICOM data
 			- dcmfile (pydicom.dataset.Dataset): PyDicom dataset object, containing a
 				dictionarry of the DICOM  data  elements.
