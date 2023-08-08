@@ -121,7 +121,7 @@ class SonadorObjectCollection(GuruObjectCollection):
 
 
 def fetch_sonador_dataobject_schema(*args, apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers', **kwargs):
-	'''	Retrieve a Sonador data schema
+	'''	Retrieve a data schema from the Sonador web application
 
 		@returns dict
 	'''
@@ -130,7 +130,7 @@ def fetch_sonador_dataobject_schema(*args, apiurl_callable='sonador_apiurl', hea
 
 def fetch_sonador_data_collection(*args, apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers',
 		fetch_schema_callable=fetch_sonador_dataobject_schema, **kwargs):
-	'''	Fetch imaging object collection from Sonador
+	'''	Fetch imaging object collection from Sonador web application
 
 		@returns instance of data collection class
 	'''
@@ -139,7 +139,7 @@ def fetch_sonador_data_collection(*args, apiurl_callable='sonador_apiurl', heade
 
 
 def fetch_sonador_dataobject(*args, apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers', **kwargs):
-	'''	Retrieve the details for a single data object from Sonador
+	'''	Retrieve the details for a single data object from the Sonador web application
 	'''
 	return fetch_dataobject(*args, apiurl_callable=apiurl_callable, headers_callable=headers_callable, **kwargs)
 

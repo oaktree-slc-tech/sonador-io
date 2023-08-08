@@ -97,17 +97,20 @@ def parse_image_orientation(coords):
 class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 	'''	Mixin class with convenience properties for accessing common Orthanc data fields.
 	'''
+	def fetch_meta(self, *args, headers=None, **kwargs):
+		'''	Retrieved the Orthanc metadata properties for the resource
+		'''
+		return self.pacs._request_get(
+			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'metadata'), query_params={ 'expand': True, }),
+			lambda r: request_client_error(
+				'Unable to retrieve metadata for %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code), 
+				r),
+			headers=self.pacs.orthanc_request_headers(headers=headers))
+
 	@property
 	def meta(self):
 		if getattr(self, '_meta', None) is None:
-			r = requests.get(
-				self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'metadata'), query_params={ 'expand': True, }),
-				headers=self.pacs.orthanc_request_headers())
-			if not r.ok:
-				request_client_error('Unable to retrieve metadata for %s on server %s. Status code: %s.'
-					% (self.pk, self.pacs.server_label, r.status_code), r)
-
-			self._meta = r.json()
+			self._meta = self.fetch_meta().json()
 
 		return self._meta
 
@@ -170,9 +173,6 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 		if remove and not isinstance(remove, Iterable):
 			raise TypeError('Unable to remove requested DICOM tags, remove terms must be submitted as an interable')
 
-		if verify is None:
-			verify = self.server.verify
-
 		# Create request structure
 		modify.update({ 'RemovePrivateTags': remove_private_tags, 'Force': force })
 		if replace:
@@ -192,13 +192,13 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 
 		# Execute operation
 		logger.debug('Structure of modification request:\n%s' % json.dumps(modify))
-		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'modify')), json=modify,
-			headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
-		if not r.ok:
-			request_client_error(
-				'Unable to modify DICOM resource tags/metadata for %s on server %s. Status code: %s.'
-					% (self.resource_url, self.pacs.server_label, r.status_code),
-				r)
+		r = self.pacs._request_post(
+			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'modify')),
+			lambda r: request_client_error(
+				'Unable to modify DICOM resource tags/metadata for %s on server %s. Status code: %s.' % (
+					self.resource_url, self.pacs.server_label, r.status_code),
+				r),
+			json=modify, headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
 
 		logger.debug('Response from PACS imaging server:\n%s' % r.content)
 		return r
@@ -206,14 +206,12 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 	def delete(self, verify=None, headers=None, **kwargs):
 		'''	Remove the imaging resource from Orthanc
 		'''
-		if verify is None:
-			verify = self.server.verify
-
-		r = requests.delete(self.pacs.orthanc_apiurl(self.resource_url),
+		return self.pacs._request_delete(
+			self.pacs.orthanc_apiurl(self.resource_url),
+			lambda r: request_client_error(
+				'Unable to delete resource %s from imaging server %s, a server error occurred' % (self.url, self.pacs.server_label),
+				r),
 			headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify, **kwargs)
-		if not r.ok:
-			request_client_error(
-				'Unable to delete resource %s from imaging server %s, a server error occurred' % (self.url, self.pacs.server_label), r)
 
 		return r
 
@@ -270,9 +268,6 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 		if getattr(self, '_filearchive', None):
 			return self._filearchive
 
-		if verify is None:
-			verify = self.server.verify
-
 		# Determine URL from which to retrieve the data
 		if FILEARCHIVE_TYPE_DICOMDIR == FILEARCHIVE_TYPE_ZIPARCHIVE:
 			filearchive_url = self.filearchive_url
@@ -282,11 +277,12 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 			raise TypeError('Unable to download archive of image data, invalid archive type: %s' % filearchive_type)
 
 		# Retrieve file data from Orthanc
-		r = requests.get(self.pacs.orthanc_apiurl(filearchive_url), headers=self.pacs.orthanc_request_headers(), verify=verify)
-		if not r.ok:
-			request_client_error('Unable to retrieve DICOM resource file data for %s on server % s. Status code: %s.'
-					% (self.filearchive_url, self.pacs.server_label, r.status_code),
-				r)
+		r = self.pacs._request_get(
+			self.pacs.orthanc_apiurl(filearchive_url), 
+			lambda r: request_client_error(
+				'Unable to retrieve DICOM resource file data for %s on server % s. Status code: %s.' % (self.filearchive_url, self.pacs.server_label, r.status_code),
+				r),
+			headers=self.pacs.orthanc_request_headers(), verify=verify)
 
 		# Initialize file archive from request data, attach the raw content of the request
 		# to the archive
@@ -306,19 +302,17 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 			@returns requests.Response
 		'''
 		rdata = rdata or {}
-		if verify is None:
-			verify = self.server.verify
 
 		# Request components
 		rdata['link'] = link
 
-		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.cache_indexurl)),
-			json=rdata, headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
-		if not r.ok:
-			request_client_error(
+		r = self.pacs._request_post(
+			self.pacs.orthanc_apiurl(posixpath.join(self.cache_indexurl)),
+			lambda r: request_client_error(
 				'Unable to add DICOM resource %s on server %s to the Sonador resource cache. Status code: %s.'
 					% (self.cache_indexurl, self.pacs.server_label, r.status_code),
-				r)
+				r),
+			json=rdata, headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
 
 		logger.debug('Response from PACS imaging server:\n%s' % r.content)
 		return r
@@ -334,20 +328,18 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 			@returns requests.Response
 		'''
 		rdata = rdata or {}
-		if verify is None:
-			verify = self.server.verify
 
 		# Request components
 		if reconstruct_files:
 			rdata['ReconstructFiles'] = reconstruct_files
-		
-		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'reconstruct')),
-			json=rdata, headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
-		if not r.ok:
-			request_client_error(
+
+		r = self.pacs._request_post(
+			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'reconstruct')),
+			lambda r: request_client_error(
 				'Unable to reconstruct DICOM resource for %s on server %s. Status code: %s.'
 					% (self.resource_url, self.pacs.server_label, r.status_code),
-				r)
+				r),
+			json=rdata, headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
 
 		logger.debug('Response from PACS imaging server:\n%s' % r.content)
 		return r
@@ -378,9 +370,6 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 		if remove and not isinstance(remove, Iterable):
 			raise TypeError('Unable to remove DICOM tags, remove terms must be submitted as an iterable.')
 
-		if verify is None:
-			verify = self.server.verify
-
 		# Create request structure
 		anonymize.update({ 'KeepPrivateTags': keep_private_tags, 'DicomVersion': dicom_version })
 		if replace:
@@ -392,13 +381,13 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 
 		# Execute operation
 		logger.debug('Structure of modification request:\n%s' % json.dumps(anonymize))
-		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'anonymize')), json=anonymize,
-			headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
-		if not r.ok:
-			request_client_error(
-				'Unable to anonymize DICOM resource tags for %s on server %s. Status code: %s.'
-					% (self.resource_url, self.pacs.server_label, r.status_code),
-				r)
+		r = self.pacs._request_post(
+			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'anonymize')),
+			lambda r: request_client_error(
+				'Unable to anonymize DICOM resource tags for %s on server %s. Status code: %s.' % (
+					self.resource_url, self.pacs.server_label, r.status_code),
+				r),
+			json=anonymize, headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
 
 		logger.debug('Response from PACS imaging server:\n%s' % r.content)
 		return r
@@ -496,17 +485,15 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerChildBaseObject):
 			@returns collection of DICOM study instances associated with the current patient
 		'''
 		verify = kwargs.get('verify', None)
-		if verify is None:
-			verify = self.server.verify
 
 		# Retrieve study details
-		r = requests.get(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'studies')),
+		r = self.pacs._request_get(
+			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'studies')),
+			lambda r: request_client_error(
+				'Unable to retrieve details for patient %s studies on server %s. Status code: %s.' % (
+					elf.pk, self.pacs.server_label, r.status_code),
+				r),
 			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')), verify=verify)
-		if not r.ok:
-			request_client_error(
-				'Unable to retrieve details for patient %s studies on server %s. Status code: %s.' 
-					% (self.pk, self.pacs.server_label, r.status_code),
-				r)
 
 		# Parse response and return collection
 		return self.server._init_dataclass(ImagingStudyCollection, r, pacs=self.pacs, patient=self, **kwargs)
@@ -533,16 +520,15 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerChildBaseObject):
 		'''
 
 		verify = kwargs.get('verify', None)
-		if verify is None:
-			verify = self.server.verify
 
 		# Retrieve series details
-		r = requests.get(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'series')),
+		r = self.pacs._request_get(
+			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'series')),
+			lambda r: request_client_error(
+				'Unable to retrieve details for patient %s series on server %s. Status code: %s.' % (
+					self.pk, self.pacs.server_label, r.status_code),
+				r),
 			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')), verify=verify)
-		if not r.ok:
-			request_client_error(
-				'Unable to retrieve details for patient %s series on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
-				r)
 
 		# Parse response and return collection
 		return self.server._init_dataclass(ImagingSeriesCollection, r, pacs=self.pacs, patient=self, **kwargs)
@@ -784,12 +770,13 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 			verify = self.server.verify
 
 		# Retrieve series details
-		r = requests.get(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'series')),
+		r = self.pacs._request_get(
+			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'series')),
+			lambda r: request_client_error(
+				'Unable to retrieve details for study %s series on server %s. Status code: %s.' % (
+					self.pk, self.pacs.server_label, r.status_code),
+				r),
 			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')), verify=verify)
-		if not r.ok:
-			request_client_error(
-				'Unable to retrieve details for study %s series on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
-				r)
 
 		# Parse response and return collection
 		return self.server._init_dataclass(ImagingSeriesCollection, r, pacs=self.pacs, study=self, **kwargs)
@@ -993,8 +980,6 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 			 @returns requests.Response
 		'''
 		merge = merge or {}
-		if verify is None:
-			verify = self.server.verify
 
 		# Create request structure
 		merge.update({ 
@@ -1041,8 +1026,6 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 		# Request options
 		split = split or {}
-		if verify is None:
-			verify = self.server.verify
 
 		# Create request structure adding the series retrieved from the search
 		split.update({ 
@@ -1068,15 +1051,13 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		'''
 		# Execute operation
 		logger.debug('Structure of merge/split request:\n%s' % json.dumps(data_send))
-		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, endpoint)), json=data_send,
-			headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
-		
-		# Check operation results
-		if not r.ok:
-			request_client_error(
+		r = self.pacs._request_post(
+			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, endpoint)),
+			lambda r: request_client_error(
 				'Unable to merge DICOM resource tags for %s on server %s. Status code: %s.'
 					% (self.resource_url, self.pacs.server_label, r.status_code),
-				r)
+				r),
+			json=data_send, headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
 
 		logger.debug('Response from PACS imaging server:\n%s' % r.content)
 
@@ -1324,12 +1305,13 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 			verify = self.server.verify		
 
 		# Retrieve instances details
-		r = requests.get(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'instances')),
+		r = self.pacs._request_get(
+			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'instances')),
+			lambda r: request_client_error(
+				'Unable to retrieve details for series %s instances on server %s. Status code: %s.' % (
+					self.pk, self.pacs.server_label, r.status_code),
+				r),
 			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')), verify=verify)
-		if not r.ok:
-			request_client_error(
-				'Unable to retrieve details for series %s instances on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
-				r)
 
 		# Parse response and return collection
 		return self.server._init_dataclass(
@@ -1601,42 +1583,47 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 	def resource_url(self):
 		return posixpath.join(self.fetch_endpoint, self.pk)
 
+	def fetch_tags(self, *args, **kwargs):
+		'''	Retrieve tags for the DICOM instance
+		'''
+		r = self.pacs._request_get(
+			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'simplified-tags'), query_params={ 'expand': True, }),
+			lambda r: request_client_error(
+				'Unable to retrieve tags for DCM instance %s on server %s. Status code: %s.' % (
+					self.pk, self.pacs.server_label, r.status_code), 
+				r),
+			headers=self.pacs.orthanc_request_headers(), verify=kwargs.get('verify'))
+
+		return r.json()
+
 	@property
 	def tags(self):
 		'''	Dictionary/JSON of all tags associated with the image
 		'''
 		if getattr(self, '_tags', None) is None:
+			self._tags = self.fetch_tags()
 			
-			r = requests.get(
-				self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'simplified-tags'), query_params={ 'expand': True, }),
-				headers=self.pacs.orthanc_request_headers())
-			
-			if not r.ok:
-				request_client_error(
-					'Unable to retrieve tags for DCM instance %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
-					r)
-
-			self._tags = r.json()
-
 		return self._tags
+
+	def fetch_dcmtags(self, *args, **kwargs):
+		'''	Retrieve DICOM tags representation for the instance
+		'''
+		r = self.pacs._request_get(
+			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'tags'), query_params={ 'expand': True, }),
+			lambda r: request_client_error(
+				'Unable to retrieve full DCM tags for DCM instance %s on server %s. Status code: %s.' % (
+					self.pk, self.pacs.server_label, r.status_code
+				), r),
+			headers=self.pacs.orthanc_request_headers(), verify=kwargs.get('verify'))
+
+		return r.json()
 
 	@property
 	def dcmtags(self):
 		'''	Dictionary/JSON of all DICOM tags including hexadecimal indexes and value type
 		'''
 		if getattr(self, '_dcmtags', None) is None:
-			
-			r = requests.get(
-				self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'tags'), query_params={ 'expand': True, }),
-				headers=self.pacs.orthanc_request_headers())
-			
-			if not r.ok:
-
-				request_client_error(
-					'Unable to retrieve full DCM tags for DCM instance %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
-					r)
-
-			self._dcmtags = r.json()
+			self._dcmtags = self.fetch_dcmtags()
 
 		return self._dcmtags
 
@@ -1645,18 +1632,15 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 
 			@returns io.BytesIO stream
 		'''
-		if verify is None:
-			verify = self.server.verify
-
 		# Retrieve file data from Orthanc
-		r = requests.get(
-			self.pacs.orthanc_apiurl(dcmresource_url), headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
-		if not r.ok:
-			request_client_error(
+		r = self.pacs._request_get(
+			self.pacs.orthanc_apiurl(dcmresource_url), 
+			lambda r: request_client_error(
 				'Unable to retrieve DICOM resource file data for %s (instance %s) on server %s. Status code: %s.'
 					% (dcmresource_url, self.pk, self.pacs.server_label, r.status_code),
-				r)
-
+				r),
+			headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
+			
 		# Initialize DICOM instance from request data, attach the raw content of the request
 		return FileDataResponse(BytesIO(r.content), r)
 
