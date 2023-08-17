@@ -305,7 +305,7 @@ class OrthancServerBase(SonadorBaseObject):
 
 	def query(self, sfilter, expand=True, limit=None, offset=None, query=None, headers=None, verify=None, 
 			resource=IMAGING_SERVER_RESOURCE_SERIES, resource_modelcollection_class=None, 
-			rapid_lookup=None, bulkpopulate_related=False, bulkpopulate_options=None, **kwargs):
+			rapid_lookup=None, bulkpopulate_related=False, bulkpopulate_options=None, order_by=None, **kwargs):
 		'''	Submit a query to Orthanc with the provided filter terms
 
 			@input sfilter (dict): Terms to be included in the request
@@ -349,6 +349,11 @@ class OrthancServerBase(SonadorBaseObject):
 			raise ConfigurationError('Unable to use Sonador cache endpoint for query for resource %s' 
 				% resource_modelcollection_class.model.__name__)
 
+		# For order_by requests, ensure that the cache is being used (rapid_lookup=True).
+		# tools/find does not support the OrderBy API parameter.
+		if not rapid_lookup and order_by:
+			raise ConfigurationError('order_by is only supported on Sonador Cache endpoints (rapid_lookup=True)')
+
 		# Create query structure
 		query = query or {}
 		query.update({
@@ -358,6 +363,13 @@ class OrthancServerBase(SonadorBaseObject):
 			query['Limit'] = limit
 		if offset is not None:
 			query['Since'] = offset
+		if order_by:
+			if isinstance(order_by, (tuple, list)):
+				query['OrderBy'] = order_by
+			elif isinstance(order_by, str):
+				query['OrderBy'] = (order_by,)
+			else:
+				raise ValueError('Invalid order_by value "%s". order_by supports str and tuple/list sequences.' % str(order_by))
 
 		# Orthanc query structure
 		logger.debug('Orthanc query:\n%s' % json.dumps(query))

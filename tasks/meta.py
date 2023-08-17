@@ -37,15 +37,15 @@ def dcmcache_imgmeta(ifile, hcache, study_meta=True, series_meta=True, force_rea
 	if study_meta and getattr(dcmfile, DCMHEADER_STUDY_INSTANCE_UID, None) \
 		and not hcache.get(
 		DicomMetaKey(IMAGING_SERVER_RESOURCE_STUDY, dcmfile.StudyInstanceUID, dcmfile.StudyInstanceUID)):
-		hcache[DicomMetaKey(IMAGING_SERVER_RESOURCE_STUDY, DCMHEADER_STUDY_INSTANCE_UID, dcmfile.StudyInstanceUID)] \
-			= DicomMeta(getattr(dcmfile, 'StudyDescription', None), None)
+		hmeta = DicomMetaKey(IMAGING_SERVER_RESOURCE_STUDY, DCMHEADER_STUDY_INSTANCE_UID, dcmfile.StudyInstanceUID)
+		hcache[hmeta] = DicomMeta(getattr(dcmfile, 'StudyDescription', None), None, meta=hmeta)
 
 	# Update to series metadataf
 	if series_meta and getattr(dcmfile, DCMHEADER_SERIES_INSTANCE_UID, None) \
 		and not hcache.get(
 			DicomMetaKey(IMAGING_SERVER_RESOURCE_SERIES, DCMHEADER_SERIES_INSTANCE_UID, dcmfile.SeriesInstanceUID)):
-			hcache[DicomMetaKey(IMAGING_SERVER_RESOURCE_SERIES, DCMHEADER_SERIES_INSTANCE_UID, dcmfile.SeriesInstanceUID)] \
-				= DicomMeta(getattr(dcmfile, 'SeriesDescription', None), getattr(dcmfile, 'Modality', None))
+			hmeta = DicomMetaKey(IMAGING_SERVER_RESOURCE_SERIES, DCMHEADER_SERIES_INSTANCE_UID, dcmfile.SeriesInstanceUID)
+			hcache[hmeta] = DicomMeta(getattr(dcmfile, 'SeriesDescription', None), getattr(dcmfile, 'Modality', None), meta=hmeta)
 
 	return dcmfile
 

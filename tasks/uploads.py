@@ -4,6 +4,7 @@ from io import BytesIO
 from pydicom.dataset import FileDataset as DCMFileDataset
 
 from concurrent.futures import ThreadPoolExecutor
+from client.utils.general import first
 
 from ..apisettings import DCM_EXTENSIONS_DEFAULT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
 	DCMHEADER_STUDY_INSTANCE_UID, DCMHEADER_STUDY_DESCRIPTION, DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SERIES_DESCRIPTION, \
@@ -20,8 +21,8 @@ logger = logging.getLogger(__name__)
 def imageserver_upload_folder(iserver, folders, tpool=None, threads=4, 
 		verify=False, fileupload_check=False, destfolder_complete=None,
 		dcm_extensions=DCM_EXTENSIONS_DEFAULT, ignore_errors=False,
-		callback_preupload=None, callback_postupload=None, callback_onerror=None,
-		dry_run=False):
+		callback_preupload=None, callback_postupload=None, 
+		callback_onerror=None, callback_onduplicate=None, dry_run=False):
 	'''	Scan folders and upload all DICOM images to the provided imaging servers
 
 		@input iserver (SonadorImagingServer instance): Imaging server to which the
@@ -49,7 +50,22 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 			- iname (str): name of the file
 			- ifile (file-like object): DICOM data
 			- dcmfile (pydicom.dataset.Dataset): PyDicom dataset object, containing a
-				dictionarry of the DICOM  data  elements.
+				dictionary of the DICOM data elements.
+
+		@input callback_onerror (callable): Function that is invoked when there is an error 
+			uploading a DICOM file to Orthanc. The callback should accept the following signaure:
+			- err (Exception instance): exception which caused the upload error
+			- iname (str): name of the file
+			- ifile (file-like object): DICOM data
+
+		@input callback_onduplicate (callable): Function that is invoked when there is a duplicate
+			file detected on Orthanc.
+			- resource (sonador.imaging.orthanc.ImagingSeries): Sonador series reference 
+				which the instance/file is part of.
+			- iname (str): name of the file
+			- ifile (file-like object): DICOM data
+			- dcmfile (pydicom.dataset.Dataset): PyDicom dataset object, containing a dictioary
+				of the DICOM data elements.
 
 		@input dry_run (bool, default=False): when True, the file scanning process executes
 			but no files are transferred to the server.
@@ -62,10 +78,6 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 	# Cache of image metadata for files processed
 	hcache = OrderedDict()
 	fcount = 0
-
-	# Create cache of previously uploaded files to check upload status
-	# before re-transmitting
-	previously_uploaded = OrderedDict()
 	
 	if destfolder_complete and not os.path.exists(destfolder_complete):
 		raise Exception('Invalid destination folder %s does not exist' % destfolder_complete)
@@ -87,7 +99,7 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 
 				# Check Orthanc to determine if the data has already been uploaded.
 				fseries_meta = set(mkey.uid for mkey, mdata in fmeta.items() 
-					if len(iserver.query_series({ mkey.header: mkey.uid })))
+					if len(iserver.query_series({ mkey.header: mkey.uid }, rapid_lookup=False)))
 
 			# Upload files (in parallel) to the image server
 			if len(dcmfiles):
@@ -116,8 +128,26 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 							img.seek(0)
 
 							if getattr(dcmfile, DCMHEADER_SERIES_INSTANCE_UID, None) in fseries_meta:
-								logging.info('Image %s (series %s) already available on server %s.'
-									% (ipath, getattr(dcmfile, DCMHEADER_SERIES_INSTANCE_UID, None), iserver.server_label))
+
+								# Retrieve header and metadata from duplicates cache
+								mdata = first(fmeta.values(), key=lambda v: v.meta.uid == getattr(dcmfile, DCMHEADER_SERIES_INSTANCE_UID, None))
+								if not mdata:
+									raise ValueError('Series %s indicated as a duplicate, but unable to retrieve metadata. Abort upload.'
+										% getattr(dcmfile, DCMHEADER_SERIES_INSTANCE_UID, None))
+
+								# Retrieve series reference from Sonador (first instance of duplicate series, cached for subsequent instances)
+								r = getattr(mdata, 'resource', None)
+								if r is None:
+									r = iserver.query_series({ mdata.meta.header: mdata.meta.uid })[0]
+									setattr(mdata, 'resource', r)
+								
+								logging.info('Image %s (series %s) already available on server %s: series-uid=%s.'
+									% (ipath, getattr(dcmfile, DCMHEADER_SERIES_INSTANCE_UID, None), iserver.server_label, r.pk))
+
+								# Invoke on-duplicate callback
+								if callable(callback_onduplicate):
+									callback_onduplicate(r, iname, img, dcmfile)
+								
 								return None
 
 						# Upload image to PACS imaging server
@@ -163,7 +193,7 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 
 							# Invoke onerror callback
 							if callable(callback_onerror):
-								pass
+								callback_onerror(err, iname, img)
 
 							# Log and Suppress the error
 							if ignore_errors:
