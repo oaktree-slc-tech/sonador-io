@@ -1,4 +1,4 @@
-import re
+import re, functools, datetime
 from collections import namedtuple
 
 from pydicom.sr.codedict import codes as dcmcodes
@@ -30,9 +30,57 @@ DCMSR_SONADOR_SR = Code(SONADOR_SR, SONADOR_CLIENT, SONADOR_SR_DESCRIPTION,
 # Header cache constants and data classes
 DCM_CONTENT_TYPE = 'application/octet-stream'
 
+
+# DICOM Metadata key/value data structures
 DicomMetaKey = namedtuple('DicomMetaKey', ('resource', 'header', 'uid'))
-DicomMeta = namedtuple('DicomMeta', ('description', 'modality'))
+
+class DicomMeta:
+	'''	Helper data class for working with DICOM metadata
+	'''
+	def __init__(self, description, modality, *args, meta=None, **kwargs):
+		self.description = description
+		self.modality = modality
+		self.meta = meta
+
+
+# Private header definition
 DicomPrivateHeaderData = namedtuple('DicomPrivateHeaderData', ('header', 'hex', 'int', 'dtype'))
+
+
+# DICOM date/time data structures
+DicomDatetimePairKey = namedtuple('DicomDatetimePairKey', ('resource', 'date_tag', 'time_tag'))
+
+class DicomDatetimePair:
+	'''	Helper data class for working with DICOM date/time pairs
+	'''
+	def __init__(self, date_value, time_value, *args, meta: DicomDatetimePairKey=None, **kwargs):
+		self._dvalue = date_value
+		self._tvalue = time_value
+		self.meta = meta
+
+	@property
+	@functools.lru_cache()
+	def date_value(self):
+		from ..serialization import dcm_str2date
+		return dcm_str2date(self._dvalue) if self._dvalue else self._dvalue
+
+	@property
+	@functools.lru_cache()
+	def time_value(self):
+		from ..serialization import dcm_str2time
+		return dcm_str2time(self._tvalue) if self._tvalue else self._tvalue
+
+	@property
+	@functools.lru_cache()
+	def ts(self):
+		'''	Datetime created from the provided date and time values.
+
+			@returns datetime.datetime or None (if no date value specified)
+		'''
+		# Group date/time
+		if self.date_value:
+			return datetime.datetime.combine(
+				self.date_value, self.time_value or datetime.time(0,0,0))
 
 
 # DICOM Header Definitions
@@ -146,6 +194,9 @@ DCMHEADER_STUDY_DATE = 'StudyDate'
 DCMCODE_STUDY_TIME = ('0008', '0030')
 DCMHEADER_STUDY_TIME = 'StudyTime'
 
+DCMTS_STUDY = DicomDatetimePairKey(
+	IMAGING_SERVER_RESOURCE_STUDY, DCMHEADER_STUDY_DATE, DCMHEADER_STUDY_TIME)
+
 DCMCODE_ACCESSION_NUMBER = ('0008', '0050')
 DCMHEADER_ACCESSION_NUMBER = 'AccessionNumber'
 
@@ -160,6 +211,9 @@ DCMHEADER_SERIES_DATE = 'SeriesDate'
 
 DCMCODE_SERIES_TIME = ('0008', '0031')
 DCMHEADER_SERIES_TIME = 'SeriesTime'
+
+DCMTS_SERIES = DicomDatetimePairKey(
+	IMAGING_SERVER_RESOURCE_SERIES, DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME)
 
 DCMCODE_SERIES_DESCRIPTION = ('0008', '103e')
 DCMHEADER_SERIES_DESCRIPTION = 'SeriesDescription'
@@ -276,6 +330,14 @@ DCMHEADER_SLICE_LOCATION = 'SliceLocation'
 DCMHEADER_PIXEL_SPACING = 'PixelSpacing'
 
 DCMHEADER_PERFORMED_PROCEDURE_STEP_DESCRIPTION = 'PerformedProcedureStepDescription'
+
+DCMHEADER_SCHEDULED_PROCEDURE_STEP_START_DATE = 'ScheduledProcedureStepStartDate'
+DCMHEADER_SCHEDULED_PROCEDURE_STEP_START_TIME = 'ScheduledProcedureStepStartTime'
+DCMHEADER_SCHEDULED_PROCEDURE_STEP_END_DATE = 'ScheduledProcedureStepEndDate'
+DCMHEADER_SCHEDULED_PROCEDURE_STEP_END_TIME = 'ScheduledProcedureStepEndTime'
+DCMHEADER_SCHEDULED_PROCEDURE_STEP_ID = 'ScheduledProcedureStepID'
+DCMHEADER_SCHEDULED_PROCEDURE_STEP_DESCRIPTION = 'ScheduledProcedureStepDescription'
+
 DCMHEADER_ACQUISITION_DEVICE_PROCESSING_DESCRIPTION = 'AcquisitionDeviceProcessingDescription'
 DCMHEADER_CONTRAST_BOLUS_AGENT = 'ContrastBolusAgent'
 

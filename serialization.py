@@ -3,7 +3,7 @@ from collections import OrderedDict
 
 from client.utils.serialization import GuruLabsBaseJsonEncoder
 from client.utils.serialization import datetime2str
-from client.remote.serialization import json_str2datetime, json_datetime_parser, \
+from client.remote.serialization import json_str2datetime, str2datetime, json_datetime_parser, \
 	DATETIME_REGEX1, DATETIME_FORMAT1, DATETIME_REGEX2, \
 	DATETIME_FORMAT2, DATETIME_REGEX3, DATETIME_FORMAT3, DATE1_REGEX, \
 	DATE1_FORMAT, DCM_DATE_REGEX, ISO8601_DATETIME_REGEX, ISO8601_DATETIME_FORMAT, \

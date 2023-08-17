@@ -33,7 +33,8 @@ from ...apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOU
 	DCMHEADER_SLICE_THICKNESS, DCMHEADER_SLICE_LOCATION, DCMHEADER_PIXEL_SPACING, \
 	DCMHEADER_BODY_PART_EXAMINED, DCM_VERSION_2021b, \
 	DCMHEADER_MODALITIES_IN_STUDY, DCM_MODALITY_SR, DCM_MODALITY_SEG, DCM_MODALITY_DOC, \
-	DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_CONTENT_DESCRIPTION, DCMHEADER_INSTANCE_NUMBER
+	DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_CONTENT_DESCRIPTION, DCMHEADER_INSTANCE_NUMBER, \
+	DCMTS_STUDY, DCMTS_SERIES, DicomDatetimePairKey, DicomDatetimePair
 from ...apisettings.media import DCMEDIA_M3D_MODALITY
 
 from ...helpers import request_client_error, fetch_sonador_session_token
@@ -628,6 +629,9 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		self._parent = kwargs.pop('patient', None)
 		super().__init__(*args, **kwargs)
 
+		# Study timestamp (parsed from StudyDate and StudyTime)
+		self._sts = DicomDatetimePair(self.study_datestr, self.study_timestr, meta=DCMTS_STUDY)
+
 	@property
 	def resource_url(self):
 		return posixpath.join(self.fetch_endpoint, self.pk)
@@ -711,10 +715,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 	def study_date(self):
 		'''	Date that the study was acquired. (Parsed from study_datestr.)
 		'''
-		if getattr(self, '_sdate', None) is None and self.study_datestr:
-			self._sdate = dcm_str2date(self.study_datestr)
-
-		return getattr(self, '_sdate', None)
+		return self._sts.date_value
 
 	@property
 	def study_timestr(self):
@@ -722,10 +723,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 	@property
 	def study_time(self):
-		if getattr(self, '_stime', None) is None and self.study_timestr:
-			self._stime = dcm_str2time(self.study_timestr)
-
-		return getattr(self, '_stime', None)
+		return self._sts.time_value
 
 	@property
 	def ts(self):
@@ -735,13 +733,10 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		'''
 		try:
 			if getattr(self, '_ts', None) is None and self.study_date:
-
-				# Create timestamp by grouping series date and series time
-				sdate = self.study_date
-				stime = self.study_time or datetime.time(0,0,0)
-				self._ts = datetime.datetime.combine(sdate, stime)
+				self._ts = self._sts.ts
 		
 		except Exception as err:
+			logger.error('Invalid study timestamp. Error: "%s"' % err)
 			self._ts = None
 
 		return getattr(self, '_ts', None)
@@ -1163,6 +1158,9 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 		self._parent = kwargs.pop('study', None) or kwargs.pop('patient', None)
 		super().__init__(*args, **kwargs)
 
+		# Series timestamp (parsed from SeriesDate and SeriesTime)
+		self._sts = DicomDatetimePair(self.series_datestr, self.series_timestr, meta=DCMTS_SERIES)
+
 	@property
 	def resource_url(self):
 		return posixpath.join(self.fetch_endpoint, self.pk)
@@ -1244,10 +1242,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 	def series_date(self):
 		'''	Date that the series was acquired. (Parsed from series_datestr.)
 		'''
-		if getattr(self, '_sdate', None) is None and self.series_datestr:
-			self._sdate = dcm_str2date(self.series_datestr)
-
-		return getattr(self, '_sdate', None)
+		return self._sts.date_value
 
 	@property
 	def series_timestr(self):
@@ -1261,10 +1256,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 
 			@returns datetime.time
 		'''
-		if getattr(self, '_stime', None) is None and self.series_timestr:
-			self._stime = dcm_str2time(self.series_timestr)
-	
-		return getattr(self, '_stime', None)
+		return self._sts.time_value
 
 	@property
 	def ts(self):
@@ -1272,12 +1264,13 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 			Returns None is there is no series date value. Series time is used if available, with midnight
 			being used if it is not.
 		'''
-		if getattr(self, '_ts', None) is None and self.series_date:
+		try: 
+			if getattr(self, '_ts', None) is None and self.series_date:
+				self._ts = self._sts.ts
 
-			# Create timestamp by grouping series date and series time
-			sdate = self.series_date
-			stime = self.series_time or datetime.time(0,0,0)				
-			self._ts = datetime.datetime.combine(sdate, stime)
+		except Exception as err:
+			logger.error('Invalid series timestamp. Error: "%s"' % err)
+			self._ts = None
 
 		return getattr(self, '_ts', None)
 
