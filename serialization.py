@@ -9,7 +9,7 @@ from client.remote.serialization import json_str2datetime, str2datetime, json_da
 	DATE1_FORMAT, DCM_DATE_REGEX, ISO8601_DATETIME_REGEX, ISO8601_DATETIME_FORMAT, \
 	DCM_DATETIME_REGEX
 
-from .apisettings import DCM_DATETIME_STRFORMAT, \
+from .apisettings import DCM_DATETIME_STRFORMAT, DCM_DATETIME_STRFORMAT_ALT1, \
 	DCM_DATE_STRFORMAT, DCM_DATE_STRFORMAT_ALT1, DCM_DATE_STRFORMAT_ALT2, \
 	DCM_TIME_STRFORMAT, DCM_TIME_STRFORMAT_ALT1
 
@@ -78,6 +78,30 @@ def dcm_str2time(v, formats=(DCM_TIME_STRFORMAT, DCM_TIME_STRFORMAT_ALT1)):
 				% (v, fmt))
 
 	raise ValueError('Unable to convert value "%s" to time using patterns: %s'
+		% (v, ', '.join('"%s"' % f for f in formats)))
+
+
+def dcm_str2datetime(v, formats=(DCM_DATETIME_STRFORMAT, DCM_DATETIME_STRFORMAT_ALT1, 
+			DCM_DATE_STRFORMAT, DCM_DATE_STRFORMAT_ALT1, DCM_DATE_STRFORMAT_ALT2)):
+	'''	Parse a string value to a date/time object. Used to parse DCM tags to datetime.datetime.
+
+		@returns datetime.datetime
+	'''
+	if v and isinstance(v, datetime.datetime):
+		return v
+
+	# Reject values which are not strings
+	if v and not isinstance(v, six.string_types):
+		raise TypeError('Unable to convert provided value "%s" to datetime. Invalid type: %s'
+			% (v, type(v)))
+
+	for fmt in formats:
+		try: return datetime.datetime.strptime(v, fmt)
+		except ValueError as err:
+			logger.debug('Unable to convert value "%s" to date using pattern "%s"'
+				% (v, fmt))
+
+	raise ValueError('Unable to convert value "%s" to datetime uing patterns: %s'
 		% (v, ', '.join('"%s"' % f for f in formats)))
 
 

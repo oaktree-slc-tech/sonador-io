@@ -57,7 +57,7 @@ class SonadorAuthenticationTests(SonadorBaseTestCase):
         self.assertTrue(API_TOKEN_ENV_VARS[SONADOR_APITOKEN] is not None,
             msg='No token provided as part of the environment.')
 
-        # Retrieve sonador connectiong from env: provide random values for access ID and secret to prevent
+        # Retrieve sonador connection from env: provide random values for access ID and secret to prevent
         # those credentials from being used in the test.
         sconn = self.getSonadorConnection(*args, **kwargs)
         iservers = sconn.fetch_imageservers()

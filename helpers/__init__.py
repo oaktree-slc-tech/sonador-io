@@ -5,6 +5,7 @@ from collections import namedtuple, OrderedDict
 from six.moves.urllib import parse as urlparse
 
 import pydicom
+from pydicom.datadict import tag_for_keyword
 from pydicom.dataset import Dataset
 from pydicom.sequence import Sequence
 from highdicom.sr.templates import Code as DcmCode, CodedConcept as DcmCodedConcept
@@ -13,7 +14,7 @@ from client import apisettings as gcapicodes
 from client import auth as guru_auth
 from client.utils.urls import build_url
 from client.errors import ClientOperationError
-from client.utils.format import formerrors2str
+from client.utils.format import formerrors2str, split_camelcase
 from client.utils.conversion import str2bool
 from client.utils.microservices import server_controloperation_json_response
 from client.remote import RemoteServer, request_client_error
@@ -21,12 +22,13 @@ from client.remote import RemoteServer, request_client_error
 from ..apisettings import SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, SONADOR_INTERNAL_DNS, \
 	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SR_REF_SERIES_SEQ, DCMHEADER_SR_REF_INSTANCE_SEQ, DCMHEADER_SR_REF_SOP_SEQ, \
 	DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_SR_SOP_CLASS_UID, DCMHEADER_SR_REF_INSTANCE_UID
-from ..apisettings.sr import DCM_CODED_CONCEPT_HEADERS, DCM_CODED_CONCEPT_MAPPING
+from ..apisettings.sr import points2array, DCM_CODED_CONCEPT_HEADERS, DCM_CODED_CONCEPT_MAPPING
 from ..apisettings.media import DCMEDIA_PDF_MIMETYPE, DCMEDIA_PDF_EXTENSION, \
 	DCMEDIA_STL_MIMETPYE, DCMEDIA_STL_EXTENSION, \
 	DCMEDIA_OBJ_MIMETYPE, DCMEDIA_OBJ_EXTENSION, DCMEDIA_GLB_MIMETYPE, DCMEDIA_GLB_EXTENSION, \
 	DCMEDIA_MTL_MIMETYPE, DCMEDIA_MTL_EXTENSION
-from ..serialization import json_datetime_parser
+from ..apisettings.sr import srcode2dataset
+from ..serialization import json_datetime_parser, dcm_str2datetime, DCM_DATETIME_STRFORMAT, DCM_DATETIME_STRFORMAT_ALT1
 
 logger = logging.getLogger(__name__)
 
@@ -223,25 +225,6 @@ def reindex_slicelocation(dcmimage_dir, index_start=0, tmp_prefix='tmp', indexfn
 	reindex_dcm_images(dcmimage_dir, dcmimg_list, index_start=index_start, tmp_prefix=tmp_prefix)
 
 
-def srcode2dataset(dcmcode: DcmCode, dcm_mdata=None, codedconcept_mapping=DCM_CODED_CONCEPT_MAPPING):
-	'''	Convert the provided DICOM code or coded concept to a pydicom.dataset.Dataset instance.
-
-		@input dcmcode (highdicom.sr.template.Code): code instance to convert to a Dataset.
-		@input dcm_mdata (pydicom.dataset.Dataset, default=blank dataset instance): 
-			dataset to which the code data should be added.
-
-		@returns pydicom.dataset.Dataset
-	'''
-	# Initialize dataset instance
-	dcm_mdata = dcm_mdata or Dataset()
-
-	# Map values from Code/CodedConcept to Dataset
-	for k,v in codedconcept_mapping.items():
-		setattr(dcm_mdata, v, getattr(dcmcode, k, None))
-
-	return dcm_mdata
-
-
 def dcm_encode_instance_ref(instance, dcm_mdata=None):
 	'''	Create a DICOM ReferencedInstanceSequence element for the provided instance.
 
@@ -312,3 +295,63 @@ def dcm_mimetype_guess_extension(mtype):
 		@returns str or None
 	'''
 	return DCM_MIMETYPE_EXTENSION_MAPPING.get(mtype)
+
+
+def dcm_datetime2rangestr(ts_start=None, ts_stop=None, ts_format=DCM_DATETIME_STRFORMAT_ALT1):
+	''' Convert the provided date/time components to a date/time range string. DICOM 
+		supports three types of range strings:
+
+		* start from (open ended range): "{start}-"
+		* end on (open ended range): "-{end}"
+		* date range: "{start}-{end}"
+
+		@returns str
+	'''
+	# Ensure that the inputs are date/time strings
+	if ts_start and isinstance(ts_start, str):
+		ts_start = dcm_str2datetime(ts_start)
+	if ts_stop and isinstance(ts_stop, str):
+		ts_stop = dcm_str2datetime(ts_stop)
+
+	# Ensure that the start date is before the stop date
+	if ts_start and ts_stop and ts_start > ts_stop:
+		raise ValueError(
+			'Invalid date range (start="%s", stop="%s"). Start date must be before end date.' % (ts_start, ts_stop))
+
+	# Date range
+	if ts_start and ts_stop:
+		return '%s-%s' % (ts_start.strftime(ts_format), ts_stop.strftime(ts_format))
+
+	# Start from
+	elif ts_start and ts_stop is None:
+		return '%s-' % ts_start.strftime(ts_format)
+
+	# End on
+	elif ts_stop and ts_start is None:
+		return '-%s' % ts_stop.strftime(ts_format)
+
+	raise ValueError('Invalid date range: start=%s stop=%s' % (ts_start, ts_stop))
+
+
+# DICOM Tag Helper Methods
+
+def dcm_tag2label(header, sep=' ', **kwargs):
+	'''	Convert the provided header name to a space separated label	
+	'''
+	return sep.join(split_camelcase(header, **kwargs))
+
+
+def dcm_tag2hexcode(header):
+	'''	Convert the provided header value to the associated DICOM tag hexcode
+
+		@returns tuple or None if a tag matching the header cannot be found
+	'''
+	dcm_int = tag_for_keyword(header)
+
+	# Convert integer representation returned by pydicom to hexcode
+	if dcm_int:
+		dcm_hstr = hex(dcm_int).replace('0x', '00')
+		return dcm_hstr[:4], dcm_hstr[4:]
+
+	# Unable to retrieve valid tag for the provided header, return None
+	return	

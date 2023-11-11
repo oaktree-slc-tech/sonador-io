@@ -1,4 +1,4 @@
-import six, posixpath, requests, json, csv, collections, logging
+import six, posixpath, copy, requests, json, csv, collections, logging
 from collections import OrderedDict
 from urllib.parse import urlencode
 
@@ -10,7 +10,7 @@ from client import apisettings as gcapicodes
 from client import auth as guru_auth
 from client.utils.urls import validate_url, build_url, resource_fullurl
 from client.utils.microservices import JsonBaseObject, JsonObjectCollection, GuruRemotePaginationMixin, RemotePage as OakTreeRemotePage
-from client.utils.object import pick
+from client.utils.object import pick, omit
 from client.remote import GuruBaseObject, GuruObjectCollection, fetch_dataobject_schema, fetch_data_collection, fetch_dataobject
 
 from .helpers import request_client_error
@@ -20,15 +20,29 @@ from .serialization import json_datetime_parser, \
 logger = logging.getLogger(__name__)
 
 
+class SonadorObjectUpdateMixin(object):
+	'''	Sonador mixin class which can be used with Sonador data object models to provide an update method.
+		Not all classes within Sonador and Orthanc can be updated via the API, which is why
+		the method is provided as a mixin.
+	'''
+	def update(self, object_data, *args, **kwargs):
+		''' Update the object instance
+
+			@input object_data (dict): data to be used for the update
+		'''
+		return sonador_dataobject_update(self, object_data, *args, verify=self.server.verify_ssl(**kwargs),
+			**omit(kwargs, ('verify',)))
+
+
 class SonadorBaseObject(GuruBaseObject):
 	'''	Python representation of a Sonador object
 	'''
-	def delete(self, verify=None, **kwargs):
-		if verify is None:
-			verify = self.server.verify
-
+	def delete(self, **kwargs):
+		'''	Remove the object from the server
+		'''
 		r = requests.delete(self.server.sonador_apiurl(self.url, method='DELETE'),
-			verify=verify, headers=self.sonador.sonador_request_headers(), **kwargs)
+			verify=self.server.verify_ssl(**kwargs), headers=self.server.sonador_request_headers(**kwargs),
+			**omit(kwargs, ('verify', 'headers')))
 
 		if not r.ok:
 			request_client_error('Unable to delete Sonador object %s, a server error occurred'
@@ -204,7 +218,7 @@ def sonador_datacollection_serialize(datacollection, output_dest, output_type=OU
 
 		# Output data
 		for d in dcollection:
-			w.writerow(pick(d._objectdata, tuple(datacollection.remote_schema.get('fields', []))))
+			w.writerow(pick(d, tuple(datacollection.remote_schema.get('fields', []))))
 
 
 def sonador_datacollection_list(sonador_server, output_dest, datamodel_collection_class,
@@ -274,12 +288,13 @@ def sonador_dataobject_details(sonador_server, output_dest, datamodel_class, obj
 	return dobject
 
 
-def sonador_dataobject_create(sonador_server, datamodel_class, object_data, verify=False, dataobject_endpoint=None, 
-		apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers', rkwargs=None, **kwargs):
+def sonador_dataobject_create(server, datamodel_class, object_data, verify=False, dataobject_endpoint=None, 
+		apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers', headers=None,
+		create_callable=requests.post, error_msg=None, rkwargs=None, **kwargs):
 	'''	Create an instance of the data object using the provided object data.
 		Throws an operation error if the model cannot be created.
 
-		@input sonador_server (sonador.servers.SonadorServer): Sonador server instance
+		@input server (client.remote.RemoteServer or subclass): Sonador server instance
 		@input datamodel_class (subclass of remote.SonadorBaseObject): data model class
 			which will be used to create the object instance.
 		@input object_data (dict): data to be used for creating the model instance
@@ -290,35 +305,72 @@ def sonador_dataobject_create(sonador_server, datamodel_class, object_data, veri
 	dataobject_endpoint = dataobject_endpoint or datamodel_class.fetch_endpoint
 
 	# Create request components: URL, headers, keyword arguments
-	rurl = getattr(sonador_server, apiurl_callable)(dataobject_endpoint)
-	rheaders = getattr(sonador_server, headers_callable)()
+	rurl = getattr(server, apiurl_callable)(dataobject_endpoint)
+	rheaders = getattr(server, headers_callable)(headers=headers)
 	rkwargs = rkwargs or {}
 
+	# Request arguments
+	if create_callable == requests.post: _rargs = (rurl,)
+	else: _rargs = (rurl, error_msg)
+
+	# Request keyword arguments
+	_rkwargs = copy.copy(rkwargs)
+	_rkwargs.update({ 'json': object_data, 'verify': verify, 'headers': rheaders })
+
 	# Create object instance on the server
-	r = requests.post(rurl, json=object_data, verify=verify, headers=rheaders, **kwargs)
+	r = create_callable(*_rargs, **_rkwargs)
 
 	if not r.ok:
-		request_client_error('Unable to create instance of model type %s due to a server error' % datamodel_class.__name__, r)
 
-	return sonador_server._parse_apiresponse_json(r)
+		# Custom error handler (callable function or str)
+		if error_msg and callable(error_msg): error_msg(r)
+		elif error_msg and isinstance(error_msg, str): request_client_error(error_msg, r)
+
+		# Default error 
+		else:
+			request_client_error(
+				'Unable to create instance of model type %s due to a server error' % datamodel_class.__name__, r)
+
+	return server._parse_apiresponse_json(r)
 
 
 def sonador_dataobject_update(datamodel_instance, object_data, dataobject_endpoint=None, verify=False,
-		apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers', rkwargs=None, **kwargs):
+		server=None, apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers', headers=None,
+		rkwargs=None, update_callable=requests.put, error_msg=None, **kwargs):
 	'''	Update the data model instance with the parameters container in object data.
 	'''
+	# Server and data object API endpoint
+	server = server or datamodel_instance.server
 	dataobject_endpoint = dataobject_endpoint or posixpath.join(datamodel_instance.fetch_endpoint, datamodel_instance.pk)
 
 	# Create request components: URL, headers, keyword arguments
-	rurl = getattr(datamodel_instance.server, apiurl_callable)(dataobject_endpoint)
-	rheaders = getattr(datamodel_instance.server, headers_callable)()
+	rurl = getattr(server, apiurl_callable)(dataobject_endpoint)
+	rheaders = getattr(server, headers_callable)(headers=headers)
 	rkwargs = rkwargs or {}
 
+	# Request arguments
+	if update_callable == requests.put: _rargs = (rurl,)
+	else: _rargs = (rurl, error_msg)
+
+	# Request keyword arguments
+	_rkwargs = copy.copy(rkwargs)
+	_rkwargs.update({ 'json': object_data, 'headers': rheaders, 'verify': verify })
+
 	# Update object instance on the server
-	r = requests.put(rurl, json=object_data, headers=rheaders, verify=verify, **rkwargs)
+	r = update_callable(*_rargs, **_rkwargs)
 
 	if not r.ok:
-		request_client_error('Unable to update instance of model type %s (pk=%s) due to a server error' 
-			% (type(datamodel_instance).__name__, datamodel_instance.pk))
 
-	return datamodel_instance.server._parse_apiresponse_json(r)
+		# Custom error handler (callable function or str)
+		if error_msg and callable(error_msg): error_msg(r)
+		elif error_msg and isinstance(error_msg, str): request_client_error(error_msg, r)
+
+		# Default error
+		else:
+			request_client_error(
+				'Unable to update instance of model type %s (pk=%s) due to a server error'  % (
+					type(datamodel_instance).__name__, datamodel_instance.pk
+				), r)
+
+	# Parse the API response
+	return server._parse_apiresponse_json(r)

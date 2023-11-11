@@ -50,11 +50,24 @@ class SonadorEnvironmentTests(SonadorBaseTestCase):
 		hcache, _ = imageserver_upload_archive(iserver, zipfile.ZipFile(BytesIO(ctr.content)))
 
 		# Check the Orthanc instance to ensure that the image was indexed correctly
-		for hkey, hmeta in hcache.items():
-			results = iserver.query({hkey.header: hkey.uid}, resource=hkey.resource)
-			self.assertEqual(len(results), 1, msg='Retrieved more than a single match for resource (%s) %s=%s.'
-				% (hkey.resource, hkey.header, hkey.uid))
+		for hkey, hmeta in hcache.items():			
+			
+			# Query Orthanc DB
+			results = iserver.query({ hkey.header: hkey.uid }, resource=hkey.resource)
+			self.assertEqual(len(results), 1, msg=('Unable to retrieve match for resource (%s) %s=%s' if len(results) == 0
+				else 'Retrieved more than a single match for resource (%s) %s=%s') % (hkey.resource, hkey.header, hkey.uid))
+
+			# Query Sonador Resource Cache
+			results = iserver.query({ hkey.header: hkey.uid }, resource=hkey.resource, rapid_lookup=True)
+			self.assertEqual(len(results), 1, msg=('Unable to retrieve match for resource (%s) %s=%s' if len(results) == 0
+				else 'Retrieved more than a single match for resource (%s) %s=%s') % (hkey.resource, hkey.header, hkey.uid))
 		
 		# Remove all series added to the server as part of the test
 		self.cleanupImageUpload(iserver, hcache)
-	
+
+		# Query the cache to ensure that the resources were removed
+		for hkey, hmeta in hcache.items():
+
+			results = iserver.query({ hkey.header: hkey.uid }, resource=hkey.resource, rapid_lookup=True)
+			self.assertEqual(len(results), 0, msg='Resource (%s) %s=%s remains in cache after being removed from DB'
+				% (hkey.resource, hkey.header, hkey.uid))

@@ -21,7 +21,9 @@ from client.utils.object import pick
 from client.utils.microservices import server_controloperation_json_response, RemotePage
 from client.utils.colors import RGB
 
-from ...apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
+from ...apisettings import ImageCoord, ImageSpacing, ImageOrientation, ImageStackShape, \
+	RGBColor, LABColor, XYZColor, EUCLID_COORD_ORIGIN, DicomDatetimePairKey, DicomDatetimePair, \
+	IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
 	IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_LAST_UPDATE, IMAGING_SERVER_DICOMTAGS_SIGNATURE, \
 	DCMHEADER_PATIENT_ID, DCMHEADER_PATIENT_NAME, \
 	DCMHEADER_PATIENT_SEX, DCMHEADER_PATIENT_BIRTHDATE, \
@@ -34,7 +36,7 @@ from ...apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOU
 	DCMHEADER_BODY_PART_EXAMINED, DCM_VERSION_2021b, \
 	DCMHEADER_MODALITIES_IN_STUDY, DCM_MODALITY_SR, DCM_MODALITY_SEG, DCM_MODALITY_DOC, \
 	DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_CONTENT_DESCRIPTION, DCMHEADER_INSTANCE_NUMBER, \
-	DCMTS_STUDY, DCMTS_SERIES, DicomDatetimePairKey, DicomDatetimePair
+	DCMTS_STUDY, DCMTS_SERIES
 from ...apisettings.media import DCMEDIA_M3D_MODALITY
 
 from ...helpers import request_client_error, fetch_sonador_session_token
@@ -49,21 +51,6 @@ logger = logging.getLogger(__name__)
 FILEARCHIVE_TYPE_ZIPARCHIVE = 'zip'
 FILEARCHIVE_TYPE_DICOMDIR = 'dicomdir'
 FILEARCHIVE_TYPE_SUPPORTED = (FILEARCHIVE_TYPE_ZIPARCHIVE, FILEARCHIVE_TYPE_DICOMDIR)
-
-
-ImageCoord = namedtuple('ImageCoord', ('x', 'y', 'z'))
-ImageSpacing = namedtuple('ImageSpacing', ('x', 'y', 'thickness'))
-ImageOrientation = namedtuple('ImageOrientation', ('row', 'col'))
-ImageStackShape = namedtuple('ImageStackShape', ('slices', 'rows', 'cols'))
-
-
-# DICOM Color Representations
-RGBColor = RGB
-LABColor = namedtuple('LABColor', ('L', 'a', 'b'))
-XYZColor = namedtuple('XYZColor', ('x', 'y', 'z'))
-
-
-EUCLID_COORD_ORIGIN = ImageCoord(0, 0, 0)
 
 
 def parse_image_orientation(coords):
@@ -447,7 +434,11 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerChildBaseObject):
 	@property
 	def patient_name_vr(self):
 		if self.patient_name:
-			return str2name(self.patient_name)			
+			return str2name(self.patient_name)
+
+	@property
+	def name(self):
+		return self.patient_name_vr
 
 	@property
 	def patient_name(self):
@@ -555,7 +546,7 @@ class ImagingPatientCollection(ImagingResourceBaseCollection):
 	'''
 	model = ImagingPatient
 
-	def bulkpopulate_related(self, child_studies=True, child_series=True):
+	def bulkpopulate_related(self, *args, child_studies=True, child_series=True, **kwargs):
 		'''	Populate models related to collection instances in the most efficient manner possible.
 
 			@input child_studies (bool, default=True): bulk populate "studies_collection" of collection instances.
@@ -1178,6 +1169,12 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 		return posixpath.join(self.cache_queryurl, self.pk, 'index')
 
 	@property
+	def comments_url(self):
+		'''	URL for comments associated with the imaging series
+		'''
+		return posixpath.join(self.resource_url, 'comments')
+
+	@property
 	def study(self):
 		return self._objectdata.get('ParentStudy')
 
@@ -1293,30 +1290,76 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 
 			@returns collection of DICOM instances
 		'''
-		verify = kwargs.get('verify', None)
-		if verify is None:
-			verify = self.server.verify		
+		return self.dcminstance_modelcollection_class.fetch(
+			self.pacs, data_collection_endpoint=posixpath.join(self.resource_url, 'instances'), 
+			series=self, **kwargs)
 
-		# Retrieve instances details
-		r = self.pacs._request_get(
-			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'instances')),
-			lambda r: request_client_error(
-				'Unable to retrieve details for series %s instances on server %s. Status code: %s.' % (
-					self.pk, self.pacs.server_label, r.status_code),
-				r),
-			headers=self.pacs.orthanc_request_headers(headers=kwargs.get('headers')), verify=verify)
-
-		# Parse response and return collection
-		return self.server._init_dataclass(
-			self.dcminstance_modelcollection_class, r, pacs=self.pacs, series=self, **kwargs)
-
-	def dcminstances_from_json(self, **kwargs):
-		'''	Retrieve details for slices in the series
+	def dcminstances_from_json(self, jdata, **kwargs):
+		'''	Initialize DCM instances from JSON
 
 			@returns collection of DICOM instances
 		'''
 		return self.server._init_dataclass_from_json(
 			self.dcminstance_modelcollection_class, jdata, pacs=self.pacs, series=self, **kwargs)
+	
+	@property
+	def comments_modelcollection_class(self):
+		'''	Model collection class that should be used to initialize comments
+		'''
+		from .ext import ResourceCommentCollection
+		return ResourceCommentCollection
+
+	def fetch_comments(self, **kwargs):
+		'''	Retrieve comments associated with the series
+
+			@returns collection of comments
+		'''
+		return self.comments_modelcollection_class.fetch(parent=self)
+
+	def comments_from_json(self, jdata, **kwargs):
+		'''	Initialize comments from JSON
+
+			@returns collection of comments
+		'''
+		return self.server._init_dataclass_from_json(
+			self.comments_modelcollection_class, jdata, pacs=self.pacs, series=self, **kwargs)
+
+	@property
+	def comments_collection(self):
+		'''	Comments associated with the series
+		'''		
+		if getattr(self, '_comments', None) is None:
+			setattr(self, '_comments', self.fetch_comments())
+
+		return self._comments
+
+	@comments_collection.setter
+	def comments_collection(self, comments_collection):
+		'''	Set comments collection property for the series
+		'''
+		if not isinstance(comments_collection, self.comments_modelcollection_class):
+			raise ValueError('Input must be an instance of a comments collection')
+
+		setattr(self, '_comments', comments_collection)
+
+	def create_comment(self, text, data=None):
+		'''	Create a comment for the series
+
+			@input text (str): Text for the comment
+		'''
+		data = data or {}
+		data.update({ 'Text': text })
+
+		return self.comments_modelcollection_class.create(self, data)
+
+	def get_comment(self, cid, *args, **kwargs):
+		'''	Retrieve a comment instance
+
+			@input cid (str): Orthanc resource ID (resource.pk) of the comment to be retrieved.
+
+			@returns comment instance
+		'''
+		return self.comments_modelcollection_class.fetch_modelinstance(self, cid, *args, **kwargs)
 
 
 class ImagingSeries(ImagingSeriesCoreResource):
@@ -1342,6 +1385,14 @@ class ImagingSeries(ImagingSeriesCoreResource):
 		'''	Retrieve instance UIDs for the series
 		'''
 		return self._objectdata.get('Instances')
+
+	@property
+	def instances_collection(self):
+		return self.slices_collection
+
+	@instances_collection.setter
+	def instances_collection(self, val):
+		self.slices_collection = val
 
 	@property
 	def slices_collection(self):
@@ -1518,6 +1569,7 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 	'''
 	pk_attr = 'ID'
 	fetch_endpoint = 'instances'
+	tabulate_output_columns = IMAGING_INSTANCE_OUTPUT_COLUMNS
 
 	def __init__(self, *args, **kwargs):
 		self._parent = kwargs.pop('series', None)

@@ -16,24 +16,6 @@ from .base import ImagingSeriesCoreResource, ImagingSeriesCollection, ImagingSer
 logger = logging.getLogger(__name__)
 
 
-def dcmmencode_procedure_code(val, scheme_designator, meaning, scheme_version=None, 
-		dataset=None):
-	'''	Encodes a PyDicom procedure code entry (0008,1032) with the provided
-		value, scheme designator
-
-		@input dataset (pydicom Dataset instance, default=new instance): Dataset instance
-			to which the value, scheme designator, meaning, and scheme version
-			should be added.
-	'''
-	dataset = dataset or Dataset()
-	dataset.CodeValue = val
-	dataset.CodingSchemeDesignator = scheme_designator
-	if scheme_version:
-		dataset.CodingSchemeVersion = scheme_version
-
-	return dataset
-
-
 class DcmSRSeries(ImagingSeriesCoreResource):
 	'''	DICOM-SR: sturctured report of medical imaging results
 	'''

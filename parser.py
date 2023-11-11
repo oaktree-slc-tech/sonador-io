@@ -3,6 +3,7 @@ from collections import OrderedDict
 
 from client.utils.logs import LOGGING_LEVELS
 from client.utils.object import pick
+from client.utils.conversion import str2bool
 from client.errors import OperationError
 
 from .apisettings import SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, \
@@ -61,14 +62,15 @@ def add_arguments_for_api_connection(parser):
 def add_arguments_for_verify_ssl(parser):
 	'''Add argument for Sonador API SSL verification
 	'''
-	parser.add_argument('--verify-ssl', dest='verifyssl', action='store_true', default=True,
-		help='Verify SSL connections')
+	parser.add_argument('--verify-ssl', dest='verifyssl', action='store_true', 
+		default=str2bool(os.environ.get('SONADOR_VERIFY_SSL', False)), help='Verify SSL connections')
 
 
 def add_arguments_for_internal_dns(parser):
 	'''	Add argument for Sonador API DNS management
 	'''
-	parser.add_argument('--internal-dns', dest='internal_dns', action='store_true', default=False,
+	parser.add_argument('--internal-dns', dest='internal_dns', action='store_true', 
+		default=str2bool(os.environ.get('SONADOR_INTERNAL_DNS', False)),
 		help='Use internal DNS (if present) for Sonador and Orthanc API server connections')
 
 

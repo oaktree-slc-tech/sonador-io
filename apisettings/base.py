@@ -1,10 +1,58 @@
-import re, functools, datetime
-from collections import namedtuple
+'''	Base DICOM constants, data structures, and encoded concepts for Sonador.
+	
+	NOTE: `highdicom` provides both `Code` and `CodedConcept` components. Within
+	Sonador the convention is to use `CodedConcept` to refer to the names of categories of values
+	and `Code` to refer to the values in a specific context group.
 
+	Sonador scheme versions (newer versions, unless explicitly noted, extend older revisions):
+	* 0.1 (2022): basic encoding structures including "Sonador-SEG" and "Sonador-SR" structures
+	* 0.2 (2023-0828): spatial SR constructs (2D/3D point concepts) used for creating SR documents 
+		that can be used for machine learning applications.
+
+	Architectural notes:
+	* The Sonador client library works with three types of data objects:
+		-	DICOM (DCM) meta-key and metadata objects. DCM objects follow the standard and provide interfaces
+			for working with data retrieved from Orthanc (primarily JSON based) and parsed 
+			using pydicom (pydicom.Dataset).
+		-	Structured Reporting (SR) data objects. SR objects provide support for
+			local/Python operations and a class structure for working with complex structured
+			data. SR objects are incorporated into the `sr` modules 
+			of the Sonador client library, provide the integration interface for many of the
+			Python modules with which Sonador integrates, and have support for persisting data
+			to DICOM-SR files (that can be written to disk via pydicom or uploaded to Sonador/Orthanc).
+		-	Remote models and data objects. Remote objects provide the interface for communicating
+			with the Sonador and Orthanc server applications and implement logic for data management.
+			Remote models often use SR objects for their internal data representation and return them
+			as results.
+	* `apisettings` defines the core constants and data classes needed for working with local data.
+	* `remote` defines the core classes used for communicating with the Sonador web application and Orthanc.
+		-	The `servers` module, `servers.SonadorServer`, and `servers.ImagingServer` implement 
+			the core logic managing remote data exchange.
+
+	Implementation notes:
+	* 	When defining new codes or coded concepts that require a `scheme_designator`, the version should
+		be referenced explicitly rather than using the "most recent" version variable.
+'''
+import abc, re, functools, datetime, copy, logging, numbers
+from collections import namedtuple, OrderedDict
+from typing import Sequence, Union
+
+import numpy as np
+
+from pydicom import Dataset as DcmDataset, Sequence as DcmSequence
 from pydicom.sr.codedict import codes as dcmcodes
+from pydicom.uid import generate_uid
 
 from highdicom.version import __version__ as HIGHDICOM_VERSION
-from highdicom.sr.templates import Code, CodedConcept
+from highdicom.sr.templates import Code, CodedConcept, MeasurementsAndQualitativeEvaluations, \
+	DEFAULT_LANGUAGE as DCMSR_DEFAULT_LANGUAGE
+from highdicom.sr.value_types import ContainerContentItem, CodeContentItem, TextContentItem, NumContentItem
+
+from client.utils.object import pick, omit
+from client.utils.colors import RGB
+from client.utils.microservices import JsonBaseObject, JsonObjectCollection
+
+logger = logging.getLogger(__name__)
 
 
 SONADOR_MANUFACTURER = 'Sonador'
@@ -12,23 +60,32 @@ HIGHDICOM_MANUFACTURER = 'HIGHDICOM'
 SONADOR_DEVELOPMENT_TEAM = '%s Development Team' % SONADOR_MANUFACTURER
 HIGHDICOM_DEVELOPMENT_TEAM = '%s Development Team' % HIGHDICOM_MANUFACTURER
 
+MASKED_VALUE_SEP = '-...-'
+
 SONADOR_CLIENT = '%s-Client' % SONADOR_MANUFACTURER
 SONADOR_CLIENT_DESCRIPTION = 'Client library for working with medical imaging data stored in Sonador/Orthanc.'
-SONADOR_SCHEME_VERSION = '0.1'
+SONADOR_SCHEME_VERSION_01 = '0.1'		# 2022
+SONADOR_SCHEME_VERSION_02 = '0.2'		# 2023-0828
+SONADOR_SCHEME_VERSION = SONADOR_SCHEME_VERSION_02
 
 SONADOR_SEG = 'Sonador-SEG'
 SONADOR_SEG_DESCRIPTION = '%s implements tools for working with segmentation data' % SONADOR_SEG
 DCMSR_SONADOR_SEG = Code(SONADOR_SEG, SONADOR_CLIENT, SONADOR_SEG_DESCRIPTION,
-	scheme_version=SONADOR_SCHEME_VERSION)
+	scheme_version=SONADOR_SCHEME_VERSION_01)
 
 SONADOR_SR = 'Sonador-SR'
 SONADOR_SR_DESCRIPTION = '%s implements tools for working with structured reporting data' % SONADOR_SR
 DCMSR_SONADOR_SR = Code(SONADOR_SR, SONADOR_CLIENT, SONADOR_SR_DESCRIPTION,
-	scheme_version=SONADOR_SCHEME_VERSION)
+	scheme_version=SONADOR_SCHEME_VERSION_01)
+
+DCM_SR_DCM = 'DCM'
+DCM_SR_DCM_DESCRIPTION = 'SR encoded constants provided by the DICOM standard'
+DCMSR_SR_DCM = Code(DCM_SR_DCM, 'DCM', DCM_SR_DCM_DESCRIPTION)
 
 
 # Header cache constants and data classes
 DCM_CONTENT_TYPE = 'application/octet-stream'
+DCM_JSON_MIMETYPE = 'application/json'
 
 
 # DICOM Metadata key/value data structures
@@ -43,15 +100,39 @@ class DicomMeta:
 		self.meta = meta
 
 
+# DICOM Header Definition
+class DicomHeaderData:
+	'''	Helper data class for working with DICOM tad definitions.
+	'''
+	def __init__(self, header, dcm_hexcode, dcm_int, dtype, private=False, private_creator=None):
+		self.header = header
+		self.hex = dcm_hexcode
+		self.int = dcm_int
+		self.dtype = dtype
+
+		# Private tag fields		
+		self.private = private
+		self.private_creator = private_creator
+
+		if self.private and not self.private_creator:
+			raise ValueError('Invalid private tag configuration. Private tags must specify '
+				+ 'a private creator value.')
+
+	def __hash__(self):
+		return hash((self.header, self.hex, self.int, self.dtype))
+
+
 # Private header definition
-DicomPrivateHeaderData = namedtuple('DicomPrivateHeaderData', ('header', 'hex', 'int', 'dtype'))
+DicomPrivateHeaderData = DicomHeaderData
 
 
 # DICOM date/time data structures
 DicomDatetimePairKey = namedtuple('DicomDatetimePairKey', ('resource', 'date_tag', 'time_tag'))
 
 class DicomDatetimePair:
-	'''	Helper data class for working with DICOM date/time pairs
+	'''	Helper data class for working with DICOM date/time pairs: parsing data from string
+		to Python representations and combining date and time components to a single
+		unified timestamp (datetime.datetime) representation.
 	'''
 	def __init__(self, date_value, time_value, *args, meta: DicomDatetimePairKey=None, **kwargs):
 		self._dvalue = date_value
@@ -97,6 +178,9 @@ DCMHEADER_CODING_SCHEME_VERSION = 'CodingSchemeVersion'
 DCMCODE_CODE_MEANING = ('0008', '0104')
 DCMHEADER_CODE_MEANING = 'CodeMeaning'
 
+DCMCODE_CONCEPT_CODE_SEQUENCE = ('0040', 'A043')
+DCMHEADER_CONCEPT_CODE_SEQUENCE = 'ConceptNameCodeSequence'
+
 DCMCODE_MAPPING_RESOURCE = ('0008', '0104')
 DCMHEADER_MAPPING_RESOURCE = 'MappingResource'
 
@@ -124,11 +208,23 @@ IMAGING_SERVER_RESOURCE_REPORT = 'Report'
 
 IMAGING_SERVER_UID_REGEX = re.compile(r'(.+)?(?P<uid>([0-9a-fA-F]{8}\-?){5})(.+)?')
 
-IMAGING_SERVER_RESOURCE_SUPPORTED = [
-	IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES]
+IMAGING_SERVER_RESOURCE_SUPPORTED = (
+	IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES)
+IMAGING_SERVER_RESOURCE_LEVEL = {
+	IMAGING_SERVER_RESOURCE_PATIENT: 0,
+	IMAGING_SERVER_RESOURCE_STUDY: 1,
+	IMAGING_SERVER_RESOURCE_SERIES: 2,
+	IMAGING_SERVER_RESOURCE_IMAGE: 3,
+}
 
 IMAGING_SERVER_LAST_UPDATE = 'LastUpdate'
+IMAGING_SERVER_MODIFIED = 'Modified'
+IMAGING_SERVER_STABLE = 'IsStable'
+IMAGING_SERVER_MAINDICOM = 'MainDicomTags'
+IMAGING_SERVER_PATIENT_MAINDICOM = 'PatientMainDicomTags'
 IMAGING_SERVER_DICOMTAGS_SIGNATURE = 'MainDicomTagsSignature'
+IMAGING_SERVER_PARENT_PATIENT = 'ParentPatient'
+IMAGING_SERVER_PARENT_STUDY = 'ParentStudy'
 
 
 # DICOM Versions
@@ -235,6 +331,9 @@ DCMHEADER_IMAGE_TYPE = 'ImageType'
 DCM_IMAGE_TYPE_DERIVED = 'Derived\\Secondary'
 
 DCMHEADER_INSTITUTION_NAME = 'InstitutionName'
+DCMHEADER_INSTITUTION_ADDRESS = 'InstitutionAddress'
+DCMHEADER_INSTITUTION_DEPARTMENT = 'InstitutionalDepartmentName'
+
 DCMHEADER_REQUESTING_PHYSICIAN = 'RequestingPhysician'
 DCMHEADER_REFERRING_PHYSICIAN = 'ReferringPhysicianName'
 DCMHEADER_PHYSICIANS_OF_RECORD = 'PhysiciansOfRecord'
@@ -255,6 +354,11 @@ DCMHEADER_CLINICAL_TRIAL_SITE_ID = 'ClinicalTrialSiteID'
 DCMHEADER_CLINICAL_TRIAL_SITE_NAME = 'ClinicalTrialSiteName'
 
 
+# Coordinate System and Spatial Headers
+
+DCMCODE_REFERENCE_FRAME = ('0020', '0052')
+DCMHEADER_REFERENCE_FRAME = 'FrameOfReferenceUID'
+
 DCMCODE_IMAGE_POSITION_PATIENT = ('0020', '0032')
 DCMHEADER_IMAGE_POSITION_PATIENT = 'ImagePositionPatient'
 
@@ -262,6 +366,55 @@ DCMCODE_IMAGE_ORIENTATION_PATIENT = ('0020', '0037')
 DCMHEADER_IMAGE_ORIENTATION_PATIENT = 'ImageOrientationPatient'
 
 DCMHEADER_PATIENT_POSITION = 'PatientPosition'
+
+DCMHEADER_SLICE_THICKNESS = 'SliceThickness'
+DCMHEADER_SLICE_LOCATION = 'SliceLocation'
+DCMHEADER_PIXEL_SPACING = 'PixelSpacing'
+
+
+DCMCODE_REGISTRATION_SEQUENCE = ('0070','0308')
+DCMHEADER_REGISTRATION_SEQUENCE = 'RegistrationSequence'
+
+DCMCODE_MATRIX_REGISTRATION_SEQUENCE = ('0070', '0309')
+DCMHEADER_MATRIX_REGISTRATION_SEQUENCE = 'MatrixRegistrationSequence'
+
+DCMCODE_MATRIX_REGISTRATION = ('0070','0309')
+DCMHEADER_MATRIX_REGISTRATION = 'MatrixSequence'
+
+DCMCODE_MATRIX_TRANSFORMATION_TYPE = ('0070','030C')
+DCMHEADER_MATRIX_TRANSFORMATION_TYPE = 'FrameOfReferenceTransformationMatrixType'
+
+# Type of transformation matrix.
+# Refer to https://dicom.nema.org/medical/dicom/current/output/chtml/part17/chapter_P.html#chapter_P
+
+# RIGID: Registration involving only translations and rotations. Matrix is constrained to be orthonormal
+# and describes six degrees of freedom: three translations and three rorations.
+DCM_MATRIX_RIGID = 'RIGID'
+
+# RIGID_SCALE: Registration involving only translations, rotations, and sacling.
+# Matrix is constrained to be orthonormal and describes nine degrees of freedom: three translations,
+# hree rotations, and three scales. Sometimes used in atlas mapping.
+DCM_MATRIX_RIGID_SCALE = 'RIGID_SCALE'
+
+# AFFINE: Registration involving translations, rotations, scaling, and shearing.
+# There are no constraints on the element of the frame of regference tranformation other than the
+# last row should be [0,0,0,1] to preserve the homogenoues coordinates. Transform decribes
+# twelve degrees of freedom. Sometimes used in atlas mapping.
+DCM_MATRIX_AFFINE = 'AFFINE'
+
+DCM_MATRIX_TRANSFORM_SUPPORTED = set((DCM_MATRIX_RIGID, DCM_MATRIX_RIGID_SCALE, DCM_MATRIX_AFFINE))
+
+DCMCODE_REFERENCE_FRAME_MATRIX = ('3006','00C6')
+DCMHEADER_REFERENCE_FRAME_MATRIX = 'FrameOfReferenceTransformationMatrix'
+
+DCMCODE_REFERENCE_FRAME_TRANFORM_COMMENT = ('3006', '00C8')
+DCMHEADER_REFERENCE_FRAME_TRANFORM_COMMENT = 'FrameOfReferenceTransformationComment'
+
+DCMCODE_MATRIX_USED_FIDUCIALS = ('0070','0314')
+DCMHEADER_MATRIX_USED_FIDUCIALS = 'UsedFiducialsSequence'
+
+
+# Modality and Protocol
 
 DCMCODE_MODALITY = ('0008', '0060')
 DCMHEADER_MODALITY = 'Modality'
@@ -336,10 +489,6 @@ DCMHEADER_NUMBER_OF_TEMPORAL_POSITIONS = 'NumberOfTemporalPositions'
 DCMHEADER_NUMBER_OF_SLICES = 'NumberOfSlices'
 DCMHEADER_NUMBER_OF_TIME_SLICES = 'NumberOfTimeSlices'
 
-DCMHEADER_SLICE_THICKNESS = 'SliceThickness'
-DCMHEADER_SLICE_LOCATION = 'SliceLocation'
-DCMHEADER_PIXEL_SPACING = 'PixelSpacing'
-
 DCMHEADER_PERFORMED_PROCEDURE_STEP_DESCRIPTION = 'PerformedProcedureStepDescription'
 
 DCMHEADER_SCHEDULED_PROCEDURE_STEP_START_DATE = 'ScheduledProcedureStepStartDate'
@@ -352,18 +501,62 @@ DCMHEADER_SCHEDULED_PROCEDURE_STEP_DESCRIPTION = 'ScheduledProcedureStepDescript
 DCMHEADER_ACQUISITION_DEVICE_PROCESSING_DESCRIPTION = 'AcquisitionDeviceProcessingDescription'
 DCMHEADER_CONTRAST_BOLUS_AGENT = 'ContrastBolusAgent'
 
+
+DCMCODE_SR_VALUE_TYPE = ('0040', 'A040')
+DCMHEADER_SR_VALUE_TYPE = 'ValueType'
+
+DCMSR_VALUE_TYPE_SCOORD3D = 'SCOORD3D'
+DCMSR_VALUE_TYPE_SCOORD = 'SCOORD'
+DCMSR_VALUE_TYPE_POINTS_SUPPORTED = set((DCMSR_VALUE_TYPE_SCOORD3D, DCMSR_VALUE_TYPE_SCOORD))
+
+DCMSR_GEOMETRIC_PURPOSE = Code(value='130400', meaning='Geometric purpose data', scheme_designator=DCM_SR_DCM)
+DCMSR_GEOMETRIC_PURPOSE_CENTER = Code(value='111010', meaning='Center', scheme_designator=DCM_SR_DCM)
+DCMSR_GEOMETRIC_PURPOSE_CENTERPOINT = Code(value='128137', meaning='Geometric Centerpoint', scheme_designator=DCM_SR_DCM)
+DCMSR_GEOMETRIC_PURPOSE_OUTLINE = Code(value='111041', meaning='Outline', scheme_designator=DCM_SR_DCM)
+DCMSR_GEOMETRIC_PURPOSE_CENTERLINE = Code(value='130490', meaning='Centerline', scheme_designator=DCM_SR_DCM)
+DCMSR_GEOMETRIC_PURPOSE_SEED_POINT = Code(value='128139', meaning='Seed Point', scheme_designator=DCM_SR_DCM)
+DCMSR_GEOMETRIC_SUPPORTED = OrderedDict((
+	(DCMSR_GEOMETRIC_PURPOSE_CENTER.value, DCMSR_GEOMETRIC_PURPOSE_CENTER),
+	(DCMSR_GEOMETRIC_PURPOSE_CENTERPOINT.value, DCMSR_GEOMETRIC_PURPOSE_CENTERPOINT),
+	(DCMSR_GEOMETRIC_PURPOSE_OUTLINE.value, DCMSR_GEOMETRIC_PURPOSE_OUTLINE),
+	(DCMSR_GEOMETRIC_PURPOSE_CENTERLINE.value, DCMSR_GEOMETRIC_PURPOSE_CENTERLINE),
+	(DCMSR_GEOMETRIC_PURPOSE_SEED_POINT.value, DCMSR_GEOMETRIC_PURPOSE_SEED_POINT),
+))
+DCMSR_GEOMETRIC_SUPPORTED_MEANING = OrderedDict((
+	(DCMSR_GEOMETRIC_PURPOSE_CENTER.meaning, DCMSR_GEOMETRIC_PURPOSE_CENTER),
+	(DCMSR_GEOMETRIC_PURPOSE_CENTERPOINT.meaning, DCMSR_GEOMETRIC_PURPOSE_CENTERPOINT),
+	(DCMSR_GEOMETRIC_PURPOSE_OUTLINE.meaning, DCMSR_GEOMETRIC_PURPOSE_OUTLINE),
+	(DCMSR_GEOMETRIC_PURPOSE_CENTERLINE.meaning, DCMSR_GEOMETRIC_PURPOSE_CENTERLINE),
+	(DCMSR_GEOMETRIC_PURPOSE_SEED_POINT.meaning, DCMSR_GEOMETRIC_PURPOSE_SEED_POINT),
+))
+
+
+DCMSR_UNITS_MM = dcmcodes.UCUM.mm
+DCMSR_UNITS_ANGLE_DEGREE = dcmcodes.UCUM.Degree
+DCMSR_UNITS_ANGLE_RADIAN = dcmcodes.UCUM.Radian
+
 DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE = 'PertinentOtherEvidenceSequence'
 DCMHEADER_SR_REF_SERIES_SEQ = 'ReferencedSeriesSequence'
 DCMHEADER_SR_REF_INSTANCE_SEQ = 'ReferencedInstanceSequence'
+DCMHEADER_SR_REF_IMAGES_SEQ = 'ReferencedImageSequence'
 DCMHEADER_SR_REF_SOP_SEQ = 'ReferencedSOPSequence'
 DCMHEADER_SR_DERIVATION_IMAGE_SEQ = 'DerivationImageSequence'
 DCMHEADER_SR_SOURCE_IMAGE_SEQ = 'SourceImageSequence'
+
+DCMCODE_SR_REF_REFERENCE_FRAME = ('3006', '0024')
+DCMHEADER_SR_REF_REFERENCE_FRAME = 'ReferencedFrameOfReferenceUID'
 
 DCMCODE_SR_SOP_CLASS_UID = ('0008', '1150')
 DCMHEADER_SR_SOP_CLASS_UID = 'ReferencedSOPClassUID'
 
 DCMCODE_SR_REF_INSTANCE_UID = ('0008', '1155')
 DCMHEADER_SR_REF_INSTANCE_UID = 'ReferencedSOPInstanceUID'
+
+DCMCODE_SR_GRAPHIC_DATA = ('0070', '0022')
+DCMHEADER_SR_GRAPHIC_DATA = 'GraphicData'
+
+DCMCODE_SR_GRAPHIC_TYPE = ('0070', '0023')
+DCMHEADER_SR_GRAPHIC_TYPE = 'GraphicType'
 
 DCMHEADER_FRAME_OF_REFERENCE_UID = 'FrameOfReferenceUID'
 
@@ -395,6 +588,7 @@ DCM_PATIENT_POSITION_LABELS = {
 }
 
 DCM_DATETIME_STRFORMAT = '%Y%m%d%H%M%S.%f'
+DCM_DATETIME_STRFORMAT_ALT1 = '%Y%m%d%H%M%S'
 DCM_DATE_STRFORMAT = '%Y%m%d'
 DCM_DATE_STRFORMAT_ALT1 = '%Y-%m%d'
 DCM_DATE_STRFORMAT_ALT2 = '%m/%d/%Y'
@@ -405,13 +599,106 @@ DCM_TIME_STRFORMAT_ALT1 = '%H%M%S'
 DCM_FILE_EXTENSION = 'dcm'
 DCM_EXTENSIONS_DEFAULT = ['*.dcm', '*.DCM', '*.DICOM', '*.dicom', 'IM*']
 DCM_EXTENSIONS_ALL_FILES = ['*']
-DCM_MODALITY_MR = 'MR'
-DCM_MODALITIES_MRI = ['MR', 'MRI', 'MR\\SD']
-DCM_MODALITY_CT = 'CT'
 
-DCM_MODALITY_SR = 'SR'
-DCM_MODALITY_SEG = 'SEG'
+DCM_MODALITY_AR = 'AR'
+DCM_MODALITY_ASMT = 'ASMT'
+DCM_MODALITY_AU = 'AU'
+DCM_MODALITY_BDUS = 'BDUS'
+DCM_MODALITY_BI = 'BI'
+DCM_MODALITY_BMD = 'BMD'
+DCM_MODALITY_CR = 'CR'
+DCM_MODALITY_CT = 'CT'
+DCM_MODALITY_CTPROTOCOL = 'CTPROTOCOL'
+DCM_MODALITY_DG = 'DG'
 DCM_MODALITY_DOC = 'DOC'
+DCM_MODALITY_DX = 'DX'
+DCM_MODALITY_ECG = 'ECG'
+DCM_MODALITY_EPS = 'EPS'
+DCM_MODALITY_ES = 'ES'
+DCM_MODALITY_FID = 'FID'
+DCM_MODALITY_GM = 'GM'
+DCM_MODALITY_HC = 'HC'
+DCM_MODALITY_HD = 'HD'
+DCM_MODALITY_IO = 'IO'
+DCM_MODALITY_IOL = 'IOL'
+DCM_MODALITY_IVOCT = 'IVOCT'
+DCM_MODALITY_IVUS = 'IVUS'
+DCM_MODALITY_KER = 'KER'
+DCM_MODALITY_KO = 'KO'
+DCM_MODALITY_LEN = 'LEN'
+DCM_MODALITY_LS = 'LS'
+DCM_MODALITY_MG = 'MG'
+DCM_MODALITY_M3D = 'M3D'
+DCM_MODALITY_MR = 'MR'
+DCM_MODALITY_NM = 'NM'
+DCM_MODALITY_OAM = 'OAM'
+DCM_MODALITY_OCT = 'OCT'
+DCM_MODALITY_OP = 'OP'
+DCM_MODALITY_OPM = 'OPM'
+DCM_MODALITY_OPT = 'OPT'
+DCM_MODALITY_OPTBSV = 'OPTBSV'
+DCM_MODALITY_OPTENF = 'OPTENF'
+DCM_MODALITY_OPV = 'OPV'
+DCM_MODALITY_OSS = 'OSS'
+DCM_MODALITY_OT = 'OT'
+DCM_MODALITY_PLAN = 'PLAN'
+DCM_MODALITY_PR = 'PR'
+DCM_MODALITY_PT = 'PT'
+DCM_MODALITY_PX = 'PX'
+DCM_MODALITY_REG = 'REG'
+DCM_MODALITY_RESP = 'RESP'
+DCM_MODALITY_RF = 'RF'
+DCM_MODALITY_RG = 'RG'
+DCM_MODALITY_RTDOSE = 'RTDOSE'
+DCM_MODALITY_RTIMAGE = 'RTIMAGE'
+DCM_MODALITY_RTINTENT = 'RTINTENT'
+DCM_MODALITY_RTPLAN = 'RTPLAN'
+DCM_MODALITY_RTRAD = 'RTRAD'
+DCM_MODALITY_RTRECORD = 'RTRECORD'
+DCM_MODALITY_RTSEGANN = 'RTSEGANN'
+DCM_MODALITY_RTSTRUCT = 'RTSTRUCT'
+DCM_MODALITY_RWV = 'RWV'
+DCM_MODALITY_SEG = 'SEG'
+DCM_MODALITY_SM = 'SM'
+DCM_MODALITY_SMR = 'SMR'
+DCM_MODALITY_SR = 'SR'
+DCM_MODALITY_SRF = 'SRF'
+DCM_MODALITY_STAIN = 'STAIN'
+DCM_MODALITY_TEXTUREMAP = 'TEXTUREMAP'
+DCM_MODALITY_TG = 'TG'
+DCM_MODALITY_US = 'US'
+DCM_MODALITY_VA = 'VA'
+DCM_MODALITY_XA = 'XA'
+DCM_MODALITY_XC = 'XC'
+
+DCM_MODALITIES_MRI = ['MR', 'MRI', 'MR\\SD']
+
+DCM_MODALITIES = (
+	DCM_MODALITY_AR, DCM_MODALITY_ASMT, DCM_MODALITY_AU,
+	DCM_MODALITY_BDUS, DCM_MODALITY_BI, DCM_MODALITY_BMD, 
+	DCM_MODALITY_CR, DCM_MODALITY_CT, DCM_MODALITY_CTPROTOCOL, 
+	DCM_MODALITY_DG, DCM_MODALITY_DOC, DCM_MODALITY_DX, 
+	DCM_MODALITY_ECG, DCM_MODALITY_EPS, DCM_MODALITY_ES, 
+	DCM_MODALITY_FID, 
+	DCM_MODALITY_GM, 
+	DCM_MODALITY_HC, DCM_MODALITY_HD, 
+	DCM_MODALITY_IO, DCM_MODALITY_IOL, DCM_MODALITY_IVOCT, DCM_MODALITY_IVUS, 
+	DCM_MODALITY_KER, 
+	DCM_MODALITY_LEN, DCM_MODALITY_LS, 
+	DCM_MODALITY_MG, DCM_MODALITY_M3D, DCM_MODALITY_MR, 
+	DCM_MODALITY_NM, 
+	DCM_MODALITY_OAM, DCM_MODALITY_OCT, DCM_MODALITY_OP, DCM_MODALITY_OPM, DCM_MODALITY_OPT, 
+		DCM_MODALITY_OPTBSV, DCM_MODALITY_OPTENF, DCM_MODALITY_OPV, DCM_MODALITY_OSS, DCM_MODALITY_OT, 
+	DCM_MODALITY_PLAN, DCM_MODALITY_PR, DCM_MODALITY_PT, DCM_MODALITY_PX, 
+	DCM_MODALITY_REG, DCM_MODALITY_RESP, DCM_MODALITY_RF, DCM_MODALITY_RG, DCM_MODALITY_RTDOSE, DCM_MODALITY_RTIMAGE, 
+		DCM_MODALITY_RTINTENT, DCM_MODALITY_RTPLAN, DCM_MODALITY_RTRAD, DCM_MODALITY_RTRECORD, DCM_MODALITY_RTSEGANN, 
+		DCM_MODALITY_RTSTRUCT, DCM_MODALITY_RWV,
+	DCM_MODALITY_SEG, DCM_MODALITY_SM, DCM_MODALITY_SMR, DCM_MODALITY_SR, DCM_MODALITY_SRF, DCM_MODALITY_STAIN, 
+	DCM_MODALITY_TEXTUREMAP, DCM_MODALITY_TG,
+	DCM_MODALITY_US,
+	DCM_MODALITY_VA,
+	DCM_MODALITY_XA, DCM_MODALITY_XC
+)
 
 DCM_ORIGINAL_ATTRIBUTES_SEQUENCE = 'OriginalAttributesSequence'
 DCM_MODIFIED_ATTRIBUTES_SEQUENCE = 'ModifiedAttributesSequence'
@@ -430,6 +717,7 @@ SONADOR_SECRET_KEY = 'SONADOR_SECRET_KEY'
 SONADOR_URL = 'SONADOR_URL'
 SONADOR_APITOKEN = 'SONADOR_APITOKEN'
 SONADOR_INTERNAL_DNS = 'SONADOR_INTERNAL_DNS'
+SONADOR_VERIFY_SSL = 'SONADOR_VERIFY_SSL'
 SONADOR_IMAGING_SERVER = 'SONADOR_IMAGING_SERVER'
 SONADOR_SERVICE_CLIENT_ID = 'SONADOR_SERVICE_CLIENT_ID'
 
@@ -449,3 +737,810 @@ TESTING_VERBOSITY = {
 
 ORTHANC_JOB_STATUS_SUCCESS = 'Success'
 ORTHANC_JOB_STATUS_FAILED = 'Failed'
+
+
+
+# SR Data Structures
+
+
+class SRDataObject:
+	'''	Structured reporting data object. Provides methods and properties for working with
+		local data within Sonador.
+
+		@type (str, default=None): string which describes the type of SR object.
+			(Return value depends on the object type, and may not be defined.)
+	'''
+	def _init_srdata(self, object_type=None, codes:Sequence[Union[Code,CodedConcept]]=None):
+		self._type = object_type
+		self._codes = codes
+
+	@property
+	def type(self):
+		return self._type
+
+	@property
+	def codes(self):
+		return self._codes
+
+
+class SRDataCollectionMember(SRDataObject):
+	'''	Structured reporting data object which can be associated with a collection.
+	'''
+	def __init__(self, collection=None, 
+			object_type=None, codes:Sequence[Union[Code,CodedConcept]]=None, **kwargs):
+		self._init_srdata(object_type=object_type, codes=codes)
+		self._init_collection(collection=collection)
+
+	def _init_collection(self, collection=None):
+		self.collection = collection
+
+	@abc.abstractmethod
+	def create_sr(self):
+		'''	Encode a DICOM-SR representation of the collection
+		'''	
+
+	@property
+	@functools.lru_cache()
+	def sr(self):
+		'''	Return an SR encoded representation of the data object
+		'''
+		return self.create_sr()
+
+
+class SRDataObjectCollection(SRDataObject, JsonObjectCollection):
+	'''	Collection of SR objects
+	'''
+	model = SRDataObject
+	object_type_attr = 'object_type'
+
+	def __init__(self, *args, object_type=None, codes:Sequence[Union[Code,CodedConcept]]=None, **kwargs):
+		self._init_srdata(object_type=object_type, codes=codes)
+		super().__init__(*args, **kwargs)
+
+	def _init_collection_modelinstance(self, *args, **kwargs):
+		'''	Initialize collection model instance
+		'''
+		return self.model(*args, **kwargs)
+
+	def _init_collection_models(self, **kwargs):
+		'''	Initialize collection models
+		'''
+		# Add object type and codes to model instance
+		if not kwargs.get(self.object_type_attr) and self.type:
+			kwargs[self.object_type_attr] = self.type
+		if not kwargs.get('codes') and self.codes:
+			kwargs['codes'] = self.codes
+
+		# Add a reference to the collection
+		if not kwargs.get('collection'):
+			kwargs['collection'] = self
+
+		def _init_model(data):
+			'''	Initialize model instance from data
+				1. If data is already a model, return instance
+				2. If a dict (or structured dict), initialize data object
+			'''
+			if isinstance(data, self.model) \
+				or (getattr(self, 'basemodel', None) and isinstance(data, getattr(self, 'basemodel', None))):
+				return data
+
+			# Tuple instance
+			elif isinstance(data, (tuple, list)):
+				return self._init_collection_modelinstance(*data, **kwargs)
+
+			# Dictionary instance
+			elif isinstance(data, (dict, OrderedDict)):
+
+				# Determine if any keys need to be omitted.
+				# Keys defined in the data dictionary should be used
+				# over collection attributes.
+				_okw = []
+				if data.get('codes'): _okw.append('codes')
+
+				# Ad collection keyword arguments to the data dict, omit any
+				# keywords which are duplicated between collection and intance
+				data.update(omit(pick(kwargs, kwargs.keys()), _okw))
+				return self._init_collection_modelinstance(**data)
+
+			raise NotImplementedError(
+				'Unsupported data type "%s". Model data must be a dict or a model instance.' % type(data))
+
+		return map(_init_model, self._objectdata)
+
+	@abc.abstractmethod
+	def create_sr(self):
+		'''	Encode a DICOM-SR representation of the collection
+		'''
+
+	@property
+	@functools.lru_cache()
+	def sr(self):
+		'''	Return an SR encoded representation of the collection
+		'''
+		return self.create_sr()
+
+
+class ImageTransformMatrix(SRDataCollectionMember):
+	''' Helper class for representing DICOM frame of reference frame transform matrices.		
+	'''
+	def __init__(self, txmatrix, uid=None, transform_type=None, comment=None, 
+			fiducials=None, ref_images=None, **kwargs):
+		'''	Initialize transformation matrix
+		'''
+		super().__init__(object_type=transform_type, **kwargs)
+
+		self._matrix = txmatrix
+		self._uid = uid
+		self._comment = comment
+		self._fiducials = fiducials
+		self._img_refs = ref_images
+
+	@property
+	def matrix(self):
+		return self._matrix
+
+	@property
+	def uid(self):
+		return self._uid
+
+	@property
+	def comment(self):
+		return self._comment
+
+	@property
+	def fiducials(self):
+		return self._fiducials
+
+	@property
+	def ref_images(self):
+		return self._img_refs
+
+	def create_sr(self, **kwargs):
+		from .sr import dcm_encode_reference_frame_transform_matrix
+		return dcm_encode_reference_frame_transform_matrix(self.matrix, 
+			reference_uid=self.uid, transform_type=self.type, transform_comment=self.comment,
+			fiducials=self.fiducials, ref_images=self.ref_images, codes=self.codes, **kwargs)
+
+
+class ImageTransformMatrixCollection(SRDataObjectCollection):
+	''' Collection of reference frame transform matrices
+	'''
+	model = ImageTransformMatrix
+	object_type_attr = 'transform_type'
+
+	def create_sr(self):
+		''' Create a DICOM representation of the collection
+
+			@returns pydicom.Sequence
+		'''
+		return DcmSequence(m.sr for m in self)
+
+
+class ImageCoord(SRDataCollectionMember):
+	'''	Helper class for working with DICOM (spatial) coordinates
+	'''
+	def __init__(self, x, y, z, reference_frame=None, name=None, point_type=None, **kwargs):
+		'''	Initialize image coordinate
+		'''
+		super().__init__(object_type=point_type, **kwargs)
+		self._name = name
+
+		# Coordinate values
+		self.x = x
+		self.y = y
+		self.z = z
+
+		# Coordinate reference frame
+		self._ref_frame = reference_frame
+
+	@property
+	def _pts(self):
+		return (self.x, self.y, self.z)
+
+	@property
+	def name(self):
+		return self._name
+
+	@property
+	def reference_frame(self):
+		return self._ref_frame
+
+	def __iter__(self):
+		yield from self._pts
+
+	def __str__(self):
+		return '(x=%s,y=%s,z=%s)' % self._pts
+
+	def create_sr(self, **kwargs):
+		from .sr import srencode_coord3d
+		return srencode_coord3d(
+			self.reference_frame.uid if self.reference_frame else generate_uid(), self, 
+			name=self.name, point_type=self.type, **kwargs)
+
+
+class ImageCoordCollection(SRDataObjectCollection):
+	'''	Collection of coordinates
+	'''
+	model = ImageCoord
+	object_type_attr = 'point_type'
+
+	def __init__(self, *args, reference_frame=None, name=None, point_type=None, **kwargs):
+		self._ref_frame = reference_frame
+		self._name = name
+		super().__init__(*args, object_type=point_type, **kwargs)
+
+	def _init_collection_models(self, *args, **kwargs):
+		if not kwargs.get('reference_frame') and self.reference_frame:
+			kwargs['reference_frame'] = self.reference_frame
+
+		return super()._init_collection_models(*args, **kwargs)
+
+	def create_sr(self, **kwargs):
+		'''	Create a DICOM-SR encoded representation of the collection
+		'''
+		from .sr import srencode_coord3d
+		return srencode_coord3d(
+			self.reference_frame.uid if self.reference_frame else generate_uid(), self, 
+			name=self.name, point_type=self.type, **kwargs)
+
+	@property
+	@functools.lru_cache()
+	def array(self):
+		from .sr import points2array
+		return points2array(self)
+
+	@property
+	def reference_frame(self):
+		return self._ref_frame
+
+	@property
+	def name(self):
+		return self._name
+
+
+class Finding(SRDataCollectionMember):
+	'''	Qualitative finding associated with a resource. (Provides a sim;lified
+			implementation of DICOM-SR TID E501.)
+	'''
+	def __init__(self, name, finding, finding_type=None, **kwargs):
+		'''	Initialize finding
+
+			@input name (highdicom.Code or highdicom.CodedConcept): name of the finding
+			@input finding (highdicom.Code or highdicom.CodedConept): finding value
+		'''
+		super().__init__(object_type=finding_type, **kwargs)
+		self._name = name
+		self._finding = finding
+
+	@property
+	def name(self):
+		return self._name
+
+	@property
+	def finding(self):
+		return self._finding
+
+	@property
+	def create_sr(self, **kwargs):
+		from .sr import srencode_finding
+		return srencode_finding(self, **kwargs)
+
+
+class FindingCollection(SRDataObjectCollection):
+	'''	Collection of qualitative findings
+	'''
+	model = Finding
+	object_type_attr = 'finding_type'
+
+	def create_sr(self):
+		'''	Return a DICOM-SR encoded iterator for all measurements in the collection
+		'''
+		return tuple(f.sr for f in self)
+
+
+class Measurement(SRDataCollectionMember):
+	'''	Numerical measurement associated with a resource. (Provides a simplified 
+		implementation DICOM-SR TID:3000.) 
+
+		Note: Within the Sonador library, only two fields are required: value and unit. 
+		To persist to measuremets to DICOM-SR, an additional parameter `name`, must also be provided.
+		(Refer to __init__ arguments list for all available parameters and types.)
+
+		@property value (number): measured value
+		@property unit (highdicom.Code or highdicom.CodedConcept): measurement unit
+		@property uid: user assigned ID for tracking the measurement
+	'''
+	def __init__(self, val:Union[int,float,numbers.Number], unit=DCMSR_UNITS_MM, name=None, measurement_type=None, 
+			qualifier=None, tracking_id=None, algorithm=None, derivation=None,  method=None, 
+			finding_sites=None, properties=None, ref_images=None, ref_value=None, **kwargs):
+		'''	Initialize measurement
+
+			@input val (numbers.Number): numeric measurement value
+			@input unit (highdicom.Code or highdicom.CodedConcept, default='mm'): Unit of measurement
+			@input name (highdicom.Code or highdicom.CodedConcept, default=None): Name of the measurement
+			@input qualifier (highdicom.Code or highdicom.CodedConcept, default=None): 
+				Qualification of numeric measurement value or qualitative description.
+			@input tracking_id (default=None): user assigned ID for tracking the value in reports
+			@input algorithm (default=None): description of the algoithm used for making the measurement
+			@input derivation (dault=None): how the value was computed
+			@input method (default=None): measurement method
+			@input finding_sites (default=None): coded description of one or more anatomic locations 
+				associated with the measurement
+			@input properties (default=None): meaurement properties, including evaluations of significance,
+				relationship to a reference population, and its range.
+			@input ref_images (default=None): referenced images which were used as source for the meaurement
+			@input ref_value (default=None): reference real world value map
+		'''
+		super().__init__(object_type=measurement_type, **kwargs)
+		self._val = val
+		self._unit = unit
+		self._name = name
+		self._qualifier = qualifier
+		self._uid = tracking_id
+		self._algorithm = algorithm
+		self._derivation = derivation
+		self._method = method
+		self._finding_sites = finding_sites
+		self._properties = properties
+		self._img_refs = ref_images
+		self._val_ref = ref_value
+
+	@property
+	def value(self):
+		return self._val
+
+	@property
+	def unit(self):
+		return self._unit
+
+	@property
+	def uid(self):
+		return self._uid
+
+	@property
+	def qualifier(self):
+		return self._qualifier
+
+	@property
+	def name(self):
+		return self._name
+
+	@property
+	def algorithm(self):
+		return self._algorithm
+
+	@property
+	def derivation(self):
+		return self._derivation
+
+	@property
+	def method(self):
+		return self._method
+
+	@property
+	def finding_sites(self):
+		return self._finding_sites
+
+	@property
+	def properties(self):
+		return self._properties
+
+	@property
+	def ref_images(self):
+		return self._img_refs
+
+	@property
+	def ref_value(self):
+		return self._val_ref
+
+	def create_sr(self, **kwargs):
+		from .sr import srencode_measurement
+		return srencode_measurement(self, **kwargs)
+
+
+class MeasurementCollection(SRDataObjectCollection):
+	'''	Collection of measurements.
+	'''
+	model = Measurement
+	object_type_attr = 'measurement_type'
+
+	def create_sr(self):
+		'''	Return a DICOM-SR encoded iterator for all measurements in the collection
+		'''
+		return tuple(m.sr for m in self)
+
+
+class ReportBaseGroup(SRDataCollectionMember):
+	'''	Provides a general structure for grouping data together into a DICOM-SR report section.
+	'''
+	sr_template = None
+
+	def __init__(self, *args, tracking_id=None, **kwargs):
+		''' Initialize report group
+
+			@input tracking_id (default=None): user assigned ID for tracking the value in reports
+
+			@input sr_template (subclass of highdicom.sr.templates._MeasurementsAndQualitativeEvaluations):
+				SR template that should be used to encode the report group. By default, TID-1501 which provide
+				support for qualitative findings and quantitative measurements is used.
+		'''
+		self.sr_template = kwargs.pop('sr_template', self.sr_template)
+		self._uid = tracking_id
+
+		super().__init__(*args, **kwargs)
+
+		if not self.sr_template:
+			raise ValueError('Unable to initialize %s, invalid SR template class' % type(self))
+
+	@property
+	def uid(self):
+		return self._uid
+
+	def create_sr(self, *args, **kwargs):
+		from .sr import srencode_report_group
+		if not self.uid:
+			raise ValueError('A user defined tracking ID is required to create a DICOM-SR instance.')
+
+		return srencode_report_group(self.uid, sr_template=self.sr_template, **kwargs)
+
+
+class ReportMetaGroup(ReportBaseGroup):
+	'''	Provides a general structure for metadata, coded concepts, and other information
+		to be added to a report template.
+	'''
+	def __init__(self, meta:Sequence[Union[TextContentItem,NumContentItem,CodeContentItem]], *args, **kwargs):
+		'''	Initialize report group
+
+			@input meta (iterable of highdicom.ContentItem instances): content items to be added to
+				the report group.
+		'''
+		self._meta = meta
+		super().__init__(*args, **kwargs)
+
+	@property
+	def meta(self):
+		return self._meta
+
+	@property
+	def sr_template(self):
+		'''	Dynamic property for retrieving the SR template. Required by Sonaor in order
+			to prevent circular imports. Uses sonador.imaging.sr.helpers.encoding.ReportMetaGroup
+			as the default SR template.
+		'''
+		if getattr(self, '_sr_template', None):
+			return self._sr_template
+
+		from ..imaging.helpers.sr.encoding import ReportMetaGroup as DcmReportMetaGroup
+		return DcmReportMetaGroup
+
+	@sr_template.setter
+	def sr_template(self, val):
+		self._sr_template = val
+
+	def create_sr(self, **kwargs):
+		return super().create_sr(meta=self.meta, **kwargs)
+
+
+class ReportGroup(ReportBaseGroup):
+	'''	Groups quantitative measurements and qualitative findings together into a report section.
+		(Provides a simplified implementation of DICOM-SR TID:1501.)
+	'''
+	sr_template = MeasurementsAndQualitativeEvaluations
+
+	def __init__(self, *args, findings:FindingCollection=None, measurements:MeasurementCollection=None,
+			finding_type=None, finding_sites=None, finding_category=None, algorithm=None, method=None, ref_value=None, **kwargs):
+		'''	Initialize report group	
+	
+			@input tracking_id (default=None): user assigned ID for tracking the value in reports
+			@input finding_type (highdicom.Code or highdicom.CodedConcept, default=None): type of observed
+				finding associated with the group
+			@input finding_category (highdicom.Code or highdicom.CodedConcept, default=None): category
+				of the observed findings (eg, anatomic structure or morphologically abnormal structure)
+			@input measurements (MeasurementCollection, default=None): measurements to be added to the group
+			@input findings (FindingCollection, default=None): findings to be added to the group
+			@input algorithm (default=None): description of the algorithm used for making the measurement or findings.
+				(Findings and measurement may futher have their own algorithm descriptions embedded.)
+			@input finding_sites (default=None): coded description of one or more anatomic locations 
+				associated with the measurement and findings
+			@input ref_value (default=None): reference real world value map
+		'''
+		# Data properties
+		self._finding_category = finding_category
+		self._measurements = measurements
+		self._findings = findings
+		self._algorithm = algorithm
+		self._method = method
+		self._finding_sites = finding_sites
+		self._val_ref = ref_value
+
+		super().__init__(*args, object_type=finding_type, **kwargs)
+
+	@property
+	def finding_category(self):
+		return self._finding_category
+
+	@property
+	def measurements(self):
+		return self._measurements
+
+	@property
+	def findings(self):
+		return self._findings
+
+	@property
+	def algorithm(self):
+		return self._algorithm
+
+	@property
+	def method(self):
+		return self._method
+
+	@property
+	def finding_sites(self):
+		return self._finding_sites
+
+	@property
+	def ref_value(self):
+		return self._val_ref
+
+	def create_sr(self, **kwargs):
+		return super().create_sr(
+			measurements=self.measurements, findings=self.findings, referenced_real_world_value_map=self.ref_value,
+			method=self.method, algorithm_id=self.algorithm, finding_type=self.type, finding_category=self.finding_category,
+			finding_sites=self.finding_sites, **kwargs)
+
+
+class VolumePointCollectionGroup(ReportGroup):
+	'''	Specialized report group (container) which is able to encode spatial points and associated measurements/findings.
+		Extension of DICOM-SR TID:1501. (Uses TID:Sonador-1001 DICOM-SR template by default.)
+	'''
+	def __init__(self, *args, points:Sequence[Union[ImageCoord,ImageCoordCollection]]=None, **kwargs):
+		'''	Initialize report group.
+			(Refer to sonador.apisettings.ReportGroup for full list of init arguments.)
+
+			@input points (iterable of ImageCoordCollection or ImageCoord instances)
+		'''
+		super().__init__(*args, **kwargs)
+		self._points = points
+
+	@property
+	def points(self):
+		return self._points
+
+	@property
+	def sr_template(self):
+		'''	Dynamic property for retrieving the SR template. Required by Sonaor in order
+			to prevent circular imports. Uses sonador.imaging.sr.helpers.encoding.VolumetricPointCollection
+			as the default SR template.
+		'''
+		if getattr(self, '_sr_template', None):
+			return self._sr_template
+
+		from ..imaging.helpers.sr.encoding import VolumetricPointCollection
+		return VolumetricPointCollection
+
+	@sr_template.setter
+	def sr_template(self, val):
+		self._sr_template = val		
+
+	def create_sr(self, **kwargs):
+		return super().create_sr(points=[p.sr for p in self.points], **kwargs)
+
+
+class ReportGroupCollection(SRDataObjectCollection):
+	'''	Collection of report groups
+	'''
+	basemodel = ReportBaseGroup
+	model = ReportGroup
+	object_type_attr = 'finding_type'
+
+	def create_sr(self):
+		'''	Create a DICOM-SR content iterable of all groups in the collection
+		'''
+		return tuple(g.sr for g in self)
+
+	def _init_collection_modelinstance(self, *args, **kwargs):
+		'''	Initialize collection model instance. If `points` is in the list of
+			arguments, return a VolumePointCollectionGroup instance rather than the
+			default model type associated with the collection.
+		'''
+		if 'points' in kwargs:
+			return VolumePointCollectionGroup(*args, **kwargs)
+		elif 'meta' in kwargs:
+			return ReportMetaGroup(*args, **kwargs)
+
+		return super()._init_collection_modelinstance(*args, **kwargs)
+
+
+ImageSpacing = namedtuple('ImageSpacing', ('x', 'y', 'thickness'))
+ImageOrientation = namedtuple('ImageOrientation', ('row', 'col'))
+ImageStackShape = namedtuple('ImageStackShape', ('slices', 'rows', 'cols'))
+
+EUCLID_COORD_ORIGIN = ImageCoord(0, 0, 0)
+
+
+# DICOM Color Representations
+RGBColor = RGB
+LABColor = namedtuple('LABColor', ('L', 'a', 'b'))
+XYZColor = namedtuple('XYZColor', ('x', 'y', 'z'))
+
+
+
+# DICOM VR
+ValueRepresentationData = namedtuple('ValueRepresentationData', ('code', 'name', 'description'))
+
+# DICOM Value Representation Codes.
+# Refer to https://dicom.nema.org/medical/dicom/current/output/chtml/part05/sect_6.2.html
+
+DICOM_VR_AE = 'AE'
+DICOM_VR_AS = 'AS'
+DICOM_VR_AT = 'AT'
+DICOM_VR_CS = 'CS'
+DICOM_VR_DA = 'DA'
+DICOM_VR_DS = 'DS'
+DICOM_VR_DT = 'DT'
+DICOM_VR_FL = 'FL'
+DICOM_VR_FD = 'FD'
+DICOM_VR_IS = 'IS'
+DICOM_VR_LO = 'LO'
+DICOM_VR_LT = 'LT'
+DICOM_VR_OB = 'OB'
+DICOM_VR_OD = 'OD'
+DICOM_VR_OF = 'OF'
+DICOM_VR_OL = 'OL'
+DICOM_VR_OV = 'OV'
+DICOM_VR_OW = 'OW'
+DICOM_VR_PN = 'PN'
+DICOM_VR_SH = 'SH'
+DICOM_VR_SL = 'SL'
+DICOM_VR_SQ = 'SQ'
+DICOM_VR_SS = 'SS'
+DICOM_VR_ST = 'ST'
+DICOM_VR_SV = 'SV'
+DICOM_VR_TM = 'TM'
+DICOM_VR_UC = 'UC'
+DICOM_VR_UI = 'UI'
+DICOM_VR_UL = 'UL'
+DICOM_VR_UN = 'UN'
+DICOM_VR_UR = 'UR'
+DICOM_VR_US = 'US'
+DICOM_VR_UT = 'UT'
+DICOM_VR_UV = 'UV'
+
+
+DICOM_VR_DESCRIPTION = OrderedDict((
+	(DICOM_VR_AE, ValueRepresentationData(
+		DICOM_VR_AE, 'Application Entity', 'A string of characters that identifies an Application entity.')),
+	(DICOM_VR_AS, ValueRepresentationData(
+		DICOM_VR_AS, 'Age String', '''A string of characters with one of the following formats -- nnnD, nnnW, nnnM, nnnY; 
+			where nnn shall contain the number of days for D, weeks for W, months for M, or years for Y.
+			Example: "018M" would represent an age of 18 months.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_AT, ValueRepresentationData(
+		DICOM_VR_AT, 'Attribute Tag', '''Ordered pair of 16-bit unsigned integers that is the Value of a Data Element Tag. Example: 
+			A Data Element Tag of (0018,00FF) would be encoded as a series of 4 bytes in a Little-Endian Transfer 
+			Syntax as 18H,00H,FFH,00H.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_CS, ValueRepresentationData(
+		DICOM_VR_CS, 'Code String', '''A string of characters identifying a controlled concept. 
+			Leading or trailing spaces (20H) are not significant. Alternatively, in the context of a Query with Empty 
+			Value Matching (see PS3.4), a string of two QUOTATION MARK characters, representing 
+			an empty key Value.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_DA, ValueRepresentationData(
+		DICOM_VR_DA, 'Date', '''A string of characters of the format YYYYMMDD; where YYYY shall contain year, 
+			MM shall contain the month, and DD shall contain the day, interpreted as a date of the Gregorian 
+			calendar system. Example: "19930822" would represent August 22, 1993.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_DS, ValueRepresentationData(
+		DICOM_VR_DS, 'Decimal String', '''A string of characters representing either a fixed point number or a floating point number. 
+			A fixed point number shall contain only the characters 0-9 with an optional leading "+" or "-" and an optional "." 
+			to mark the decimal point. A floating point number shall be conveyed as defined in ANSI X3.9, with an "E" or "e" 
+			to indicate the start of the exponent. Decimal Strings may be padded with leading or trailing spaces. 
+			Embedded spaces are not allowed.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_DT, ValueRepresentationData(
+		DICOM_VR_DT, 'Date Time', '''A concatenated date-time character string in the format: YYYYMMDDHHMMSS.FFFFFF&ZZXX.
+			The components of this string, from left to right, are YYYY = Year, MM = Month, DD = Day, HH = Hour (range "00" - "23"), 
+			MM = Minute (range "00" - "59"), SS = Second (range "00" - "60").'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_FL, ValueRepresentationData(
+		DICOM_VR_FL, 'Floating Single Point', '''Single precision binary floating point number represented in IEEE 
+			754:1985 32-bit Floating Point Number Format.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_FD, ValueRepresentationData(
+		DICOM_VR_FD, 'Floating Point Double', '''Single precision binary floating point number represented in IEEE 
+			754:1985 32-bit Floating Point Number Format.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_IS, ValueRepresentationData(
+		DICOM_VR_IS, 'Integer String', '''A string of characters representing an Integer in base-10 (decimal), shall contain 
+			only the characters 0 - 9, with an optional leading "+" or "-". It may be padded with leading and/or 
+			trailing spaces. Embedded spaces are not allowed.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_LO, ValueRepresentationData(
+		DICOM_VR_LO, 'Long String', '''A string of characters representing an Integer in base-10 (decimal), shall contain 
+			only the characters 0 - 9, with an optional leading "+" or "-". It may be padded with leading and/or 
+			trailing spaces. Embedded spaces are not allowed.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_LT, ValueRepresentationData(
+		DICOM_VR_LT, 'Long Text', '''A character string that may contain one or more paragraphs. It may contain the Graphic 
+			Character set and the Control Characters, CR, LF, FF, and ESC. It may be padded with trailing spaces, 
+			which may be ignored, but leading spaces are considered to be significant. Data Elements with this VR shall 
+			not be multi-valued and therefore character code 5CH (the BACKSLASH "\\" in ISO-IR 6) 
+			may be used.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_OB, ValueRepresentationData(
+		DICOM_VR_OB, 'Other Byte', '''An octet-stream where the encoding of the contents is specified by the 
+			negotiated Transfer Syntax. OB is a VR that is insensitive to byte ordering (see Section 7.3). 
+			The octet-stream shall be padded with a single trailing NULL byte value (00H) when necessary 
+			to achieve even length.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_OD, ValueRepresentationData(
+		DICOM_VR_OD, 'Other Double', '''A stream of 64-bit IEEE 754:1985 floating point words. OD is a VR that 
+			requires byte swapping within each 64-bit word when changing byte ordering 
+			(see Section 7.3).'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_OF, ValueRepresentationData(
+		DICOM_VR_OF, 'Other Float', '''A stream of 32-bit IEEE 754:1985 floating point words. OF is a VR that 
+			requires byte swapping within each 32-bit word when changing byte ordering 
+			(see Section 7.3).'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_OL, ValueRepresentationData(
+		DICOM_VR_OL, 'Other Long', '''A stream of 32-bit words where the encoding of the contents is specified 
+			by the negotiated Transfer Syntax. OL is a VR that requires byte swapping within 
+			each word when changing byte ordering (see Section 7.3).'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_OV, ValueRepresentationData(
+		DICOM_VR_OV, 'Other 64-bit Very Long', '''A stream of 64-bit words where the encoding of the contents is specified 
+			by the negotiated Transfer Syntax. OV is a VR that requires byte 
+			swapping within each word when changing byte ordering (see Section 7.3).'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_OW, ValueRepresentationData(
+		DICOM_VR_OW, 'Other Word', '''A stream of 16-bit words where the encoding of the contents is specified by the negotiated 
+			Transfer Syntax. OW is a VR that requires byte swapping within each word when changing 
+			byte ordering (see Section 7.3).'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_PN, ValueRepresentationData(
+		DICOM_VR_PN, 'Person Name', '''A character string encoded using a 5 component convention. The character code 
+			5CH (the BACKSLASH "\\" in ISO-IR 6) shall not be present, as it is used as the delimiter between Values in multi-valued Data 
+			Elements. The string may be padded with trailing spaces. For human use, the five components in their order of occurrence are: 
+			family name complex, given name complex, middle name, name prefix, name suffix.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_SH, ValueRepresentationData(
+		DICOM_VR_SH, 'Short String', '''A character string that may be padded with leading and/or trailing spaces. The character code 05CH 
+			(the BACKSLASH "\\" in ISO-IR 6) shall not be present, as it is used as the delimiter between Values for multi-valued Data Elements. 
+			The string shall not have Control Characters except ESC.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_SL, ValueRepresentationData(
+		DICOM_VR_SL, 'Signed Long', '''Signed binary integer 32 bits long in 2's complement form. Represents an integer, n, in the range:
+			-2**31 <= n <= 2**31 - 1.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_SQ, ValueRepresentationData(
+		DICOM_VR_SQ, 'Sequence of Items', '''Value is a Sequence of zero or more Items, as defined in Section 7.5.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_SS, ValueRepresentationData(
+		DICOM_VR_SS, 'Signed Short', '''Signed binary integer 16 bits long in 2's complement form. Represents an integer 
+			n in the range: -2**15 <= n <= 2**15 - 1.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_ST, ValueRepresentationData(
+		DICOM_VR_ST, 'Short Text', '''A character string that may contain one or more paragraphs. It may contain the Graphic Character 
+			set and the Control Characters, CR, LF, FF, and ESC. It may be padded with trailing spaces, which may be ignored, but 
+			leading spaces are considered to be significant. Data Elements with this VR shall not be multi-valued and therefore character 
+			code 5CH (the BACKSLASH "\\" in ISO-IR 6) may be used.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_SV, ValueRepresentationData(
+		DICOM_VR_SV, 'Signed 64-bit Very Long', '''Signed binary integer 64 bits long. Represents an integer n in the range: 
+			-2**63 <= n <= 2**63 - 1.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_TM, ValueRepresentationData(
+		DICOM_VR_TM, 'Time', '''A string of characters of the format HHMMSS.FFFFFF; where HH contains hours (range "00" - "23"), MM 
+			contains minutes (range "00" - "59"), SS contains seconds (range "00" - "60"), and FFFFFF contains a fractional part of 
+			a second as small as 1 millionth of a second (range "000000" - "999999"). A 24-hour clock is used. 
+			Midnight shall be represented by only "0000" since "2400" would violate the hour range. The string may be padded with 
+			trailing spaces. Leading and embedded spaces are not allowed.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_UC, ValueRepresentationData(
+		DICOM_VR_UC, 'Unlimited Characters', '''A character string that may be of unlimited length that may be padded with trailing spaces. 
+			The character code 5CH (the BACKSLASH "\\" in ISO-IR 6) shall not be present, as it is used as the delimiter between Values 
+			in multi-valued Data Elements. The string shall not have Control Characters except for ESC.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_UI, ValueRepresentationData(
+		DICOM_VR_UI, 'Unique Identifier (UID)', '''A character string containing a UID that is used to uniquely identify a wide variety 
+			of items. The UID is a series of numeric components separated by the period "." character. If a Value Field containing 
+			one or more UIDs is an odd number of bytes in length, the Value Field shall be padded with a single trailing NULL (00H) 
+			character to ensure that the Value Field is an even number of bytes in length. See Section 9 and Annex B for a 
+			complete specification and examples.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_UL, ValueRepresentationData(
+		DICOM_VR_UL, 'Unsigned Long', '''Unsigned binary integer 32 bits long. Represents an integer n in the \
+			range: 0 <= n < 2**32.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_UN, ValueRepresentationData(
+		DICOM_VR_UN, 'Unkown', '''An octet-stream where the encoding of the contents is unknown (see Section 6.2.2).''')),
+	(DICOM_VR_UR, ValueRepresentationData(
+		DICOM_VR_UR, 'Universal Resource Identifier or Universal Resource Locator (URI/URL)', '''A string of characters that identifies a URI or a 
+			URL as defined in [RFC3986]. Leading spaces are not allowed. Trailing spaces shall be ignored. Data Elements with this 
+			VR shall not be multi-valued.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_US, ValueRepresentationData(
+		DICOM_VR_US, 'Unsigned Short', '''Unsigned binary integer 16 bits long. Represents integer n in the range: 0 <= n < 2**16.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_UT, ValueRepresentationData(
+		DICOM_VR_UT, 'Unlimited Text', '''A character string that may contain one or more paragraphs. It may contain the Graphic Character 
+			set and the Control Characters, CR, LF, FF, and ESC. It may be padded with trailing spaces, which may be ignored, but leading 
+			paces are considered to be significant. Data Elements with this VR shall not be multi-valued and therefore character code 
+			5CH (the BACKSLASH "\\" in ISO-IR 6) may be used.'''.replace('\n', '').replace('\t', ''))),
+	(DICOM_VR_UV, ValueRepresentationData(
+		DICOM_VR_UV, 'Unsigned 64-bit Very Long', 
+			'''Unsigned binary integer 64 bits long. Represents an integer n in the range: 0 <= n < 2**64.'''.replace('\n', '').replace('\t', ''))),
+))
