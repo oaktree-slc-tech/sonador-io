@@ -1,5 +1,12 @@
+--extra-index-url https://code.oak-tree.tech/api/v4/projects/335/packages/pypi/simple
+
+# Data parsing and display
+client 
 tabulate>=0.8.7
-pydicom
-highdicom>=0.21.1
 pytz
 nameparser
+usaddress
+
+# DICOM
+pydicom
+highdicom>=0.21.1

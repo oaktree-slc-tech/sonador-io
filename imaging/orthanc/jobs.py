@@ -103,12 +103,12 @@ class OrthancJob(OrthancJobBaseObject):
 		rdata = rdata or {}
 
 		# Dispatch request and parse respone
-		r = requests.post(self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, rstub)), json=rdata,
-			headers=self.pacs.orthanc_request_headers(headers=headers))
-		if not r.ok:
-			request_client_error('Unable to dispatch %s update to job %s on server %s. Status code: %s' 
-					% (rstub, self.pk, self.pacs.server_label, r.status_code),
-				r)
+		r = self.pacs._request_post(
+			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, rstub)),
+			lambda r: request_client_error('Unable to dispatch %s update to job %s on server %s. Status code: %s' % (
+				rstub, self.pk, self.pacs.server_label, r.status_code),
+				r),
+			json=rdata, headers=self.pacs.orthanc_request_headers(headers=headers), verify=kwargs.get('verify'))
 
 		return self.server._parse_apiresponse_json(r)
 

@@ -9,4 +9,7 @@ if mfilename in MODULE_FILES:
 	MODULE_FILES.remove(mfilename)
 
 from .tests_sonadorauth import *
+from .tests_sonadorauth_credapi import *
 from .tests_sonadorenv import *
+from .tests_fhir_addr import *
+from .tests_ext_comments import *

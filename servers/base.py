@@ -40,7 +40,7 @@ class OrthancServerBase(SonadorBaseObject):
 		super().__init__(*args, **kwargs)
 
 	@abc.abstractmethod
-	def _request_get(self, resource_endpoint, error_msg, headers=None, verify=None, **kwargs):
+	def _request_get(self, resource_endpoint, error_msg=None, headers=None, verify=None, **kwargs):
 		''' Send a GET request to the imaging server. Raises an exception with the provided error message
 			if the request could not be completed successfully.
 
@@ -48,7 +48,7 @@ class OrthancServerBase(SonadorBaseObject):
 		'''
 
 	@abc.abstractmethod
-	def _request_post(self, resource_endpoint, error_msg, headers=None, verify=None, **kwargs):
+	def _request_post(self, resource_endpoint, error_msg=None, headers=None, verify=None, **kwargs):
 		'''	Send a POST request to the imaging server. Raises an exception with the provided error message
 			if the request could not be completed successfully.
 
@@ -56,8 +56,16 @@ class OrthancServerBase(SonadorBaseObject):
 		'''
 
 	@abc.abstractmethod
-	def _request_delete(self, resource_endpoint, error_msg, headers=None, verify=None, **kwargs):
+	def _request_delete(self, resource_endpoint, error_msg=None, headers=None, verify=None, **kwargs):
 		'''	Send a DELETE request to the imaging server. Raises an exception with the provided error message
+			if the request could not be completed successfully.
+
+			@returns request.Response or JSON object (dict/array)
+		'''
+	
+	@abc.abstractmethod
+	def _request_put(self, resource_endpoint, error_msg=None, headers=None, verify=None, **kwargs):
+		'''	Send a PUT request to the imaging server. Raises an exception with the provided error message
 			if the request could not be completed successfully.
 
 			@returns request.Response or JSON object (dict/array)
@@ -401,6 +409,32 @@ class OrthancServerBase(SonadorBaseObject):
 		if not isinstance(sfilter, dict):
 			raise ValueError('Invalid resource query type: %s. Resource queries must be a dictionary.' % type(sfilter))
 
+	def _parse_apiresponse_json(self, *args, **kwargs):
+		'''	Parse JSON response to Python representation. (Method added so that the OrthancServerBase
+			implements the same API as the client.remote.RemoteServer and can be used with the
+			data processing methods of the Guru client library and sonador.remote module.
+			Delegates to self.server._parse_apiresponse_json.
+		'''
+		return self.server._parse_apiresponse_json(*args, **kwargs)
+
+	def _init_dataclass(self, *args, **kwargs):
+		'''	Initiliaze data class with provided data. (Method added so that the OrthancServer Base
+			implements the same API as the client.remote.RemoteServer and can be used with the
+			data processing methods of the Guru client library and sonador.remote module.
+			Deletates to self.server._init_dataclass.)
+		'''
+		return self.server._init_dataclass(*args, server=self, **kwargs)
+
+	def verify_ssl(self, *args, **kwargs):
+		'''	Reads the provided keyword arguments and determines the correct value for the `verify` argument
+			of remote callable functions. If verify is provided as None, the verify SSL value from the Sonador connection
+			instance is used as a default. (Delegates to the server instance of the Orthanc server, which should
+			be a `SonadorServer`.)
+
+			@returns bool: True if SSL connections should be validated
+		'''
+		return self.server.verify_ssl(*args, **kwargs)
+
 	def query_patient(self, sfilter, **kwargs):
 		'''Query patient resources on the imaging server. (Wrapper function for "query".)
 		'''	
@@ -499,6 +533,18 @@ class OrthancServerBase(SonadorBaseObject):
 		# Send update to server and retrieve updated instance
 		return sonador_dataobject_update(self, odata, *args, **kwargs)
 
+	def system_info(self, *args, **kwargs):
+		'''	Retrieve the configuration for the Sonador server
+		'''
+		r = self._request_get(
+			self.orthanc_apiurl('system'), 
+			error_msg=lambda r: request_client_error(
+				'Unable to retrieve configuration from PACS %s. Status code: %s.' % (self.server_label, r.status_code), r),
+			headers=self.orthanc_request_headers(headers=kwargs.get('headers', {})), **kwargs)
+
+		return r.json()
+
+
 
 # Orthanc DICOM Server Base Objects
 
@@ -511,8 +557,68 @@ class ImagingServerChildBaseObject(SonadorBaseObject):
 		self.resource_cache_lookup = kwargs.pop('rapid_lookup', None)
 		super().__init__(*args, **kwargs)
 
+		# If no PACS instance provided, but self.server is an OrthancServerBase, use self.server
+		# as self.pacs. This fixes an issue with some parent/child classes where the PACS instance
+		# is not always passed to the child instance correctly.
+		if self.pacs is None and isinstance(self.server, OrthancServerBase):
+			self.pacs = self.server
 
-class ImagingServerChildCollection(SonadorObjectCollection):
+
+class ImagingServerChildCollectionFetchMixin:
+	'''	Mixin class which can be used to add a "fetch" method to datamodel collections associated
+		with a PACS server.
+	'''
+	@classmethod
+	def fetch(cls, pacs, data_collection_endpoint=None, rkwargs=None, error_msg=None, **kwargs):
+		'''	Retrieve collection models
+		'''
+		rkwargs = rkwargs or {}
+
+		data_collection_endpoint = data_collection_endpoint or cls.fetch_endpoint
+		if not data_collection_endpoint:
+			raise ValueError('Invalid fetch endpoint: %s' % data_collection_endpoint)
+
+		verify = kwargs.pop('verify', None)
+		if verify is None:
+			verify = pacs.server.verify
+
+		if not error_msg:
+			error_msg = lambda r: request_client_error(
+				'Unable to retrieve model %s from PACS server %s. Status code: %s.' % (
+					cls.model.__name__, pacs.server_label, r.status_code
+				), r)
+
+		# Retrieve server data
+		r = pacs._request_get(
+			pacs.orthanc_apiurl(data_collection_endpoint), error_msg,
+			headers=pacs.orthanc_request_headers(headers=kwargs.get('headers')),
+			verify=verify, **rkwargs)
+
+		# Parse response and return collection
+		return pacs._init_dataclass(cls, r, **kwargs)
+
+	@classmethod
+	def fetch_modelinstance(cls, pacs, objectid, error_msg=None,
+			apiurl_callable='orthanc_apiurl', headers_callable='orthanc_request_headers', **kwargs):
+		'''	Retrieve 
+		'''
+		verify = kwargs.pop('verify', None)
+		if verify is None:
+			verify = pacs.server.verify
+
+		if not error_msg:
+			error_msg = lambda r: request_client_error(
+				'Unable to retrieve %s=%s from PACS server %s. Status code: %s' % (
+					cls.model.__name__, pacs.server_label, r.status_code
+				), r)
+
+		return fetch_sonador_dataobject(
+			pacs, cls.model, objectid, verify=verify, 
+			apiurl_callable=apiurl_callable, headers_callable=headers_callable,
+			error_msg=error_msg, fetch_callable=pacs._request_get, **kwargs)
+
+
+class ImagingServerChildCollection(ImagingServerChildCollectionFetchMixin, SonadorObjectCollection):
 	'''	Collection which can be used to work with data models associated
 		with Sonador managed PACS imaging servers
 	'''

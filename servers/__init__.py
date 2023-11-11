@@ -17,14 +17,16 @@ from client.utils.conversion import str2bool
 from client.errors import ClientOperationError, ConfigurationError
 from client.remote import RemoteServer, request_client_error
 
-from ..apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, \
+from ..apisettings import  DicomMetaKey, DicomHeaderData, \
+	IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, \
 	IMAGING_SERVER_RESOURCE_SERIES, IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_RESOURCE_SUPPORTED, \
-	DCMHEADER_MODALITY, DCM_MODALITY_SR, DCM_MODALITY_SEG, DCM_VERSION_2021b
+	DCMHEADER_MODALITY, DCM_MODALITY_SR, DCM_MODALITY_SEG, DCM_VERSION_2021b, DICOM_VR_DESCRIPTION
 from ..serialization import json_datetime_parser
 from ..helpers import request_client_error, fetch_sonador_session_token, API_ACCESS_TOKEN, OAUTH_TOKEN_RESPONSE_TYPE, \
 	OAUTH_TOKEN_IDTOKEN_RESPONSE_TYPE, OAUTH_ACCESS_TOKEN, OAUTH_TOKEN_TYPE, OAUTH_TOKEN_TYPE_BEARER, OAUTH_EXPIRATION
 from ..remote import SonadorBaseObject, SonadorObjectCollection, \
-	fetch_sonador_data_collection, fetch_sonador_dataobject, sonador_dataobject_update
+	fetch_sonador_data_collection, fetch_sonador_dataobject, \
+	sonador_dataobject_create, sonador_dataobject_update
 
 from .base import OrthancServerBase, ImagingServerChildBaseObject, ImagingServerChildCollection
 from .dicom import ImagingServerModalityMixin, DicomImagingModality, DicomImagingModalityCollection, \
@@ -101,7 +103,7 @@ class SonadorServer(RemoteServer):
 		return build_url(self.scheme, self.netloc,
 			guru_auth.create_signed_url(self.access_id, self.secret_key, resource_endpoint, **url_kwargs))
 
-	def request_headers(self, headers=None):
+	def request_headers(self, headers=None, **kwargs):
 		''' Add headers to a Sonador API request. If an API token is used to access Sonador
 			resources, the token and corresponding heder are added to the dictionary.
 
@@ -128,7 +130,19 @@ class SonadorServer(RemoteServer):
 		'''
 		return self.request_headers(*args, **kwargs)
 
-	def get_imageserver(self, uid, verify=None, imageserver_datamodel_class=None, **kwargs):
+	def verify_ssl(self, *args, verify=None, **kwargs):
+		'''	Reads the provided keyword arguments and determines the correct value for the `verify` argument
+			of remote callable functions. If verify is provided as None, the verify SSL value from the server
+			instance is used as a default.
+
+			@returns bool: True if SSL connections should be validated
+		'''
+		if verify is None:
+			verify = self.verify
+
+		return verify
+
+	def get_imageserver(self, uid, imageserver_datamodel_class=None, **kwargs):
 		'''	Retrieve model data for the specified Imaging/PACS server
 
 			@input uid (str): Sonador UID/pk for the imaging server.
@@ -137,17 +151,14 @@ class SonadorServer(RemoteServer):
 				the default setting included in the Sonador server will be used.
 			
 			@returns SonadorImagingServer model instance
-		'''
-		from ..remote import fetch_sonador_dataobject
+		'''		
 		if imageserver_datamodel_class is None:
 			imageserver_datamodel_class = SonadorImagingServer
-		
-		if verify is None:
-			verify = self.verify
 
-		return fetch_sonador_dataobject(self, imageserver_datamodel_class, uid, verify=verify, **kwargs)
+		return fetch_sonador_dataobject(self, imageserver_datamodel_class, uid, verify=self.verify_ssl(**kwargs), 
+			**omit(kwargs, ('verify',)))
 
-	def get_gateway(self, uid, verify=None, gateway_datamodel_class=None):
+	def get_gateway(self, uid, gateway_datamodel_class=None, **kwargs):
 		'''	Retrieve model data for the specified Clinical Gateway
 
 			@input uid (str): Sonador UID/pk for the clinical gateway
@@ -161,12 +172,10 @@ class SonadorServer(RemoteServer):
 			from .devices import ClinicalGateway
 			gateway_datamodel_class = ClinicalGateway
 
-		if verify is None:
-			verify = self.verify
+		return fetch_sonador_dataobject(self, gateway_datamodel_class, uid, verify=self.verify_ssl(**kwargs),
+			**omit(kwargs, ('verify', )))
 
-		return fetch_sonador_dataobject(self, gateway_datamodel_class, uid, verify=verify)
-
-	def get_dataservice(self, uid, verify=None, dataservice_datamodel_class=None):
+	def get_dataservice(self, uid, dataservice_datamodel_class=None):
 		'''	Retrieve model data for the specified Data Service
 
 			@input uid (str): Sonador UID/pk for the data service
@@ -180,31 +189,65 @@ class SonadorServer(RemoteServer):
 		from ..services import DataService
 		
 		dataservice_datamodel_class = dataservice_datamodel_class or DataService
-		if verify is None:
-			verify = self.verify
 		
-		return fetch_sonador_dataobject(self, dataservice_datamodel_class, uid, verify=verify)
+		return fetch_sonador_dataobject(self, dataservice_datamodel_class, uid, 
+			verify=self.verify_ssl(**kwargs), **omit(kwargs, ('verify',)))
 
-	def get_session_token(self, verify=None, *args, **kwargs):
+	def get_session_token(self, *args, **kwargs):
 		'''	Retrieve a session token using the provided acess ID/secret
 		'''
-		if verify is None:
-			verify = self.verify
-		
-		return fetch_sonador_session_token(self, verify=verify)
+		return fetch_sonador_session_token(self, verify=self.verify_ssl(**kwargs))
 
-	def fetch_imageservers(self, *args, verify=None, imageserver_collection_class=None, **kwargs):
+	def fetch_imageservers(self, *args, imageserver_collection_class=None, **kwargs):
 		''' Retrieve collection of PACS servers for a given Sonador instance
 		'''
-		from ..remote import fetch_sonador_data_collection
 		if imageserver_collection_class is None:
 			imageserver_collection_class = SonadorImagingServerCollection
 
-		if verify is None:
-			verify = self.verify
-
 		return fetch_sonador_data_collection(
-			self, imageserver_collection_class, *args, verify=verify, **kwargs)
+			self, imageserver_collection_class, *args, verify=self.verify_ssl(**kwargs), **omit(kwargs, ('verify',)))
+
+	def fetch_user_apiaccess_credentials(self, *args, credential_class=None, **kwargs):
+		'''	Retrieve secure API access credentials for the user. (User identity is taken from the
+			Sonador server Access ID/secret or active auth token.)
+		'''		
+		if credential_class is None:
+			from .auth import SonadorSecureApiCredentialCollection
+			credential_class = SonadorSecureApiCredentialCollection
+
+		return fetch_sonador_data_collection(self, credential_class, *args, 
+			verify=self.verify_ssl(**kwargs), **omit(kwargs, ('verify',)))
+
+	def create_user_apiaccess_credential(self, object_data=None, credential_class=None, **kwargs):
+		'''	Create API access credential for the user
+		'''
+		if credential_class is None:
+			from .auth import SonadorSecureApiCredential
+			credential_class = SonadorSecureApiCredential
+
+		return sonador_dataobject_create(self, credential_class, object_data or {}, 
+			verify=self.verify_ssl(**kwargs), **omit(kwargs, ('verify',)))
+
+	def fetch_user_apitokens(self, object_data=None, credential_class=None, **kwargs):
+		'''	Retrieve API access tokens for the user. (User identity is taken from the Sonador server Access ID/secret
+			or the active auth token.)
+		'''
+		if credential_class is None:
+			from .auth import SonadorApiTokenCollection
+			credential_class = SonadorApiTokenCollection
+
+		return fetch_sonador_data_collection(self, credential_class, verify=self.verify_ssl(**kwargs), 
+			**omit(kwargs, ('verify',)))
+
+	def create_user_apitoken(self, object_data=None, credential_class=None, **kwargs):
+		'''	Create an API access token for the user
+		'''
+		if credential_class is None:
+			from .auth import SonadorApiToken
+			credential_class = SonadorApiToken
+		
+		return sonador_dataobject_create(self, credential_class, object_data or {}, \
+			verify=self.verify_ssl(**kwargs), **omit(kwargs, ('verify',)))
 
 
 class SonadorImagingServer(OrthancServerBase):
@@ -214,7 +257,7 @@ class SonadorImagingServer(OrthancServerBase):
 	tabulate_output_columns = IMAGING_SERVER_OUTPUT_COLUMNS
 	tools_endpoint = 'tools'
 
-	def _request_get(self, resource_endpoint, error_msg, headers=None, verify=None, **kwargs):
+	def _request_get(self, resource_endpoint, error_msg=None, headers=None, verify=None, **kwargs):
 		''' Send a GET request to the imaging server. Raises an exception with the provided error message
 			if the request could not be completed successfully.
 
@@ -229,12 +272,20 @@ class SonadorImagingServer(OrthancServerBase):
 
 		r = requests.get(resource_endpoint, headers=headers, verify=verify, **kwargs)
 		if not r.ok:
-			if callable(error_msg): error_msg(r)
-			else: request_client_error(error_msg, r)
+
+			# Custom error message
+			if error_msg:
+				if callable(error_msg): error_msg(r)
+				else: request_client_error(error_msg, r)
+
+			else:
+				request_client_error('Unable to execute GET request to %s due to an error. Status code: %s'  % (
+					resource_endpoint, r.status_code,
+				), r)
 
 		return r
 
-	def _request_post(self, resource_endpoint, error_msg, headers=None, verify=None, **kwargs):
+	def _request_post(self, resource_endpoint, error_msg=None, headers=None, verify=None, **kwargs):
 		'''	Send a POST request to the imaging server. Raises an exception with the provided error message
 			if the request could not be completed successfully.
 
@@ -245,12 +296,20 @@ class SonadorImagingServer(OrthancServerBase):
 
 		r = requests.post(resource_endpoint, headers=headers, verify=verify, **kwargs)
 		if not r.ok:
-			if callable(error_msg): error_msg(r)
-			else: request_client_error(error_msg, r)
+
+			# Custom error message
+			if error_msg:
+				if callable(error_msg): error_msg(r)
+				else: request_client_error(error_msg, r)
+
+			else:
+				request_client_error('Unable to execute POST request to %s due to an error. Status code: %s'  % (
+					resource_endpoint, r.status_code,
+				), r)
 
 		return r
 
-	def _request_delete(self, resource_endpoint, error_msg, headers=None, verify=None, **kwargs):
+	def _request_delete(self, resource_endpoint, error_msg=None, headers=None, verify=None, **kwargs):
 		'''	Send a DELETE request to the imaging server. Raises an exception with the provided error message
 			if the request could not be completed successfully.
 
@@ -261,8 +320,40 @@ class SonadorImagingServer(OrthancServerBase):
 
 		r = requests.delete(resource_endpoint, headers=headers, verify=verify, **kwargs)
 		if not r.ok:
-			if callable(error_msg): error_msg(r)
-			else: request_client_error(error_msg, r)
+
+			# Custom error message
+			if error_msg:
+				if callable(error_msg): error_msg(r)
+				else: request_client_error(error_msg, r)
+
+			else:
+				request_client_error('Unable to execute DELETE request to %s due to an error. Status code: %s'  % (
+					resource_endpoint, r.status_code,
+				), r)
+
+		return r
+
+	def _request_put(self, resource_endpoint, error_msg=None, headers=None, verify=None, **kwargs):
+		'''	Send a PUT request to the imaging server. Raises an exception with the provided error message
+			if the request could not be completed successfully.
+
+			@returns request.Response or JSON object (dict/array)
+		'''
+		if verify is None:
+			verify= self.server.verify
+
+		r = requests.put(resource_endpoint, headers=headers, verify=verify, **kwargs)
+		if not r.ok:
+
+			# Custom error message
+			if error_msg:
+				if callable(error_msg): error_msg(r)
+				else: request_client_error(error_msg, r)
+
+			else:
+				request_client_error('Unable to execute PUT request to %s due to an error. Status code: %s'  % (
+					resource_endpoint, r.status_code,
+				), r)
 
 		return r
 
@@ -642,20 +733,45 @@ class SonadorImagingServer(OrthancServerBase):
 		rdata = super().update(odata, *args, **kwargs)
 		return self.server.get_imageserver(self.pk)
 
-	def connection_state(self, *args, headers=None, verify=None, **kwargs):
+	def connection_state(self, *args, headers=None, **kwargs):
 		'''	Retrieve the connection state for the server
 		'''
-		if verify is None:
-			verify = self.server.verify
-
-		rstatus = self._request_get(
+		return self._request_get(
 			self.orthanc_apiurl('/system/status'), 
 			lambda r: request_client_error(
 				'Unable to retrieve connection status for server %s. Status code: %s.' % (self.server_label, r.status_code),
 				r),
-			headers=self.orthanc_request_headers(headers=headers), verify=verify)
+			headers=self.orthanc_request_headers(headers=headers), **kwargs)
 
-		return rstatus	
+	def cache_dcm_tags(self, *args, headers=None, sep=',', **kwargs):
+		'''	Retrieve list of DICOM tags configured for the server
+		'''
+		dcmtags = kwargs.get('dcmtags') or OrderedDict()
+
+		rtags = self._request_get(
+			self.orthanc_apiurl('/cache/dcm-tags'),
+			lambda r: request_client_error(
+				'Unable to retrieve DICOM tags for server %s. Status code: %s.' % (self.server_label, r.status_code),
+				r),
+			headers=self.orthanc_request_headers(headers=headers), **kwargs)
+
+		# Unpack DICOM tag data
+		for rtype, rtags in rtags.json().items():
+			for code,dcm in rtags.items():
+
+				# Convert DCM code to tuple (follow pydicom convention)
+				_code = tuple(code.split(sep)) if sep in code else code
+				if not isinstance(_code, tuple):
+					raise ValueError('Invalid DICOM code: %s' % _code)
+
+				# Retrieve VR
+				_vr = DICOM_VR_DESCRIPTION.get(dcm.get('vr', {}).get('code'))
+				if not _vr:
+					raise ValueError('Invalid DICOM VR: %s' % _vr)
+				
+				dcmtags[_code] = (rtype, DicomHeaderData(dcm.get('tag'), _code, int(_code[1], 16), _vr))
+
+		return dcmtags
 
 
 class SonadorImagingServerCollection(SonadorObjectCollection):
