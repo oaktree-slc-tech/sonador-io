@@ -175,7 +175,7 @@ class SonadorServer(RemoteServer):
 		return fetch_sonador_dataobject(self, gateway_datamodel_class, uid, verify=self.verify_ssl(**kwargs),
 			**omit(kwargs, ('verify', )))
 
-	def get_dataservice(self, uid, dataservice_datamodel_class=None):
+	def get_dataservice(self, uid, dataservice_datamodel_class=None, **kwargs):
 		'''	Retrieve model data for the specified Data Service
 
 			@input uid (str): Sonador UID/pk for the data service

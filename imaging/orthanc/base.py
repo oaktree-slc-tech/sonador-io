@@ -30,7 +30,7 @@ from ...apisettings import ImageCoord, ImageSpacing, ImageOrientation, ImageStac
 	DCMHEADER_IMAGE_POSITION_PATIENT, DCMHEADER_IMAGE_ORIENTATION_PATIENT, DCM_DATE_STRFORMAT, DCM_TIME_STRFORMAT, \
 	DCMHEADER_MODALITY, DCMHEADER_STUDY_INSTANCE_UID, DCMHEADER_STUDY_ID, \
 	DCMHEADER_STUDY_DATE, DCMHEADER_STUDY_TIME, \
-	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SERIES_NUMBER, \
+	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SERIES_NUMBER, DCMHEADER_OPERATORS_NAME, \
 	DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME, DCMHEADER_SERIES_DESCRIPTION, DCMHEADER_PATIENT_POSITION, \
 	DCMHEADER_SLICE_THICKNESS, DCMHEADER_SLICE_LOCATION, DCMHEADER_PIXEL_SPACING, \
 	DCMHEADER_BODY_PART_EXAMINED, DCM_VERSION_2021b, \
@@ -1278,6 +1278,17 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 	@property
 	def body_part(self):
 		return self.dicomdata.get(DCMHEADER_BODY_PART_EXAMINED)
+
+	@property
+	def operator_name(self):
+		'''	Name of 
+		'''
+		return self.dicomdata.get(DCMHEADER_OPERATORS_NAME)
+
+	@property
+	def operator_name_vr(self):
+		if self.operator_name:
+			return str2name(self.operator_name)
 
 	@property
 	@abstractmethod
