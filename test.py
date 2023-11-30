@@ -61,10 +61,8 @@ class SonadorBaseTestCase(unittest.TestCase):
 		if iserverid is None:
 			raise ValueError('Invalid imaging server ID: "%s". Imaging server environment variable ("%s"): "%s".'
 				% (iserverid, SONADOR_IMAGING_SERVER, os.environ.get(SONADOR_IMAGING_SERVER)))
-
-		sconn = initenv_sonador_server(*args, **kwargs)
-		iserver = sconn.get_imageserver(
-			kwargs.get('iserverid') or os.environ.get(SONADOR_IMAGING_SERVER))
+		
+		iserver = self.getSonadorConnection(*args, **kwargs).get_imageserver(iserverid)
 		return iserver
 	
 	def cleanupImageUpload(self, iserver, hcache, remove_study=False):

@@ -11,10 +11,10 @@ from ..apisettings.media import DCMEDIA_ENCAPSULATED_PDF_SOP_CLASS, DCMEDIA_PDF_
 	DCMEDIA_ENCAPSULATED_STL_SOP_CLASS, DCMEDIA_ENCAPSULATED_STL_SOP_CLASS_CT,  \
 	DCMEDIA_ENCAPSULATED_STL_SOP_CLASS_MRI, DCMEDIA_SUPPORTED_STL_SOP_CLASSES, \
 		DCMEDIA_STL_MIMETPYE, DCMEDIA_STL_MODALITY
+from ..imaging.helpers.conversion import dcm_encode_filedata
 
 
-def dcm_encode_media(mediafile_meta, media_file, dcm_attrs=None, dcm_preamble=b'\0'*128,
-		dcm_little_endian=True, dcm_implicit_vr=True, dcm_ts=None):
+def dcm_encode_media(mediafile_meta, media_file, dcm_attrs=None, **kwargs):
 	'''	Create a DICOM file from the provided meta and file
 
 		@input mediafile_meta (pydicom.dataset.Dataset): file metadata (refer to SOP module of the DICOM standard)
@@ -25,67 +25,8 @@ def dcm_encode_media(mediafile_meta, media_file, dcm_attrs=None, dcm_preamble=b'
 	'''
 	dcm_attrs = dcm_attrs or {}
 
-	# Retrieve the SOP class UID and media storage SOP class UID. 
-	# The encoding method looks for the following attributes for a value (in order of preference):
-	# * SOPClassUID from the dcm_attrs dictionary
-	# * MediaStorageSOPClassUID from the media metadata
-	sopclass_uid = dcm_attrs.pop(DCMHEADER_SOP_CLASS_UID, None) \
-		or getattr(mediafile_meta, DCMHEADER_MEDIA_STORAGE_SOP_CLASS_UID, None)
-	sopclass_media_uid = getattr(mediafile_meta, DCMHEADER_MEDIA_STORAGE_SOP_CLASS_UID, None) or sopclass_uid
-
-	if not sopclass_uid:
-		raise ValueError('Invalid SOPClassUID or MediaStorageSOPClassUID. Please provide '
-			+ 'a valid UID via the file or file metadata attributes.')
-
-	# Ensure that the SOP class UID and SOP class media UID match
-	if not sopclass_uid == sopclass_media_uid:
-		raise ValueError('SOPClassUID does not match the provided MediaStorageSOPClassUID')
-
-	# Apply SOP class media UID to media meta (if the SOP class it not already set)
-	if not getattr(mediafile_meta, DCMHEADER_MEDIA_STORAGE_SOP_CLASS_UID, None):
-		setattr(mediafile_meta, DCMHEADER_MEDIA_STORAGE_SOP_CLASS_UID, sopclass_media_uid)
-
-	# Retrieve implementation class UID from media attributes or use PyDICOM implementation UID as fallback
-	sop_implementation_uid = getattr(mediafile_meta, DCMHEADER_IMPLEMENTATION_CLASS_UID, None) \
-		or pydicom.uid.PYDICOM_IMPLEMENTATION_UID
-	if not getattr(mediafile_meta, DCMHEADER_IMPLEMENTATION_CLASS_UID, None):
-		setattr(mediafile_meta, DCMHEADER_IMPLEMENTATION_CLASS_UID, sop_implementation_uid)
-
-	# Retrieve instance UID. If not instance UID exists, one will be created.
-	# The encoding looks for values using the folling attributes (in order of preference):
-	# * SOPInstanceUID from the dcm_attrs dictionary
-	# * MediaStorageSOPInstanceUID from the media metadata
-	sop_instance_uid = dcm_attrs.get(DCMHEADER_SOP_INSTANCE_UID) \
-		or getattr(mediafile_meta, DCMHEADER_MEDIA_STORAGE_SOP_INSTANCE_UID, None)
-	sop_media_uid = getattr(mediafile_meta, DCMHEADER_MEDIA_STORAGE_SOP_INSTANCE_UID, None) or sop_instance_uid
-
-	# Ensure that the SOP instance UID and the media UID are the same
-	if not sop_instance_uid == sop_media_uid:
-		raise ValueError('SOPInstanceUID does not match the provided MediaStorageSOPInstanceUID')
-	if not sop_instance_uid:
-		sop_instance_uid = sop_media_uid = generate_uid()
-
-	# Apply SOP media UID
-	if not getattr(mediafile_meta, DCMHEADER_MEDIA_STORAGE_SOP_INSTANCE_UID, None):
-		setattr(mediafile_meta, DCMHEADER_MEDIA_STORAGE_SOP_INSTANCE_UID, sop_media_uid)
-
-	# Create file dataset from meta
-	ds = FileDataset(media_file, {}, file_meta=mediafile_meta, preamble=dcm_preamble)
-	ds.is_little_endian = dcm_little_endian
-	ds.is_implicit_VR = dcm_implicit_vr
-
-	# Media timestamp
-	ts = dcm_ts or datetime.datetime.now()
-	ds.ContentDate = ts.strftime(DCM_DATE_STRFORMAT)
-	ds.ContentTime = ts.strftime(DCM_TIME_STRFORMAT)
-
-	# Add identifiers to file
-	setattr(ds, DCMHEADER_SOP_CLASS_UID, sopclass_uid)
-	setattr(ds, DCMHEADER_SOP_INSTANCE_UID, sop_instance_uid)
-
-	# Add media file attributes
-	for dcm_key, dcm_val in dcm_attrs.items():
-		setattr(ds, dcm_key, dcm_val)
+	# Encode base DICOM file metadata and dataset structure
+	ds = dcm_encode_filedata(dcm_attrs, dcm_file=media_file, dcmfile_meta=mediafile_meta, **kwargs)
 
 	# Add file and mimetype to encapsulated document
 	ds.EncapsulatedDocument = media_file.read()
