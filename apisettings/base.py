@@ -48,7 +48,7 @@ from highdicom.sr.templates import Code, CodedConcept, MeasurementsAndQualitativ
 	DEFAULT_LANGUAGE as DCMSR_DEFAULT_LANGUAGE
 from highdicom.sr.value_types import ContainerContentItem, CodeContentItem, TextContentItem, NumContentItem
 
-from client.utils.object import pick, omit
+from client.utils.object import pick, omit, gextend
 from client.utils.colors import RGB
 from client.utils.microservices import JsonBaseObject, JsonObjectCollection
 
@@ -98,6 +98,12 @@ class DicomMeta:
 		self.description = description
 		self.modality = modality
 		self.meta = meta
+
+	def __str__(self):
+		return "%s(description='%s', modality='%s')" % (type(self).__name__, self.description, self.modality)
+
+	def __repr__(self):
+		return str(self)
 
 
 # DICOM Header Definition
@@ -243,6 +249,7 @@ DCM_QUERY_NOT_NULL = '!%s' % DCM_QUERY_NULL
 
 
 # DICOM Header Definitions
+DCM_PREAMBLE = b'\0'*128
 
 DCMCODE_SPECIFIC_CHARSET = ('0008', '0005')
 DCMHEADER_SPECIFIC_CHARSET = 'SpecificCharacterSet'
@@ -258,9 +265,55 @@ DCMHEADER_SOP_INSTANCE_UID = 'SOPInstanceUID'
 
 DCMHEADER_MEDIA_STORAGE_SOP_CLASS_UID = 'MediaStorageSOPClassUID'
 
+# Secondary capture specifies images that are converted from anon-DICOM format to a modality independent DICOM Format.
+# Refer to https://dicom.nema.org/dicom/2013/output/chtml/part03/sect_A.8.html.
+DCM_MEDIA_STORAGE_SECONDARY_CAPTURE = '1.2.840.10008.5.1.4.1.1.7'
+
 DCMHEADER_MEDIA_STORAGE_SOP_INSTANCE_UID = 'MediaStorageSOPInstanceUID'
 
 DCMHEADER_IMPLEMENTATION_CLASS_UID = 'ImplementationClassUID'
+
+DCMHEADER_TRANSFER_SYNTAX_UID = 'TransferSyntaxUID'
+
+
+# DICOM Image Profiles
+
+DCMHEADER_PHOTOMETRIC_INTERPRETATION = 'PhotometricInterpretation'
+DCM_PHOTOMETRIC_INTERPRETATION_MONOCHROME = 'MONOCHROME2'
+DCM_PHOTOMETRIC_INTERPRETATION_RGB = 'RGB'
+
+DCMHEADER_PIXEL_REPRESENTATION = 'PixelRepresentation'
+DCMHEADER_PLANAR_CONFIGURATION = 'PlanarConfiguration'
+DCMHEADER_SAMPLES_PER_PIXEL = 'SamplesPerPixel'
+DCMHEADER_HIGH_BIT = 'HighBit'
+DCMHEADER_BITS_STORED = 'BitsStored'
+DCMHEADER_BITS_ALLOCATED = 'BitsAllocated'
+
+DCMHEADER_IMG_PIXELDATA = 'PixelData'
+DCMHEADER_IMG_ROWS = 'Rows'
+DCMHEADER_IMG_COLS = 'Columns'
+
+# DICOM Image Profiles
+DCM_IMG_PROFILE_UNSIGNED_INT = { DCMHEADER_PIXEL_REPRESENTATION: 0}
+DCM_IMG_PROFILE_SIGNED_INT = { DCMHEADER_PIXEL_REPRESENTATION: 1 }
+DCM_IMG_PROFILE_8BIT = { DCMHEADER_HIGH_BIT: 7, DCMHEADER_BITS_STORED: 8, DCMHEADER_BITS_ALLOCATED: 8 }
+DCM_IMG_PROFILE_16BIT = { DCMHEADER_HIGH_BIT: 15, DCMHEADER_BITS_STORED: 16, DCMHEADER_BITS_ALLOCATED: 16 }
+DCM_IMG_PROFILE_32BIT = { DCMHEADER_HIGH_BIT: 31, DCMHEADER_BITS_STORED: 32, DCMHEADER_BITS_ALLOCATED: 32 }
+DCM_IMG_PROFILE_64BIT = { DCMHEADER_HIGH_BIT: 63, DCMHEADER_BITS_STORED: 64, DCMHEADER_BITS_ALLOCATED: 64 }
+
+DCM_SUPPORTED_IMG_DTYPES = {
+	'uint8': gextend({}, DCM_IMG_PROFILE_UNSIGNED_INT, DCM_IMG_PROFILE_8BIT),
+	'uint16': gextend({}, DCM_IMG_PROFILE_UNSIGNED_INT, DCM_IMG_PROFILE_16BIT),
+	'uint32': gextend({}, DCM_IMG_PROFILE_UNSIGNED_INT, DCM_IMG_PROFILE_32BIT),
+	'uint64': gextend({}, DCM_IMG_PROFILE_UNSIGNED_INT, DCM_IMG_PROFILE_64BIT),
+	'int8': gextend({}, DCM_IMG_PROFILE_SIGNED_INT, DCM_IMG_PROFILE_8BIT),
+	'int16': gextend({}, DCM_IMG_PROFILE_SIGNED_INT, DCM_IMG_PROFILE_16BIT),
+	'int32': gextend({}, DCM_IMG_PROFILE_SIGNED_INT, DCM_IMG_PROFILE_32BIT),
+	'int64': gextend({}, DCM_IMG_PROFILE_SIGNED_INT, DCM_IMG_PROFILE_64BIT),
+}
+
+
+# DICOM Patient Meta
 
 DCMCODE_PATIENT_ID = ('0010', '0020')
 DCMHEADER_PATIENT_ID = 'PatientID'
@@ -286,8 +339,14 @@ DCMHEADER_PATIENT_OTHERIDS = 'OtherPatientIDs'
 DCMHEADER_RESPONSIBLE_PERSON = 'ResponsiblePerson'
 DCMHEADER_RESPONSIBLE_PERSON_ROLE = 'ResponsiblePersonRole'
 
+
+# Encounter/Service Episode
+
 DCMCODE_SERVICE_EPISODE_ID = ('0038', '0060')
 DCMHEADER_SERVICE_EPISODE_ID = 'ServiceEpisodeID'
+
+
+# DICOM Study Meta
 
 DCMCODE_STUDY_INSTANCE_UID = ('0020', '000D')
 DCMHEADER_STUDY_INSTANCE_UID = 'StudyInstanceUID'
@@ -309,6 +368,9 @@ DCMHEADER_ACCESSION_NUMBER = 'AccessionNumber'
 
 DCMCODE_STUDY_DESCRIPTION = ('0008', '1030')
 DCMHEADER_STUDY_DESCRIPTION = 'StudyDescription'
+
+
+# DICOM Series Meta
 
 DCMCODE_SERIES_INSTANCE_UID = ('0020', '000e')
 DCMHEADER_SERIES_INSTANCE_UID = 'SeriesInstanceUID'
@@ -1545,3 +1607,9 @@ DICOM_VR_DESCRIPTION = OrderedDict((
 		DICOM_VR_UV, 'Unsigned 64-bit Very Long', 
 			'''Unsigned binary integer 64 bits long. Represents an integer n in the range: 0 <= n < 2**64.'''.replace('\n', '').replace('\t', ''))),
 ))
+
+
+
+IMG_FORMAT_JPEG = 'jpeg'
+IMG_FORMAT_TIFF = 'tiff'
+IMG_FORMAT_PNG = 'png'

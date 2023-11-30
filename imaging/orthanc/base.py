@@ -22,7 +22,7 @@ from client.utils.microservices import server_controloperation_json_response, Re
 from client.utils.colors import RGB
 
 from ...apisettings import ImageCoord, ImageSpacing, ImageOrientation, ImageStackShape, \
-	RGBColor, LABColor, XYZColor, EUCLID_COORD_ORIGIN, DicomDatetimePairKey, DicomDatetimePair, \
+	RGBColor, LABColor, XYZColor, EUCLID_COORD_ORIGIN, DicomDatetimePairKey, DicomDatetimePair, DicomMetaKey, DicomMeta, \
 	IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
 	IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_LAST_UPDATE, IMAGING_SERVER_DICOMTAGS_SIGNATURE, \
 	DCMHEADER_PATIENT_ID, DCMHEADER_PATIENT_NAME, \
@@ -624,6 +624,20 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		self._sts = DicomDatetimePair(self.study_datestr, self.study_timestr, meta=DCMTS_STUDY)
 
 	@property
+	@functools.lru_cache()
+	def hmeta_key(self):
+		'''	Study metadata key: resource, UID header, and DICOM UID
+		'''
+		return DicomMetaKey(IMAGING_SERVER_RESOURCE_STUDY, DCMHEADER_STUDY_INSTANCE_UID, self.study_uid)
+
+	@property
+	@functools.lru_cache()
+	def hmeta(self):
+		'''	Study metadata: description
+		'''
+		return DicomMeta(self.description, None, meta=self.hmeta_key)
+
+	@property
 	def resource_url(self):
 		return posixpath.join(self.fetch_endpoint, self.pk)
 
@@ -1153,6 +1167,22 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 		self._sts = DicomDatetimePair(self.series_datestr, self.series_timestr, meta=DCMTS_SERIES)
 
 	@property
+	@functools.lru_cache()
+	def hmeta_key(self):
+		'''	Series metadata key: resource, UID header, and DICOM UID
+
+			@returns DicomMeta
+		'''
+		return DicomMetaKey(IMAGING_SERVER_RESOURCE_SERIES, DCMHEADER_SERIES_INSTANCE_UID, self.series_uid)
+
+	@property
+	@functools.lru_cache()
+	def hmeta(self):
+		'''	Series metadata: description, modality
+		'''
+		return DicomMeta(self.description, self.modality, meta=self.hmeta_key)
+
+	@property
 	def resource_url(self):
 		return posixpath.join(self.fetch_endpoint, self.pk)
 
@@ -1228,6 +1258,10 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 	@property
 	def series_number(self):
 		return self.dicomdata.get(DCMHEADER_SERIES_NUMBER)
+
+	@property
+	def number(self):
+		return int(self.series_number) if self.series_number else None
 
 	@property
 	def series_datestr(self):
@@ -1605,6 +1639,10 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 	@property
 	def instance_number(self):
 		return self.dicomdata.get(DCMHEADER_INSTANCE_NUMBER)
+
+	@property
+	def number(self):
+		return int(self.instance_number) if self.instance_number is not None else None
 
 	@property
 	def description(self):

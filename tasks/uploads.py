@@ -22,7 +22,7 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 		verify=False, fileupload_check=False, destfolder_complete=None,
 		dcm_extensions=DCM_EXTENSIONS_DEFAULT, ignore_errors=False,
 		callback_preupload=None, callback_postupload=None, 
-		callback_onerror=None, callback_onduplicate=None, dry_run=False):
+		callback_onerror=None, callback_onduplicate=None, dry_run=False, hcache=None):
 	'''	Scan folders and upload all DICOM images to the provided imaging servers
 
 		@input iserver (SonadorImagingServer instance): Imaging server to which the
@@ -76,7 +76,7 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 	tpool = tpool or ThreadPoolExecutor(max_workers=threads)
 
 	# Cache of image metadata for files processed
-	hcache = OrderedDict()
+	hcache = hcache if isinstance(hcache, (OrderedDict, dict)) else OrderedDict()
 	fcount = 0
 	
 	if destfolder_complete and not os.path.exists(destfolder_complete):
