@@ -59,7 +59,7 @@ class SonadorObjectCollection(GuruObjectCollection):
 	def __init__(self, *args, **kwargs):
 		self._model_lookup = kwargs.pop('lookup', {})
 		if kwargs:
-			print('Args: %s. Keyword args: %s.' % (args, kwargs))
+			logger.debug('Args: %s. Keyword args: %s.' % (args, kwargs))
 		super().__init__(*args, **kwargs)
 
 	def _init_empty_collection(self, *args, **kwargs):
