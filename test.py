@@ -1,11 +1,12 @@
-import os, logging, unittest, pkgutil
+import os, logging, unittest, pkgutil, contextlib
 
 from client.utils.conversion import str2bool
 
 from .helpers import initenv_sonador_server
 from .servers import sonador_apitoken_fetch
 from .apisettings import SONADOR_IMAGING_SERVER, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
-	SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, SONADOR_INTERNAL_DNS
+	SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, SONADOR_INTERNAL_DNS, SONADOR_VERIFY_SSL
+from .tasks.uploads import imageserver_upload_archive
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class SonadorBaseTestCase(unittest.TestCase):
 	'''
 
 	def initenv_sonador_server(self, sonador_url=None, access_id=None, secret_key=None, apitoken=None,
-							   internal_dns=None, **kwargs):
+							   internal_dns=None, verify_ssl=None, **kwargs):
 		''' Initialize Sonador Server connection. The method reads the standard Sonador environment
 			variables for default arguments. If the environment variable is not defined, the default
 			for the argument will be None.
@@ -46,10 +47,11 @@ class SonadorBaseTestCase(unittest.TestCase):
 		secret_key = secret_key or os.environ.get(SONADOR_SECRET_KEY)
 		apitoken = apitoken or os.environ.get(SONADOR_APITOKEN)
 		internal_dns = internal_dns or str2bool(os.environ.get(SONADOR_INTERNAL_DNS))
+		verify_ssl = verify_ssl or str2bool(os.environ.get(SONADOR_VERIFY_SSL))
 
 		from .servers import SonadorServer
 		return SonadorServer(sonador_url, access_id=access_id, secret_key=secret_key, apitoken=apitoken,
-			internal_dns=internal_dns, **kwargs)
+			internal_dns=internal_dns, verify=verify_ssl, **kwargs)
 
 	def getSonadorConnection(self, *args, **kwargs):
 		return self.initenv_sonador_server(*args, **kwargs)
@@ -100,3 +102,50 @@ class SonadorBaseTestCase(unittest.TestCase):
 					try: r.delete()
 					except Exception as err:
 						logger.info('Unable to remove series "%s". Error:\n%s' % (r.pk, err))
+
+	@contextlib.contextmanager
+	def stageImageArchiveTestData(self, iserver, afile, *args, **kwargs):
+		'''	Context manager: upload the provided archive file to Sonador. Removes the staged image data
+			on exit. Yields the header cache.
+		'''
+		try:
+			# Upload archive data to Sonador
+			hcache, _ = imageserver_upload_archive(iserver, afile)
+			yield hcache
+
+		# Remove all series added to the server
+		finally: self.cleanupImageUpload(iserver, hcache)
+
+
+class SonadorSeriesBaseTestCase(SonadorBaseTestCase):
+	'''	Unit Test case with helper methods for working with Sonador series data
+	'''
+	@contextlib.contextmanager
+	def stageImageArchiveSeries(self, iserver, afile, rapid_lookup=False, *args, **kwargs):
+		'''	Stage a single series from an archive file for a test case. Removes the staged image data
+			on exit. If multiple series are found in the archive file, only the first instance is provided.
+			Yields the first series instance and the header cache.
+		'''
+		with self.stageImageArchiveTestData(iserver, afile, *args, **kwargs) as hcache:
+
+			if len(hcache) == 0:
+				raise ValueError('Unable to locate imaging series in zipfile.')
+
+			# Iterate through items n
+			sx = None
+			for hkey, hmeta in hcache.items():
+
+				if hkey.resource == IMAGING_SERVER_RESOURCE_SERIES:
+
+					# Retrieve sereis from the server
+					results = iserver.query({ hkey.header: hkey.uid }, resource=hkey.resource, rapid_lookup=rapid_lookup)
+					self.assertEqual(len(results), 1, msg=('Unable to retrieve match for resource (%s) %s=%s' if len(results) == 0
+						else 'Retrieved more than a single match for resource (%s) %s=%s') % (hkey.resource, hkey.header, hkey.uid))
+					sx = results[0]
+
+					break
+
+			if sx is None:
+				raise ValueError('Unable to retrieve an imaging series from Sonador for the test.')
+
+			yield (sx, hcache)

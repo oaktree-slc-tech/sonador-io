@@ -66,7 +66,7 @@ class SonadorServer(RemoteServer):
 			@input localenv (key/value pairs, default=empty dict): key/value pairs
 				which provide information about the local environment where the Sonador server instance
 				was initialized.
-		'''
+		'''		
 		self.internal_dns = internal_dns
 		
 		# Auth: API token and token type

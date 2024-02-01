@@ -336,7 +336,7 @@ def sonador_dataobject_create(server, datamodel_class, object_data, verify=False
 
 def sonador_dataobject_update(datamodel_instance, object_data, dataobject_endpoint=None, verify=False,
 		server=None, apiurl_callable='sonador_apiurl', headers_callable='sonador_request_headers', headers=None,
-		rkwargs=None, update_callable=requests.put, error_msg=None, **kwargs):
+		rkwargs=None, update_callable=requests.put, error_msg=None, cache_response=False, **kwargs):
 	'''	Update the data model instance with the parameters container in object data.
 	'''
 	# Server and data object API endpoint

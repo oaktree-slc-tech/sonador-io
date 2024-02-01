@@ -1,7 +1,8 @@
 '''	Helper utilities which work with Sonador resource models.
 '''
-import six, os, logging, re, traceback, argparse, datetime, requests, shutil
+import six, os, logging, re, traceback, argparse, datetime, requests, shutil, zipfile
 from collections import namedtuple, OrderedDict
+from io import BytesIO
 from six.moves.urllib import parse as urlparse
 
 import pydicom
@@ -20,6 +21,7 @@ from client.utils.microservices import server_controloperation_json_response
 from client.remote import RemoteServer, request_client_error
 
 from ..apisettings import SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, SONADOR_INTERNAL_DNS, \
+		SONADOR_VERIFY_SSL, \
 	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SR_REF_SERIES_SEQ, DCMHEADER_SR_REF_INSTANCE_SEQ, DCMHEADER_SR_REF_SOP_SEQ, \
 	DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_SR_SOP_CLASS_UID, DCMHEADER_SR_REF_INSTANCE_UID
 from ..apisettings.sr import points2array, DCM_CODED_CONCEPT_HEADERS, DCM_CODED_CONCEPT_MAPPING
@@ -60,14 +62,14 @@ def fetch_sonador_session_token(sonador_server, verify=False, credentials_endpoi
 def initenv_sonador_server(sonador_url=os.environ.get(SONADOR_URL), 
 		access_id=os.environ.get(SONADOR_ACCESS_ID), secret_key=os.environ.get(SONADOR_SECRET_KEY),
 		apitoken=os.environ.get(SONADOR_APITOKEN), internal_dns=str2bool(os.environ.get(SONADOR_INTERNAL_DNS)),
-		**kwargs):
+		verify_ssl=str2bool(os.environ.get(SONADOR_VERIFY_SSL)), **kwargs):
 	''' Initialize Sonador Server connection. The method reads the standard Sonador environment
 		variables for default arguments. If the environment variable is not defined, the default 
 		for the argument will be None.
 	'''
 	from ..servers import SonadorServer
 	return SonadorServer(sonador_url, access_id=access_id, secret_key=secret_key, apitoken=apitoken,
-		internal_dns=internal_dns, **kwargs)
+		verify=verify_ssl, internal_dns=internal_dns, **kwargs)
 	
 
 def report_operation_error(err, error_traceback=None, 
@@ -110,6 +112,23 @@ def argparse_datetime_type(arg_datestr, datetime_format='%Y-%m-%d %H:%M:%S'):
 	try: return datetime.datetime.strptime(arg_datestr, datetime_format)
 	except ValueError as err:
 		raise argparse.ArgumentTypeError('Invalid date: %s. Expected format: %s.' % (arg_datestr, datetime_format))
+
+
+
+# Remote data helper methods
+
+def response2filearchive(r):
+	''' Initialize a ZipFile instance from the provided reponse. The response stream used to buffer the data
+		is provided as a property via the `raw` pproperty.
+
+		@returns zipfile.ZipFile
+	'''
+	# Initialize file archive from request data, attach the raw the content of the request
+	zbuffer = BytesIO(r.content)
+	farchive = zipfile.ZipFile(zbuffer, mode='r')
+	setattr(farchive, 'raw', zbuffer)
+
+	return farchive
 
 
 # DCM Series Utilities: Provides methos to re-order/re-number images on the local disk.

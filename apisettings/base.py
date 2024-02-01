@@ -93,11 +93,18 @@ DicomMetaKey = namedtuple('DicomMetaKey', ('resource', 'header', 'uid'))
 
 class DicomMeta:
 	'''	Helper data class for working with DICOM metadata
+
+		@input description (str): description of the resource
+		@input modality (str): modality
+		@input meta (DicomMetaKey, default=None): reference to the DICOM key
+			associated with the meta instance.
+		@input attrs (dict, default=None): attributes associated with the DICOM instance
 	'''
-	def __init__(self, description, modality, *args, meta=None, **kwargs):
+	def __init__(self, description, modality, *args, meta=None, attrs=None, **kwargs):
 		self.description = description
 		self.modality = modality
 		self.meta = meta
+		self.attrs = attrs
 
 	def __str__(self):
 		return "%s(description='%s', modality='%s')" % (type(self).__name__, self.description, self.modality)
@@ -212,7 +219,10 @@ IMAGING_SERVER_RESOURCE_SERIES = 'Series'
 IMAGING_SERVER_RESOURCE_IMAGE = 'Instance'
 IMAGING_SERVER_RESOURCE_REPORT = 'Report'
 
-IMAGING_SERVER_UID_REGEX = re.compile(r'(.+)?(?P<uid>([0-9a-fA-F]{8}\-?){5})(.+)?')
+IMAGING_SERVER_UID_REGEX_STR = r'(.+)?(?P<uid>([0-9a-fA-F]{8}\-?){5})(.+)?'
+IMAGING_SERVER_UID_REGEX = re.compile(IMAGING_SERVER_UID_REGEX_STR)
+DICOM_UID_REGEX_STR = r'(?P<uid>(\b[0-9]+(\.[0-9]+)+\b))'
+DICOM_UID_REGEX = re.compile(DICOM_UID_REGEX_STR)
 
 IMAGING_SERVER_RESOURCE_SUPPORTED = (
 	IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES)
@@ -509,6 +519,9 @@ DCMHEADER_CONTENT_DATE = 'ContentDate'
 DCMCODE_CONTENT_TIME = ('0008', '0033')
 DCMHEADER_CONTENT_TIME = 'ContentTime'
 
+DCMTS_CONTENT = DicomDatetimePairKey(
+	IMAGING_SERVER_RESOURCE_IMAGE, DCMHEADER_CONTENT_DATE, DCMHEADER_CONTENT_TIME)
+
 DCMCODE_CONTENT_DESCRIPTION = ('0070', '0081')
 DCMHEADER_CONTENT_DESCRIPTION = 'ContentDescription'
 
@@ -734,7 +747,8 @@ DCM_MODALITY_VA = 'VA'
 DCM_MODALITY_XA = 'XA'
 DCM_MODALITY_XC = 'XC'
 
-DCM_MODALITIES_MRI = ['MR', 'MRI', 'MR\\SD']
+DCM_MODALITIES_MRI = [DCM_MODALITY_MR, 'MRI', 'MR\\SD']
+DCM_MODALITIES_CT = [DCM_MODALITY_CT, DCM_MODALITY_IVOCT, DCM_MODALITY_CTPROTOCOL]
 
 DCM_MODALITIES = (
 	DCM_MODALITY_AR, DCM_MODALITY_ASMT, DCM_MODALITY_AU,

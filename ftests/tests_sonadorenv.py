@@ -1,7 +1,8 @@
 import os, posixpath, unittest, requests, logging, json, tempfile, zipfile
 from io import BytesIO
+from time import sleep
 
-from ..helpers import initenv_sonador_server
+from ..helpers import initenv_sonador_server, response2filearchive
 from ..servers import sonador_apitoken_fetch
 from ..apisettings import SONADOR_IMAGING_SERVER, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES
 
@@ -47,7 +48,7 @@ class SonadorEnvironmentTests(SonadorBaseTestCase):
 			raise ValueError('Unable to retrieve test data due to an error. Status code: %s.' % r.status_code)
 
 		# Load file data to an archive and upload to Sonador
-		hcache, _ = imageserver_upload_archive(iserver, zipfile.ZipFile(BytesIO(ctr.content)))
+		hcache, _ = imageserver_upload_archive(iserver, response2filearchive(ctr))
 
 		# Check the Orthanc instance to ensure that the image was indexed correctly
 		for hkey, hmeta in hcache.items():			
@@ -62,8 +63,9 @@ class SonadorEnvironmentTests(SonadorBaseTestCase):
 			self.assertEqual(len(results), 1, msg=('Unable to retrieve match for resource (%s) %s=%s' if len(results) == 0
 				else 'Retrieved more than a single match for resource (%s) %s=%s') % (hkey.resource, hkey.header, hkey.uid))
 		
-		# Remove all series added to the server as part of the test
+		# Remove all series added to the server as part of the test, add pause to allow for series to clear from the cache
 		self.cleanupImageUpload(iserver, hcache)
+		sleep(0.25)
 
 		# Query the cache to ensure that the resources were removed
 		for hkey, hmeta in hcache.items():

@@ -4,7 +4,7 @@
 	* `DcmExtBaseCollection`: collection class which provides methods to create and fetch
 		collections of base models associated with a specific parent.
 '''
-import abc, logging, posixpath
+import abc, logging, posixpath, traceback
 from collections import OrderedDict
 
 from client.local import GuruCoreObject, GuruCoreCollection
@@ -48,7 +48,7 @@ class DcmExtBaseModel(GuruBaseObject):
 			error_msg=lambda r: request_client_error('Unable to edit %s=%s on PACS server %s. Status code: %s.' % (
 					type(self).__name__, self.pk, self.parent.pacs.server_label, getattr(r, 'status_code', None),
 				), r),
-			update_callable=self.parent.pacs._request_put)
+			update_callable=self.parent.pacs._request_put, **kwargs)
 
 	def delete(self, verify=None, headers=None, **kwargs):
 		'''	Remove the extension model instance from the server
@@ -92,13 +92,13 @@ class DcmExtBaseCollection(ImagingServerChildCollectionFetchMixin, SonadorObject
 		# Retrieve data from the API
 		rdata = sonador_dataobject_create(parent.pacs, cls.model, odata, headers=headers,
 			apiurl_callable='orthanc_apiurl', headers_callable='orthanc_request_headers',
-			error_msg=lambda r: request_client_error('Unable to create %s on PACS server %s. Status code: %s.' % (
-					cls.model.__name__, parent.pacs.server_label, getattr(r, 'status_code', None)
+			error_msg=lambda r: request_client_error('Unable to create %s on PACS server %s (resource=%s). Status code: %s.' % (
+					cls.model.__name__, parent.pacs.server_label, dataobject_endpoint, getattr(r, 'status_code', None)
 				), r),
 			create_callable=parent.pacs._request_post, dataobject_endpoint=dataobject_endpoint)
 
 		# Initialize data class
-		return parent.pacs._init_dataclass(cls, rdata, parent=parent, **kwargs)
+		return parent.pacs._init_dataclass(cls.model, rdata, parent=parent, **kwargs)
 
 	@classmethod
 	def fetch(cls, parent, *args, **kwargs):
@@ -131,13 +131,18 @@ class ResourceComment(DcmExtBaseModel):
 	pk_attr = 'ID'
 	tabulate_output_columns = RESOURCE_COMMENT_OUTPUT_COLUMNS
 
+	def __init__(self, *args, dicomweb_api=False, **kwargs):
+		self.dicomweb_api = dicomweb_api
+		super().__init__(*args, **kwargs)
+
 	@property
 	def parent_pk(self):
 		return self.parent.pk
 
 	@property
-	def resource_url(self):
-		return posixpath.join(self.parent.comments_url, self.pk)
+	def resource_url(self):		
+		endpoint_url = self.parent.dicomweb_comments_url if self.dicomweb_api else self.parent.comments_url
+		return posixpath.join(endpoint_url, self.pk)
 
 	@property
 	def text(self):
@@ -149,22 +154,33 @@ class ResourceCommentCollection(DcmExtBaseCollection):
 	'''
 	model = ResourceComment
 
+	def __init__(self, *args, dicomweb_api=False, **kwargs):
+		self.dicomweb_api = dicomweb_api
+		super().__init__(*args, **kwargs)
+
 	@classmethod
-	def create(cls, parent, *args, **kwargs):
+	def create(cls, parent, *args, dicomweb_api=False, **kwargs):
 		'''	Create a comment instance
 		'''
-		if not hasattr(parent, 'comments_url'):
-			raise ValueError('Unable to create comment instance, parent does not have a valid comments_url property')
-
-		return super().create(parent, *args, dataobject_endpoint=parent.comments_url, **kwargs)
+		cls._verify_parent(parent, dicomweb_api=dicomweb_api, **kwargs)
+		endpoint_url = parent.dicomweb_comments_url if dicomweb_api else parent.comments_url
+		return super().create(parent, *args, dataobject_endpoint=endpoint_url, dicomweb_api=dicomweb_api, **kwargs)
 
 	@classmethod
-	def fetch(cls, parent, *args, **kwargs):
+	def _verify_parent(cls, parent, dicomweb_api=False, **kwargs):
+		'''	Verify that the provided endpoint has the required properties required to complete API requests.
+		'''
+		if dicomweb_api and not hasattr(parent, 'dicomweb_comments_url'):			
+			raise ValueError('Unable to perform comments opreation, parent doews not have a valid dicomweb_comments_url property')
+		elif not hasattr(parent, 'comments_url'):
+			raise ValueError('Unable to perform comments operation, parent does not have a valid comments_url property')
+
+	@classmethod
+	def fetch(cls, parent, *args, dicomweb_api=False, **kwargs):
 		'''	Fetch comments for the provided parent
 		'''
-		if not hasattr(parent, 'comments_url'):
-			raise ValueError('Unable to retrieve comments, parent does not have a value comments_url property')
-
+		cls._verify_parent(parent, dicomweb_api=dicomweb_api, **kwargs)
+		
 		# Notify user of an error
 		error_msg = lambda r: request_client_error(
 			'Unable to retrieve comments for %s=%s from PACS server "%s". Status code: %s.' % (
@@ -172,12 +188,15 @@ class ResourceCommentCollection(DcmExtBaseCollection):
 		), r)
 
 		return super().fetch(parent, *args, 
-			data_collection_endpoint=parent.comments_url, error_msg=error_msg, **kwargs)
+			data_collection_endpoint=parent.dicomweb_comments_url if dicomweb_api else parent.comments_url, 
+			error_msg=error_msg, dicomweb_api=dicomweb_api, **kwargs)
 
 	@classmethod
-	def fetch_modelinstance(cls, parent, objectid, *args, **kwargs):
-		if not hasattr(parent, 'comments_url'):
-			raise ValueError('Unable to retrieve comment=%s, parent does not have a valid comments_url property')
+	def fetch_modelinstance(cls, parent, objectid, *args, dicomweb_api=False, **kwargs):
+		'''	Fetch comment
+		'''
+		cls._verify_parent(parent, dicomweb_api=dicomweb_api, **kwargs)
+		endpoint_url = parent.dicomweb_comments_url if dicomweb_api else parent.comments_url
 
 		return super().fetch_modelinstance(parent, objectid, *args, 
-			dataobject_endpoint=posixpath.join(parent.comments_url, objectid), **kwargs)
+			dataobject_endpoint=posixpath.join(endpoint_url, objectid), dicomweb_api=dicomweb_api, **kwargs)

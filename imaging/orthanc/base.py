@@ -1,7 +1,7 @@
 ''' Model classes associated with Orthanc DICOM resources. Provides tools
 	for representing, queryying, modifying, and removing core DICOM resource instances.
 '''
-import six, requests, json, csv, collections, logging, functools, posixpath, zipfile, pydicom, datetime
+import six, requests, json, csv, collections, logging, functools, posixpath, zipfile, pydicom, datetime, traceback
 from io import BytesIO
 
 from abc import ABCMeta, abstractmethod
@@ -35,11 +35,11 @@ from ...apisettings import ImageCoord, ImageSpacing, ImageOrientation, ImageStac
 	DCMHEADER_SLICE_THICKNESS, DCMHEADER_SLICE_LOCATION, DCMHEADER_PIXEL_SPACING, \
 	DCMHEADER_BODY_PART_EXAMINED, DCM_VERSION_2021b, \
 	DCMHEADER_MODALITIES_IN_STUDY, DCM_MODALITY_SR, DCM_MODALITY_SEG, DCM_MODALITY_DOC, \
-	DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_CONTENT_DESCRIPTION, DCMHEADER_INSTANCE_NUMBER, \
-	DCMTS_STUDY, DCMTS_SERIES
+	DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_CONTENT_DATE, DCMHEADER_CONTENT_TIME, DCMHEADER_CONTENT_DESCRIPTION, DCMHEADER_INSTANCE_NUMBER, \
+	DCMTS_STUDY, DCMTS_SERIES, DCMTS_CONTENT
 from ...apisettings.media import DCMEDIA_M3D_MODALITY
 
-from ...helpers import request_client_error, fetch_sonador_session_token
+from ...helpers import request_client_error, fetch_sonador_session_token, response2filearchive
 from ...helpers.valuerep import str2name
 from ...serialization import json_datetime_parser, json_str2datetime, dcm_str2date, dcm_str2time
 from ...remote import SonadorBaseObject, SonadorObjectCollection, fetch_sonador_data_collection
@@ -272,19 +272,14 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 				r),
 			headers=self.pacs.orthanc_request_headers(), verify=verify)
 
-		# Initialize file archive from request data, attach the raw content of the request
-		# to the archive
-		zbuffer = BytesIO(r.content)
-		farchive = zipfile.ZipFile(zbuffer, mode='r')
-		setattr(farchive, 'raw', zbuffer)
-
-		# Cache (if indicated)
+		# Initialize file archive from request data, cache (if indicated)
+		farchive = response2filearchive(r)
 		if cache:
 			setattr(self, '_filearchive', farchive)
 
 		return farchive
 
-	def index(self, link=True, headers=None, verify=None, rdata=None):
+	def index(self, link=True, headers=None, rdata=None, **kwargs):
 		''' Add the resouce to the Sonador resource cache.
 
 			@returns requests.Response
@@ -295,14 +290,36 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 		rdata['link'] = link
 
 		r = self.pacs._request_post(
-			self.pacs.orthanc_apiurl(posixpath.join(self.cache_indexurl)),
+			self.pacs.orthanc_apiurl(self.cache_indexurl),
 			lambda r: request_client_error(
 				'Unable to add DICOM resource %s on server %s to the Sonador resource cache. Status code: %s.'
 					% (self.cache_indexurl, self.pacs.server_label, r.status_code),
 				r),
-			json=rdata, headers=self.pacs.orthanc_request_headers(headers=headers), verify=verify)
+			json=rdata, headers=self.pacs.orthanc_request_headers(headers=headers), **kwargs)
 
 		logger.debug('Response from PACS imaging server:\n%s' % r.content)
+		return r
+
+	def _clear_index(self, headers=None, rdata=None, **kwargs):
+		'''	Remove the resource entry from the Sonador resource cache
+
+			@returns requests.Response
+		'''
+		# Request keyword arguments
+		rkwargs = {}
+
+		if rdata:
+			rkwargs['json'] = rdata or {}
+
+		r = self.pacs._request_delete(
+			self.pacs.orthanc_apiurl(self.cache_indexurl),
+			lambda r: request_client_error(
+				'Unable to remove DICOM resource %s from server %s Sonador resoruce cache. Status code: %s.'
+					% (self.cache_indexurl, self.pacs.server_label, r.status_code),
+				r),
+			headers=self.pacs.orthanc_request_headers(headers=headers), **kwargs)
+
+		logger.warning('Response from PACS imaging server:\n%s' % r.content)
 		return r
 
 	def reconstruct(self, reconstruct_files=False, headers=None, verify=None, rdata=None):
@@ -642,6 +659,10 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		return posixpath.join(self.fetch_endpoint, self.pk)
 
 	@property
+	def dicomweb_resource_url(self):
+		return posixpath.joinN(self.pacs.dicomweb_root, self.fetch_endpoint, self.study_uid)
+
+	@property
 	def filearchive_url(self):
 		return posixpath.join(self.fetch_endpoint, self.pk, 'archive')
 
@@ -732,8 +753,8 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 	@property
 	def ts(self):
-		'''	Date/time that the series was acquired (Created from study_date and study_time properties.)
-			Returns None is there is no sutdy date value. Study time is used if available, with midnight
+		'''	Date/time that the study was acquired (created from study_date and study_time properties).
+			Returns None is there is no study date value. Study time is used if available, with midnight
 			being used if it is not.
 		'''
 		try:
@@ -1187,6 +1208,12 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 		return posixpath.join(self.fetch_endpoint, self.pk)
 
 	@property
+	def dicomweb_resource_url(self):
+		'''	DICOMweb resource URL for the series
+		'''
+		return posixpath.join(self.pacs.dicomweb_root, self.fetch_endpoint, self.series_uid)
+
+	@property
 	def filearchive_url(self):
 		return posixpath.join(self.fetch_endpoint, self.pk, 'archive')
 
@@ -1204,6 +1231,12 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 		'''
 		return posixpath.join(self.resource_url, 'comments')
 
+	@property
+	def dicomweb_comments_url(self):
+		'''	DICOMweb comments URL for the series
+		'''
+		return posixpath.join(self.dicomweb_resource_url, 'comments')
+	
 	@property
 	def study(self):
 		return self._objectdata.get('ParentStudy')
@@ -1359,7 +1392,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 
 			@returns collection of comments
 		'''
-		return self.comments_modelcollection_class.fetch(parent=self)
+		return self.comments_modelcollection_class.fetch(parent=self, **kwargs)
 
 	def comments_from_json(self, jdata, **kwargs):
 		'''	Initialize comments from JSON
@@ -1387,7 +1420,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 
 		setattr(self, '_comments', comments_collection)
 
-	def create_comment(self, text, data=None):
+	def create_comment(self, text, data=None, **kwargs):
 		'''	Create a comment for the series
 
 			@input text (str): Text for the comment
@@ -1395,7 +1428,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 		data = data or {}
 		data.update({ 'Text': text })
 
-		return self.comments_modelcollection_class.create(self, data)
+		return self.comments_modelcollection_class.create(self, data, **kwargs)
 
 	def get_comment(self, cid, *args, **kwargs):
 		'''	Retrieve a comment instance
@@ -1620,6 +1653,9 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 		self._parent = kwargs.pop('series', None)
 		super().__init__(*args, **kwargs)
 
+		# Content timestamp (parsed from ContentDate and ContentTime)
+		self._sts = DicomDatetimePair(self.content_datestr, self.content_timestr, meta=DCMTS_CONTENT)
+
 	@property
 	def series(self):
 		return self._objectdata.get('ParentSeries')
@@ -1647,6 +1683,38 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 	@property
 	def description(self):
 		return self.dicomdata.get(DCMHEADER_CONTENT_DESCRIPTION)
+
+	@property
+	def content_datestr(self):
+		return self.dicomdata.get(DCMHEADER_CONTENT_DATE)
+
+	@property
+	def content_date(self):
+		return self._sts.date_value
+
+	@property
+	def content_timestr(self):
+		return self.dicomdata.get(DCMHEADER_CONTENT_TIME)
+
+	@property
+	def content_time(self):
+		return self._sts.time_value
+
+	@property
+	def ts(self):
+		'''	Date/time that the instance was created. (Created from the content_date and content_time properties.)
+			Returns None is there is no study date value. Study time is used if available, with midnight being used
+			if it is not.
+		'''
+		try:
+			if getattr(self, '_ts', None) is None and self.content_date:
+				self._ts = self._sts.ts
+
+		except Exception as err:
+			logger.error('Invalid content timestamp. Error: "%s"' % err)
+			self._ts = None
+
+		return getattr(self, '_ts', None)
 
 	@property
 	def parent(self):
@@ -1917,6 +1985,13 @@ class DcmInstance(DcmInstanceCoreResource):
 	def plane_type(self):
 		return int(self.tags.get('PlaneType')) if self.tags.get('PlaneType') \
 			else self.tags.get('PlaneType')
+
+	@property
+	def ts(self):
+		'''	Date/time of the instance. (Created from the content_date and content_time properties.)
+			Returns None if there is not content date value. Content time is used if available,
+			with midnight used if it is not.
+		'''
 
 
 class DcmInstanceCoreCollection(ImagingServerChildCollection):
