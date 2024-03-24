@@ -203,12 +203,14 @@ class OrthancServerBase(SonadorBaseObject):
 		'''
 		return self.get_resource_modelcollection_class(resource_type).model
 
-	def upload_image(self, img, headers=None, retry_count=0, retry_limit=3, verify=None, **kwargs):
+	def upload_image(self, img, headers=None, retry_count=0, retry_limit=3, verify=None, pause_for_retry=None, **kwargs):
 		'''	Upload the provided image to via Orthanc REST API. Raises ClientOperationError is not able 
 			to successfully complete the request. Will retry the request up to the provided retry_limit.
 
 			@input img (file-like object): Image data to be uploaded
 			@input headers (dict, default=empty dict): Headers to be added to the upload request
+            
+            @pause_for_retry (int): Seconds to sleep before retrying upload
 
 			@returns requests.Response
 		'''
@@ -226,10 +228,13 @@ class OrthancServerBase(SonadorBaseObject):
 		except ClientOperationError as err:
 			r = getattr(err, 'response', None)
 
-			if r and not r.ok:
+			if r is not None and not r.ok:
 
 				# Retry upload
 				if retry_count < retry_limit:
+                    
+                    # Pause for retry
+                    if pause_for_retry: time.sleep(pause_for_retry)
 
 					logger.warning('Unable to upload image to PACS %s. Status code: %s. Retry transfer: %s/%s.'
 						% (self.server_label, r.status_code, retry_count+1, retry_limit))
@@ -237,7 +242,7 @@ class OrthancServerBase(SonadorBaseObject):
 					# Reset position of image before attempting upload
 					img.seek(0)
 					r = self.upload_image(
-						img, headers=headers, retry_count=retry_count+1, retry_limit=retry_limit, verify=verify)
+						img, headers=headers, retry_count=retry_count+1, retry_limit=retry_limit, verify=verify, pause_for_retry=pause_for_retry)
 
 				# Retry limit exceeded: notify user of failed transfer
 				else: 
