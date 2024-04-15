@@ -232,9 +232,9 @@ class OrthancServerBase(SonadorBaseObject):
 
 				# Retry upload
 				if retry_count < retry_limit:
-                    
-                    # Pause for retry
-                    if pause_for_retry: time.sleep(pause_for_retry)
+					
+					# Pause for retry
+					if pause_for_retry: time.sleep(pause_for_retry)
 
 					logger.warning('Unable to upload image to PACS %s. Status code: %s. Retry transfer: %s/%s.'
 						% (self.server_label, r.status_code, retry_count+1, retry_limit))
