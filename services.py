@@ -4,7 +4,9 @@ from urllib.parse import urlencode
 from tabulate import tabulate
 from collections import OrderedDict
 
-from .remote import SonadorBaseObject, SonadorObjectCollection, \
+from client.utils.microservices import server_controloperation_json_response
+
+from .remote import SonadorBaseObject, SonadorObjectCollection, SonadorObjectUpdateMixin, \
     fetch_sonador_data_collection, fetch_sonador_dataobject
 from .helpers import request_client_error
 
@@ -20,7 +22,7 @@ DATA_SERVICE_OUTPUT_COLUMNS = OrderedDict((
     ))
 
 
-class DataService(SonadorBaseObject):
+class DataService(SonadorObjectUpdateMixin, SonadorBaseObject):
     ''' Object representation of a Sonador managed data service
     '''
     fetch_endpoint = '/visionaire/api/data/service'
@@ -36,17 +38,15 @@ class DataService(SonadorBaseObject):
     def url_token_validate(self):
         return posixpath.join(self.url, 'introspect')
 
-    def verify_api_credentials(self, token_key, token_value, verify=None):
+    def verify_api_credentials(self, token_key, token_value, **kwargs):
         ''' Send the provided token key and token value to Sonador for verification.
         '''
-        if verify is None:
-            verify = self.server.verify
-
         r = requests.post(self.server.sonador_apiurl(self.url_token_validate), 
             json={ 'token_key': token_key, 'token_value': token_value },
-            verify=verify, headers=self.server.sonador_request_headers())
+            verify=self.server.verify_ssl(**kwargs), headers=self.server.sonador_request_headers())
         
         if not r.ok:
             request_client_error('Unable to retrieve API credentials from Sonador due to an error.', r)
-        
-        return r.json()
+
+        return server_controloperation_json_response(r)
+    

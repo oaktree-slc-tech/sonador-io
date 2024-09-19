@@ -83,6 +83,7 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 		self.report_procedure = report_procedure or self.report_procedure
 		
 		# Observation context UID
+		self._observation_context = kwargs.get('observeration_context')
 		self.observation_context_uid = observation_uid
 		self.observation_context_device_name = kwargs.get('observation_context_device_name') \
 			or getattr(self, 'observation_context_device_name', None)
@@ -105,7 +106,7 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 				'Unable to initialize Sonador DICOM-SR model %s. No document template specified.' % type(self))
 		if not self.report_procedure:
 			raise ConfigurationError(
-				'Unable to initialzie Sonador DICOM-SR model %s. No "procedure procedure" code or sequence provided.' % type(self))
+				'Unable to initialize Sonador DICOM-SR model %s. No "reort_procedure" code or sequence provided.' % type(self))
 
 	@abc.abstractmethod
 	def create_sr(self):
@@ -245,8 +246,8 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 		# Primary measurement group attributes
 		self.primary_group_identifier = kwargs.get('primary_group_identifier') or self.primary_group_identifier
-		self.primary_group_uid = kwargs.get('primay_group_uid') \
-			or getattr(self, 'primay_group_uid', None)
+		self.primary_group_uid = kwargs.get('primary_group_uid') \
+			or getattr(self, 'primary_group_uid', None)
 		self.primary_group_method = kwargs.get('primary_group_method') \
 			or getattr(self, 'primary_group_method', None)
 		self.primary_group_finding_sites = kwargs.get('primary_group_finding_site') \
@@ -322,7 +323,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			If the SR model measurements or findings collections are populated, a "primary" group is populated
 			and placed first in the sequence.
 
-			Note: options for the primay group can be passed to the instance by prefixing the keyword
+			Note: options for the primary group can be passed to the instance by prefixing the keyword
 			arguments with a `primary_group_*` prefix.
 		'''
 		groups = kwargs.get('groups', [])
@@ -335,7 +336,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 				'finding_sites': kwargs.get('primary_site_finding_sites') or self.primary_group_finding_sites,
 				'method': kwargs.get('primary_group_method') or self.primary_group_method,
 				'algorithm': kwargs.get('primary_group_algorithm') or self.primary_group_algorithm,
-				'finding_category': kwargs.get('primay_group_finding_category') or self.primay_group_finding_category,
+				'finding_category': kwargs.get('primary_group_finding_category') or self.primary_group_finding_category,
 				'finding_type': kwargs.get('primary_group_finding_category') or self.primary_group_finding_category,
 			}
 			_pgroup_kwargs.update(omit(kwargs, [k for k in kwargs.keys() if 'primary_group' in k]))
@@ -366,7 +367,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 		return self.dcmsr_report_template(
 			title=self.report_title, procedure_reported=self.report_procedure,
-			observation_context=self.observation_context(**pick(kwargs, tuple(k for k in kwargs.keys() if 'observation_context' in k))),
+			observation_context=self._observation_context or self.observation_context(**pick(kwargs, tuple(k for k in kwargs.keys() if 'observation_context' in k))),
 			imaging_measurements=[g.sr for g in self._imaging_measurement_groups(**pick(kwargs, tuple(k for k in kwargs.keys() if 'primary_group' in k)))],
 			meta_groups=[g.sr for g in self._meta_groups()], 
 			volume_measurements=[g.sr for g in self._volume_measurement_groups()],
@@ -393,7 +394,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 	def create_sr(self, dcmsr_series_uid=None, dcmsr_instance_uid=None,
 			dcmsr_series_number=1, dcmsr_instance_number=1, ts=None, is_complete=True,
-			is_final=False, is_verified=False, **kwargs):
+			is_final=False, is_verified=False, series_headers_kwargs=None, **kwargs):
 		'''	Create DICOM-SR document from model data
 		'''
 		if not getattr(self, '_evidence', None) and not self.ref_series:
@@ -412,7 +413,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			**omit(kwargs, tuple(k for k in kwargs.keys() if not 'report' in k)))
 
 		# Apply series headers to report instance
-		self.dcmsr_series_headers(_srdoc, ts)
+		self.dcmsr_series_headers(_srdoc, ts, **(series_headers_kwargs or {}))
 		return _srdoc
 
 	def dcmsr_series_headers(self, srdoc, *args, **kwargs):

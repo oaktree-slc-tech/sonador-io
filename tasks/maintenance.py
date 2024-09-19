@@ -5,6 +5,8 @@ import json, logging, traceback
 import client.apisettings as gcapi
 from client.remote import request_client_error
 
+from ..apisettings import IMAGING_SERVER_RESOURCE_SERIES
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,3 +67,55 @@ def imageserver_clear_index(imaging_resources, ignore_errors=False,
 
                 # Raise error
                 if not ignore_errors: raise err
+
+
+def imageserver_index_studydata(imageserver, hcache, rapid_lookup=False):
+    ''' Retrieve
+
+        @input imageserver (sonador.servers.SonadorImagingServer): image server instance to use for the indexing
+        @input hcache (OrderedDict): header cache to use for retrieving data from SOnador
+    '''
+    for hmeta in hcache:
+        if hmeta.resource == IMAGING_SERVER_RESOURCE_STUDY:
+
+            _results = imageserver.query_study({ hmeta.header: hmeta.uid }, rapid_lookup=rapid_lookup)
+
+            # Check results and index matching series
+            if len(_results):
+                _s = _results[0]
+                
+                # Sonador indexes "top to bottom". This means that patient records must be indexed
+                # first, study records second, and series records last.
+                _s.parent.index()
+                _s.index()
+
+                for _sx in _s.series_collection:
+                    _sx.index()
+
+            else:
+                logger.warning('Unable to retrieve series for dcm-uid="%s"' % hmeta.uid)
+
+
+def imageserver_index_seriesdata(imageserver, hcache, rapid_lookup=False):
+    ''' Retrieve and index the imaging series, study, and patient data for the provided header hcache
+
+        @input imageserver (sonador.servers.SonadorImagingServer): image server instance to use for the indexing
+        @input hcache (OrdereDict): header cache to use for retrieving data from Sonador        
+    '''
+    for hmeta in hcache:
+        if hmeta.resource == IMAGING_SERVER_RESOURCE_SERIES:
+
+            _results = imageserver.query_series({ hmeta.header: hmeta.uid }, rapid_lookup=rapid_lookup)
+
+            # Check results and index matching series
+            if len(_results):
+                _sx = _results[0]
+                
+                # Sonador indexes "top to bottom". This means that patient records must be indexed
+                # first, study records second, and series records last.
+                _sx.model_patient.index()
+                _sx.parent.index()
+                _sx.index()
+
+            else:
+                logger.warning('Unable to retrieve series for dcm-uid="%s"' % hmeta.uid)

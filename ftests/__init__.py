@@ -13,3 +13,8 @@ from .tests_sonadorauth_credapi import *
 from .tests_sonadorenv import *
 from .tests_fhir_addr import *
 from .tests_ext_comments import *
+from .tests_ext_worklists import *
+from .tests_sonadorauth_acl import *
+from .tests_ext_data import *
+from .tests_ext_tags import *
+from .tests_bulk import *

@@ -46,13 +46,24 @@ class DcmSRSeries(ImagingSeriesCoreResource):
 	@property
 	@functools.lru_cache()
 	def imaging_series_collection(self):
-		''' Imaging series that are referenced by the DICOM-SR instance with the most recent
-			imaging series first.
+		''' (DEPRECATED) Imaging series that are referenced by the DICOM-SR instance with the most recent
+			imaging series first. Delegates to `reference_series_collection`.
+		'''
+		return self.reference_series_collection
+
+	@property
+	@functools.lru_cache()
+	def reference_series_collection(self):
+		''' Linked series that are referenced by the DICOM-SR instance with the most recent series first.
 		'''
 		return sorted(
 			[s for s in self.parent.series_collection if s.series_uid in self.series_reference_uids],
 			key=lambda s: s.ts if s.ts else datetime.datetime(year=1900, month=1, day=1),
 			reverse=True)
+
+	@property
+	def kafka_url(self):
+		return posixpath.join(self.resource_url, 'kafka')
 
 
 class DcmSRSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingServerChildCollection):

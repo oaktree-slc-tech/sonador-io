@@ -22,7 +22,8 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 		verify=False, fileupload_check=False, destfolder_complete=None,
 		dcm_extensions=DCM_EXTENSIONS_DEFAULT, ignore_errors=False,
 		callback_preupload=None, callback_postupload=None, 
-		callback_onerror=None, callback_onduplicate=None, dry_run=False, hcache=None):
+		callback_onerror=None, callback_onduplicate=None, dry_run=False,
+		rapid_lookup=True, hcache=None):
 	'''	Scan folders and upload all DICOM images to the provided imaging servers
 
 		@input iserver (SonadorImagingServer instance): Imaging server to which the
@@ -99,7 +100,7 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 
 				# Check Orthanc to determine if the data has already been uploaded.
 				fseries_meta = set(mkey.uid for mkey, mdata in fmeta.items() 
-					if len(iserver.query_series({ mkey.header: mkey.uid }, rapid_lookup=False)))
+					if len(iserver.query_series({ mkey.header: mkey.uid }, rapid_lookup=rapid_lookup)))
 
 			# Upload files (in parallel) to the image server
 			if len(dcmfiles):
@@ -138,7 +139,7 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 								# Retrieve series reference from Sonador (first instance of duplicate series, cached for subsequent instances)
 								r = getattr(mdata, 'resource', None)
 								if r is None:
-									r = iserver.query_series({ mdata.meta.header: mdata.meta.uid })[0]
+									r = iserver.query_series({ mdata.meta.header: mdata.meta.uid }, rapid_lookup=rapid_lookup)[0]
 									setattr(mdata, 'resource', r)
 								
 								logging.info('Image %s (series %s) already available on server %s: series-uid=%s.'

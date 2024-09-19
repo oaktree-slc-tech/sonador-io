@@ -16,6 +16,8 @@ from tabulate import tabulate
 
 from client import apisettings as gcapicodes
 from client import auth as guru_auth
+from client.errors import ClientOperationError, ConfigurationError
+
 from client.utils.urls import build_url
 from client.utils.object import pick
 from client.utils.microservices import server_controloperation_json_response, RemotePage
@@ -44,6 +46,8 @@ from ...helpers.valuerep import str2name
 from ...serialization import json_datetime_parser, json_str2datetime, dcm_str2date, dcm_str2time
 from ...remote import SonadorBaseObject, SonadorObjectCollection, fetch_sonador_data_collection
 from ...servers import ImagingServerChildCollection, ImagingServerChildBaseObject, SonadorImagingServer
+from ...servers.auth import SonadorUser, SonadorGroup
+from ...errors import only_duplicate_resource_error
 
 logger = logging.getLogger(__name__)
 
@@ -88,17 +92,17 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 	def fetch_meta(self, *args, headers=None, **kwargs):
 		'''	Retrieved the Orthanc metadata properties for the resource
 		'''
-		return self.pacs._request_get(
+		return server_controloperation_json_response(self.pacs._request_get(
 			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'metadata'), query_params={ 'expand': True, }),
 			lambda r: request_client_error(
 				'Unable to retrieve metadata for %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code), 
 				r),
-			headers=self.pacs.orthanc_request_headers(headers=headers))
+			headers=self.pacs.orthanc_request_headers(headers=headers)))
 
 	@property
 	def meta(self):
 		if getattr(self, '_meta', None) is None:
-			self._meta = self.fetch_meta().json()
+			self._meta = self.fetch_meta()
 
 		return self._meta
 
@@ -132,6 +136,42 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 	@property
 	def url(self):
 		return self.resource_url
+
+	@property
+	@abstractmethod
+	def kafka_url(self):
+		'''	URL which should be used to trigger export of resource data to the Orthanc Kafka topic
+		'''
+
+	def fetch_kafka_data(self, *args, **kwargs):
+		'''	Retrieve Kafka data payload for the resource. (Used for validating data structure and testing.)
+
+			@returns dict
+		'''
+		r = self.pacs._request_get(
+			self.pacs.orthanc_apiurl(self.kafka_url),
+			lambda r: request_client_error(
+				'Unable to retrieve Kafka data for %s on server %s. Status code: %s.'
+					% (self.kafka_url, self.pacs.server_label, r.status_code),
+				r),
+			headers=self.pacs.orthanc_request_headers(**kwargs), verify=self.pacs.server.verify_ssl(**kwargs))
+
+		return server_controloperation_json_response(r)
+
+	def kafka_export(self, data=None, **kwargs):
+		'''	Trigger export of the resource data to Kafka
+
+			@returns dict
+		'''
+		r = self.pacs._request_post(
+			self.pacs.orthanc_apiurl(self.kafka_url),
+			lambda r: request_client_error(
+				'Unable to trigger export of Kafka data for %s on server %s. Status code: %s.'
+				% (self.kafka_url, self.pacs.server_label, r.status_code),
+				r),
+			json=data or {}, headers=self.pacs.orthanc_request_headers(**kwargs), verify=self.pacs.server.verify_ssl(**kwargs))
+
+		return server_controloperation_json_response(r)
 
 	def modify(self, replace=None, remove=None, keep=None, keep_source=None,
 			remove_private_tags=False, force=False, transcode=None, private_creator=None,
@@ -240,6 +280,30 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 	def cache_indexurl(self):
 		'''	Sonador cache URL used to index the resource
 		'''
+
+	@property
+	def user_acl_url(self):
+		'''	URL for user authorization policies associated with the resource
+		'''
+		return posixpath.join(self.resource_url, 'acl/user')
+
+	@property
+	def dicomweb_user_acl_url(self):
+		'''	DICOMweb URL for user ACL policies
+		'''
+		return posixpath.join(self.dicomweb_resource_url, 'acl/user')
+
+	@property
+	def group_acl_url(self):
+		'''	URL for group authorization policies associated with the resource
+		'''
+		return posixpath.join(self.resource_url, 'acl/group')
+
+	@property
+	def dicomweb_group_acl_url(self):
+		'''	DICOMweb URL for group ACL policies
+		'''
+		return posixpath.join(self.dicomweb_resource_url, 'acl/group')
 
 	@property
 	def type(self):
@@ -397,6 +461,149 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 		logger.debug('Response from PACS imaging server:\n%s' % r.content)
 		return r
 
+	@property
+	def user_acl_modelcollection_class(self):
+		'''	Model collection class that should be used to initialize user ACL collections
+		'''
+		from .auth import OrthancUserResourceAccessControlListCollection
+		return OrthancUserResourceAccessControlListCollection
+
+	def fetch_user_acl(self, **kwargs):
+		'''	Retrieve user ACL policies associated with the resource
+
+			@returns collection of ACL policies
+		'''
+		return self.user_acl_modelcollection_class.fetch(parent=self, **kwargs)
+
+	def user_acl_from_json(self, jdata, **kwargs):
+		'''	Initialize ACL collection from JSON
+
+			@returns collection of user ACL policies
+		'''
+		return self.server._init_dataclass_from_json(
+			self.user_acl_modelcollection_class, jdata, pacs=self.pacs, **kwargs)
+
+	@property
+	def user_acl(self):
+		'''	User ACL policies associated with the resource
+		'''
+		if getattr(self, '_user_acl', None) is None:
+			setattr(self, '_user_acl', self.fetch_user_acl())
+
+		return self._user_acl
+
+	@user_acl.setter
+	def user_acl(self, acl_collection):
+		'''	Set user ACL policy collection for the resource
+		'''
+		if not isinstance(acl_collection, self.user_acl_modelcollection_class):
+			raise ValueError('Input must be an instance of a user ACL collection')
+
+		setattr(self, '_user_acl', acl_collection)
+
+	def create_user_acl(self, user, policy, fetch_existing=True, update_existing=True, **kwargs):
+		'''	Create policy for the provided user
+		'''
+		if not isinstance(user, SonadorUser):
+			raise ValueError('Input must be a Sonador user instance')
+		if not isinstance(policy, dict):
+			raise ValueError('Invalid user ACL policy')
+
+		policy['User'] = user.pk
+		try:
+			return self.user_acl_modelcollection_class.create(self, policy, **kwargs)
+		
+		except ClientOperationError as err:
+			_details = getattr(err, 'details', {})
+
+			# Attempt to retrieve existing instance of the ACL
+			if fetch_existing and only_duplicate_resource_error(err, field_check='User'):
+
+				# Inspect server response for ID of existing policy
+				if _details.get(gcapicodes.SERVER_RESPONSE):
+					_rdata = json.loads(_details.get(gcapicodes.SERVER_RESPONSE))
+
+					# Retrieve existing model instance
+					if _rdata.get(gcapicodes.OBJECT_DATA) \
+						and _rdata.get(gcapicodes.OBJECT_DATA, {}).get(self.user_acl_modelcollection_class.model.pk_attr):
+						_acl = self.get_user_acl(
+							_rdata.get(gcapicodes.OBJECT_DATA, {}).get(self.user_acl_modelcollection_class.model.pk_attr), **kwargs)
+
+						# Update the existing policy to match the requested policy
+						if update_existing:
+							_acl.update(policy)
+							_acl = self.get_user_acl(_acl.pk, **kwargs)
+
+						return _acl
+
+			raise err
+
+	def get_user_acl(self, cid, *args, **kwargs):
+		'''	Retrieve the specified user ACL policy
+
+			@input cid (str): Orthanc resource ID (resource.pk) of the ACL to be retrieved.
+
+			@returns user ACL instance
+		'''
+		return self.user_acl_modelcollection_class.fetch_modelinstance(self, cid, *args, **kwargs)
+
+	@property
+	def group_acl_modelcollection_class(self):
+		'''	Model collection class that should be used to initialize group ACL collections
+		'''
+		from .auth import OrthancGroupResourceAccessControlListCollection
+		return OrthancGroupResourceAccessControlListCollection
+
+	def fetch_group_acl(self, **kwargs):
+		'''	Retrieve group ACL policies associated with the resource
+
+			@returns collection of ACL policies 
+		'''
+		return self.group_acl_modelcollection_class.fetch(parent=self, **kwargs)
+
+	def group_acl_from_json(self, jdata, **kwargs):
+		'''	Initialize ACL collection from JSOn
+
+			@returns collection of group ACL policies
+		'''
+		return self.server._init_dataclass_from_json(
+			self.group_acl_modelcollection_class, jdata, pacs=self.pacs, **kwargs)
+
+	@property
+	def group_acl(self):
+		'''	Group ACL policies associated with the resource
+		'''
+		if getattr(self, '_group_acl', self) is None:
+			setattr(self, '_group_acl', self.fetch_group_acl())
+
+		return self._group_acl
+
+	@group_acl.setter
+	def group_acl(self, acl_collection):
+		if not isinstance(acl_collection, self.group_acl_modelcollection_class):
+			raise ValueError('Input must be an instance of a group ACL collection')
+
+		setattr(self, '_group_acl', acl_collection)
+
+	def create_group_acl(self, group, policy, **kwargs):
+		'''	Create policy for the provided group
+		'''
+		if not isinstance(group, SonadorGroup):
+			raise ValueError('Input must be a Sonador group instance')
+		if not isinstance(policy, dict):
+			raise ValueError('Invalid group ACL policy')
+
+		policy['Group'] = group.pk
+		return self.group_acl_modelcollection_class.create(self, policy, **kwargs)
+
+	def get_group_acl(self, cid, *args, **kwargs):
+		'''	Retrieve the specified group ACL policy
+
+			@input cid (str): Orthanc resource ID (resource.pk) of the ACL to be retrieved.
+
+			@returns group ACL instance
+		'''
+		return self.group_acl_modelcollection_class.fetch_modelinstance(self, cid, *args, **kwargs)
 
 
 # Imaging Resource Base Collection
@@ -447,6 +654,10 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerChildBaseObject):
 	@property
 	def cache_indexurl(self):
 		return posixpath.join(self.cache_queryurl, self.pk, 'index')
+
+	@property
+	def kafka_url(self):
+		return posixpath.join(self.resource_url, 'kafka')
 
 	@property
 	def patient_name_vr(self):
@@ -660,19 +871,35 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 	@property
 	def dicomweb_resource_url(self):
-		return posixpath.joinN(self.pacs.dicomweb_root, self.fetch_endpoint, self.study_uid)
+		return posixpath.join(self.pacs.dicomweb_root, self.fetch_endpoint, self.study_uid)
 
 	@property
 	def filearchive_url(self):
-		return posixpath.join(self.fetch_endpoint, self.pk, 'archive')
+		return posixpath.join(self.resource_url, 'archive')
 
 	@property
 	def dicomdir_url(self):
-		return posixpath.join(self.fetch_endpoint, self.pk, 'media')
+		return posixpath.join(self.resource_url, 'media')
 
 	@property
 	def cache_indexurl(self):
 		return posixpath.join(self.cache_queryurl, self.pk, 'index')
+
+	@property
+	def worklist_reviewer_url(self):
+		'''	URL for reviewer worklist items associated with the study
+		'''
+		return posixpath.join(self.resource_url, 'worklists')
+
+	@property
+	def dicomweb_worklist_reviewer_url(self):
+		'''	DICOMweb reviewer worklist item URL for the study
+		'''
+		return posixpath.join(self.dicomweb_resource_url, 'worklists')
+
+	@property
+	def kafka_url(self):
+		return posixpath.join(self.resource_url, 'kafka')
 
 	@property
 	def patient(self):
@@ -953,6 +1180,149 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 		setattr(self, '_doc', DcmEncapsulatedDocumentSeriesCollection)
 
+	@property
+	def reviewer_worklist_item_class(self):
+		'''	Model collection class for worklist items
+		'''
+		from .worklists import ReviewerStudyWorklistItemCollection
+		return ReviewerStudyWorklistItemCollection
+
+	def fetch_reviewer_worklist(self, **kwargs):
+		'''	Retrieve worklist items for the study
+
+			@returns collection of worklist items
+		'''
+		return self.reviewer_worklist_item_class.fetch(parent=self, **kwargs)
+
+	def reviewer_worklist_from_json(self, jdata, **kwargs):
+		'''	Initialize reviewer worklist from JSON
+		'''
+		self.server._init_dataclass_from_json(
+			self.reviewer_worklist_item_class, jdata, pacs=self.pacs, parent=self, study=self, **kwargs)
+
+	@property
+	def reviewer_worklist_collection(self):
+		'''	Reviewer work list items associated with the study
+		'''
+		if getattr(self, '_reviewer_worklist', None) is None:
+			setattr(self, '_reviewer_worklist', self.fetch_reviewer_worklist())
+
+		return self._reviewer_worklist
+
+	@reviewer_worklist_collection.setter
+	def reviewer_worklist_collection(self, worklist_items_collection):
+		'''	Set reviewer worklist for the study
+		'''
+		if not isinstance(worklist_items_collection, self.reviewer_worklist_item_class):
+			raise ValueError('Input must be an instance of a reviewer worklist collection')
+
+		setattr(self, '_reviewer_worklist', worklist_items_collection)
+
+	def create_reviewer_worklist_item(self, group: SonadorGroup, user: SonadorUser, state, complete=None, meta=None, 
+			worklist=None, **kwargs):
+		'''	Create a reviewer worklist item for the provided group and user
+		'''
+		worklist = worklist or {}
+
+		if not isinstance(group, SonadorGroup):
+			raise ValueError('Input must be a Sonador group instance')
+		if not isinstance(user, SonadorUser):
+			raise ValueError('Input must be a Sonador user instance')
+		if not isinstance(worklist, dict):
+			raise ValueError('Invalid worklist item data')
+
+		# Worklist request structure		
+		worklist.update({
+			'Group': group.pk, 'User': user.pk, 'State': state,
+		})
+		if meta:
+			worklist['Meta'] =  meta
+
+		if complete:
+			worklist['Complete'] = datetime.datetime.now().isoformat()
+
+		return self.reviewer_worklist_item_class.create(self, worklist, **kwargs)
+
+	def get_reviewer_worklist_item(self, cid, *args, **kwargs):
+		'''	Retrieve a worklist item by UID
+
+			@input cid (str): Worklist resource ID (worklist.pk) of the worklist item to be retrieved.
+
+			@returns worklist item instance
+		'''
+		return self.reviewer_worklist_item_class.fetch_modelinstance(self, cid, *args, **kwargs)
+	
+	@property
+	def comments_url(self):
+		'''	URL for comments associated with the imaging study
+		'''
+		return posixpath.join(self.resource_url, 'comments')
+
+	@property
+	def dicomweb_comments_url(self):
+		'''	DICOMweb comments URL for the study
+		'''
+		return posixpath.join(self.dicomweb_resource_url, 'comments')
+	
+	@property
+	def comments_modelcollection_class(self):
+		'''	Model collection class that should be used to initialize comments
+		'''
+		from .ext import ResourceCommentCollection
+		return ResourceCommentCollection
+
+	def fetch_comments(self, **kwargs):
+		'''	Retrieve comments associated with the study
+
+			@returns collection of comments
+		'''
+		return self.comments_modelcollection_class.fetch(parent=self, **kwargs)
+
+	def comments_from_json(self, jdata, **kwargs):
+		'''	Initialize comments from JSON
+
+			@returns collection of comments
+		'''
+		return self.server._init_dataclass_from_json(
+			self.comments_modelcollection_class, jdata, pacs=self.pacs, parent=self, study=self, **kwargs)
+
+	@property
+	def comments_collection(self):
+		'''	Comments associated with the study
+		'''		
+		if getattr(self, '_comments', None) is None:
+			setattr(self, '_comments', self.fetch_comments())
+
+		return self._comments
+
+	@comments_collection.setter
+	def comments_collection(self, comments_collection):
+		'''	Set comments collection property for the study
+		'''
+		if not isinstance(comments_collection, self.comments_modelcollection_class):
+			raise ValueError('Input must be an instance of a comments collection')
+
+		setattr(self, '_comments', comments_collection)
+
+	def create_comment(self, text, data=None, **kwargs):
+		'''	Create a comment for the study
+
+			@input text (str): Text for the comment
+		'''
+		data = data or {}
+		data.update({ 'Text': text })
+
+		return self.comments_modelcollection_class.create(self, data, **kwargs)
+
+	def get_comment(self, cid, *args, **kwargs):
+		'''	Retrieve a comment instance
+
+			@input cid (str): Orthanc resource ID (resource.pk) of the comment to be retrieved.
+
+			@returns comment instance
+		'''
+		return self.comments_modelcollection_class.fetch_modelinstance(self, cid, *args, **kwargs)
+
 	def _populate_subcollections(self, 
 			populate_sr=True, populate_seg=True, populate_m3d=True, populate_doc=True):
 		'''	Populate study SR and SEG collections from the series collection
@@ -1084,13 +1454,13 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 		# Retrieve job instance 
 		if asynchronous:
-			response_json = r.json()
+			response_json = server_controloperation_json_response(r)
 			from .jobs import OrthancJob
 			return self.pacs.get_imaging_resource(response_json['ID'], OrthancJob, headers=headers, **kwargs)
 		
 		# Retrieve new imaging study
 		else:
-			response_json = r.json()
+			response_json = server_controloperation_json_response(r)
 			return self.pacs.get_imaging_resource(response_json['TargetStudy'], ImagingStudy, headers=headers, **kwargs)
 
 
@@ -1400,7 +1770,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 			@returns collection of comments
 		'''
 		return self.server._init_dataclass_from_json(
-			self.comments_modelcollection_class, jdata, pacs=self.pacs, series=self, **kwargs)
+			self.comments_modelcollection_class, jdata, pacs=self.pacs, parent=self, series=self, **kwargs)
 
 	@property
 	def comments_collection(self):
@@ -1445,6 +1815,10 @@ class ImagingSeries(ImagingSeriesCoreResource):
 	'''
 	@property
 	def dcminstance_modelcollection_class(self): return DcmInstanceCollection
+
+	@property
+	def kafka_url(self):
+		return posixpath.join(self.resource_url, 'kafka')
 
 	@property
 	@functools.lru_cache()
@@ -1745,6 +2119,10 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 	def resource_url(self):
 		return posixpath.join(self.fetch_endpoint, self.pk)
 
+	@property
+	def kafka_url(self):
+		return posixpath.join(self.resource_url, 'kafka')
+
 	def fetch_tags(self, *args, **kwargs):
 		'''	Retrieve tags for the DICOM instance
 		'''
@@ -1756,7 +2134,7 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 				r),
 			headers=self.pacs.orthanc_request_headers(), verify=kwargs.get('verify'))
 
-		return r.json()
+		return server_controloperation_json_response(r)
 
 	@property
 	def tags(self):
@@ -1778,7 +2156,7 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 				), r),
 			headers=self.pacs.orthanc_request_headers(), verify=kwargs.get('verify'))
 
-		return r.json()
+		return server_controloperation_json_response(r)
 
 	@property
 	def dcmtags(self):
@@ -1985,13 +2363,6 @@ class DcmInstance(DcmInstanceCoreResource):
 	def plane_type(self):
 		return int(self.tags.get('PlaneType')) if self.tags.get('PlaneType') \
 			else self.tags.get('PlaneType')
-
-	@property
-	def ts(self):
-		'''	Date/time of the instance. (Created from the content_date and content_time properties.)
-			Returns None if there is not content date value. Content time is used if available,
-			with midnight used if it is not.
-		'''
 
 
 class DcmInstanceCoreCollection(ImagingServerChildCollection):
