@@ -8,6 +8,7 @@ from ..apisettings import SONADOR_IMAGING_SERVER, IMAGING_SERVER_RESOURCE_STUDY,
 
 from ..tasks.uploads import imageserver_upload_archive
 from ..test import SonadorBaseTestCase
+from ..tasks.maintenance import imageserver_index_seriesdata
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +50,13 @@ class SonadorEnvironmentTests(SonadorBaseTestCase):
 
 		# Load file data to an archive and upload to Sonador
 		hcache, _ = imageserver_upload_archive(iserver, response2filearchive(ctr))
+		imageserver_index_seriesdata(iserver, hcache)
 
 		# Check the Orthanc instance to ensure that the image was indexed correctly
 		for hkey, hmeta in hcache.items():			
 			
 			# Query Orthanc DB
-			results = iserver.query({ hkey.header: hkey.uid }, resource=hkey.resource)
+			results = iserver.query({ hkey.header: hkey.uid }, resource=hkey.resource, rapid_lookup=False)
 			self.assertEqual(len(results), 1, msg=('Unable to retrieve match for resource (%s) %s=%s' if len(results) == 0
 				else 'Retrieved more than a single match for resource (%s) %s=%s') % (hkey.resource, hkey.header, hkey.uid))
 

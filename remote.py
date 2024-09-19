@@ -341,7 +341,7 @@ def sonador_dataobject_update(datamodel_instance, object_data, dataobject_endpoi
 	'''
 	# Server and data object API endpoint
 	server = server or datamodel_instance.server
-	dataobject_endpoint = dataobject_endpoint or posixpath.join(datamodel_instance.fetch_endpoint, datamodel_instance.pk)
+	dataobject_endpoint = dataobject_endpoint or posixpath.join(datamodel_instance.fetch_endpoint, str(datamodel_instance.pk))
 
 	# Create request components: URL, headers, keyword arguments
 	rurl = getattr(server, apiurl_callable)(dataobject_endpoint)

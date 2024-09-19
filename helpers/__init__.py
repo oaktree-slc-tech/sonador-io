@@ -35,14 +35,14 @@ from ..serialization import json_datetime_parser, dcm_str2datetime, DCM_DATETIME
 logger = logging.getLogger(__name__)
 
 
-OAUTH_TOKEN_RESPONSE_TYPE = 'token'
+OAUTH_TOKEN_RESPONSE_TYPE = gcapicodes.TOKEN
 OAUTH_TOKEN_IDTOKEN_RESPONSE_TYPE = 'id_token token'
-OAUTH_ACCESS_TOKEN = 'access_token'
-OAUTH_TOKEN_TYPE = 'token_type'
-OAUTH_TOKEN_TYPE_BEARER = 'Bearer'
+OAUTH_ACCESS_TOKEN = gcapicodes.AUTH_ACCESS_TOKEN
+OAUTH_TOKEN_TYPE = gcapicodes.AUTH_TOKEN_TYPE
+OAUTH_TOKEN_TYPE_BEARER = gcapicodes.AUTH_TOKEN_BEARER
 OAUTH_EXPIRATION = 'expires_in'
 
-API_ACCESS_TOKEN = 'api-token'
+API_ACCESS_TOKEN = gcapicodes.AUTH_API_ACCESS_TOKEN
 
 
 def fetch_sonador_session_token(sonador_server, verify=False, credentials_endpoint='/visionaire/api/login'):
@@ -373,4 +373,4 @@ def dcm_tag2hexcode(header):
 		return dcm_hstr[:4], dcm_hstr[4:]
 
 	# Unable to retrieve valid tag for the provided header, return None
-	return	
+	return

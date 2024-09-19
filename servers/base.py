@@ -1,6 +1,8 @@
 import six, abc, requests, json, csv, collections, logging, posixpath, zipfile, time
-from urllib.parse import urlencode
+from warnings import warn
 from pprint import pprint
+
+from urllib.parse import urlencode
 from io import BytesIO
 
 from tabulate import tabulate
@@ -30,10 +32,44 @@ from ..remote import SonadorBaseObject, SonadorObjectCollection, \
 logger = logging.getLogger(__name__)
 
 
+class OrthancServerAuthDataCollectionMixin(abc.ABC):
+	'''	Mixin class which provides methods for working with Orthanc user/group classes
+	'''
+	def init_auth_collection_mixin(self, *args, **kwargs):
+		'''	Ensure that the parent server has a user data collection class and group
+			data collection class defined.
+		'''
+		if not self.server:
+			raise ValueError('Unable to initialize %s, no parent server' % type(self).__name__)
+		if not hasattr(self.server, 'user_datacollection_class'):
+			raise ValueError(
+				'Unable to initialize %s, parent server does not include a user datacollection class' % type(self).__name__)
+		if not hasattr(self.server, 'group_datacollection_class'):
+			raise ValueError(
+				'Unable to initialize %s, parent server does not include a group datacollection class' % type(self).__name__)
+
+	def _user_datacollection_class(self, user_datacollection_class=None, **kwargs):
+		'''	Retrieve the user data collection class which should be used for operations
+		'''
+		if user_datacollection_class is None:
+			user_datacollection_class = self.server.user_datacollection_class
+
+		return user_datacollection_class
+
+	def _group_datacollection_class(self, group_datacollection_class=None, **kwargs):
+		'''	Retrieve the group data collection class which should be used for operations
+		'''
+		if group_datacollection_class is None:
+			group_datacollection_class = self.server.group_datacollection_class
+
+		return group_datacollection_class
+
+
 class OrthancServerBase(SonadorBaseObject):
 	'''	Mixin object which provides methods for working with Orthanc.
 	'''
 	details_exclude = ('token',)
+	tools_find_endpoint = 'tools/find'
 
 	def __init__(self, *args, resource_cache=None, **kwargs):
 		self.resource_cache = resource_cache or {}
@@ -77,10 +113,11 @@ class OrthancServerBase(SonadorBaseObject):
 		''' Sonador API URL from which the base server configuration should be retrieved.
 		'''
 
-	def orthanc_apiurl(self, resource_endpoint, query_params=''):
+	def orthanc_apiurl(self, resource_endpoint, query_params='', query_lowercase=False):
 		'''	Create URL for the Orthanc API call
 		'''
-		return build_url(self.scheme, self.netloc, resource_endpoint, query_params=query_params)
+		return build_url(self.scheme, self.netloc, resource_endpoint, 
+			query_params=query_params, query_lowercase=query_lowercase)
 
 	@abc.abstractmethod
 	def orthanc_request_headers(self, headers=None):
@@ -111,7 +148,7 @@ class OrthancServerBase(SonadorBaseObject):
 		'''
 		return fetch_sonador_data_collection(self.server, self.modality_datacollection_class,
 			data_collection_endpoint=posixpath.join(
-				self.fetch_endpoint, self.pk, self.modality_datacollection_class.model.dcm_urlroot), 
+				self.fetch_endpoint, str(self.pk), self.modality_datacollection_class.model.dcm_urlroot), 
 			pacs=self, **kwargs)
 
 	@property
@@ -128,12 +165,12 @@ class OrthancServerBase(SonadorBaseObject):
 		'''
 		return fetch_sonador_data_collection(self.server, self.dicomweb_remote_datacollection_class,
 			data_collection_endpoint=posixpath.join(
-				self.fetch_endpoint, self.pk, self.dicomweb_remote_datacollection_class.model.dcmweb_urlroot), 
+				self.fetch_endpoint, str(self.pk), self.dicomweb_remote_datacollection_class.model.dcmweb_urlroot), 
 			pacs=self, **kwargs)
 
 	@property
 	def dicomweb_remotes(self):
-		'''	Remote DICOMweb  instances associated with the imaging server (cached property)
+		'''	Remote DICOMweb instances associated with the imaging server (cached property)
 		'''
 		if getattr(self, '_dweb', None) is None:
 			setattr(self, '_dweb', self.fetch_dicomweb_remotes())
@@ -149,7 +186,7 @@ class OrthancServerBase(SonadorBaseObject):
 		return fetch_sonador_dataobject(
 			self.server, self.dicomweb_remote_datacollection_class.model, rid, verify=verify, pacs=self,
 			dataobject_endpoint=posixpath.join(
-				self.fetch_endpoint, self.pk, self.dicomweb_remote_datacollection_class.model.dcmweb_urlroot, rid))
+				self.fetch_endpoint, str(self.pk), self.dicomweb_remote_datacollection_class.model.dcmweb_urlroot, str(rid)))
 
 	def dicomweb_push(self, rdweb, resources, op=None, headers=None, verify=None, async_transfer=True, priority=None):
 		'''	Push resources from the current imaging server to the provided remote DICOMweb instance
@@ -232,8 +269,8 @@ class OrthancServerBase(SonadorBaseObject):
 
 				# Retry upload
 				if retry_count < retry_limit:
-					
-					# Pause for retry
+		
+                    # Pause for retry
 					if pause_for_retry: time.sleep(pause_for_retry)
 
 					logger.warning('Unable to upload image to PACS %s. Status code: %s. Retry transfer: %s/%s.'
@@ -251,7 +288,8 @@ class OrthancServerBase(SonadorBaseObject):
 
 			else: raise err
 
-	def get_imaging_resource(self, rid, resource_type, headers=None, verify=None, cache=False, **kwargs):
+	def get_imaging_resource(self, rid, resource_type, headers=None, verify=None, cache=False,
+			request_kwargs=None, **kwargs):
 		'''	Retrieve the requested resource
 
 			@input rid (str): Orthanc ID (resource.pk) of the resource to be retrieved.
@@ -264,17 +302,17 @@ class OrthancServerBase(SonadorBaseObject):
 			return self.resource_cache[rid]
 
 		r = self._request_get(
-			self.orthanc_apiurl(posixpath.join(resource_type.fetch_endpoint, rid)), 
+			self.orthanc_apiurl(posixpath.join(resource_type.fetch_endpoint, str(rid))), 
 			lambda r: request_client_error(
 				'Unable to retrieve requested resource %s instance %s. Status code: %s' % (
 					rid, resource_type, r.status_code),
 				r),
-			headers=self.orthanc_request_headers(headers=headers), verify=verify)
+			headers=self.orthanc_request_headers(headers=headers), verify=verify, **(request_kwargs or {}))
 
 		# Retrieve resource instance
 		if not kwargs.get('pacs'): 
 			kwargs['pacs'] = self
-		resource = self.server._init_dataclass(resource_type, r, **kwargs)
+		resource = self.server._init_dataclass(resource_type, r, **omit(kwargs, ('request_kwargs',)))
 
 		# Cache local copy
 		if cache:
@@ -316,9 +354,15 @@ class OrthancServerBase(SonadorBaseObject):
 		from ..imaging.orthanc import DcmInstance
 		return self.get_imaging_resource(rid, DcmInstance, headers=headers, cache=cache, **kwargs)
 
+	@abc.abstractmethod
+	def query_url(self, *args, **kwargs):
+		'''	Retrieve the URL which should be used for request queries
+		'''
+
 	def query(self, sfilter, expand=True, limit=None, offset=None, query=None, headers=None, verify=None, 
 			resource=IMAGING_SERVER_RESOURCE_SERIES, resource_modelcollection_class=None, 
-			rapid_lookup=None, bulkpopulate_related=False, bulkpopulate_options=None, order_by=None, **kwargs):
+			rapid_lookup=None, bulkpopulate_related=False, bulkpopulate_options=None, 
+			order_by=None, request_kwargs=None, **kwargs):
 		'''	Submit a query to Orthanc with the provided filter terms
 
 			@input sfilter (dict): Terms to be included in the request
@@ -332,13 +376,8 @@ class OrthancServerBase(SonadorBaseObject):
 			@input query (dict, default=new dict): Existing dictionary structure to be expanded with 
 				the provided search query.
 			@input headers (dict, default=new dict): Headers to be included with the query request.
-			@input rapid_lookup (bool or None, default=None): Use the Orthanc/Sonador cache API to perform queries.
-				(The resource cache is a retrieved from a REST endpoint and is distinct from the local image server cache.)
-				Cache API queries are faster than the `/tools/find` but are "eventually consistent"
-				and may return different results than the traditional endpoint. True will use resource cache
-				endpoints and indicate that linked resources should also cache endpoints when calling query methods.
-				False will set a strong preference against use of the cache (also propagates to linked resources),
-				None will avoid use of cache endpoints but does not propagate to child resources.
+			@input rapid_lookup (bool or None, default=None): Use the the rapid lookup interface to perform queries.
+				Passed to resource collections.
 			@input bulkpopulate_related (bool, default=False): toggles whether to call the bulkpopulate_related method
 				on the results collection, which is able to fetch related models for the collection.
 			@input bulkpopulate_options (dict, default=None): options to be passed to the bulk populate method.
@@ -384,14 +423,21 @@ class OrthancServerBase(SonadorBaseObject):
 			else:
 				raise ValueError('Invalid order_by value "%s". order_by supports str and tuple/list sequences.' % str(order_by))
 
+		# For RapidLookup=False, add parameter to request. This will cause the request to be passed
+		# to the database lookup engine rather than using the rapid interface.
+		if rapid_lookup == False:
+			query['RapidLookup'] = rapid_lookup
+
 		# Orthanc query structure
 		logger.debug('Orthanc query:\n%s' % json.dumps(query))
 
 		# Execute query
 		r = self._request_post(
-			self.orthanc_apiurl(resource_modelcollection_class.model.cache_queryurl) if rapid_lookup else self.orthanc_apiurl('tools/find'),
-			lambda r: request_client_error('Unable to execute resource query to PACS %s. Status code: %s.' % (self.server_label, r.status_code), r),
-			json=query, headers=self.orthanc_request_headers(headers=headers), verify=verify)
+			self.query_url(resource_modelcollection_class, rapid_lookup=rapid_lookup, order_by=order_by, **kwargs),
+			lambda r: request_client_error('Unable to execute resource query to PACS %s (url="%s". Status code: %s.' % (
+					self.server_label, r.request.url, r.status_code
+				), r),
+			json=query, headers=self.orthanc_request_headers(headers=headers), verify=verify, **(request_kwargs or {}))
 
 		# Parse response
 		if not kwargs.get('pacs'):
@@ -511,7 +557,9 @@ class OrthancServerBase(SonadorBaseObject):
 		r = self._request_get(
 			self.orthanc_apiurl(OrthancJobCollection.model.fetch_endpoint, query_params={ 'expand': expand }),
 			error_msg=lambda r: request_client_error(
-				'Unable to retrieve jobs from PACS %s. Status code: %s.' % (self.server_label, r.status_code), r),
+				'Unable to retrieve jobs from PACS %s (url="%s". Status code: %s.' % (
+					self.server_label, r.request.url, r.status_code
+				), r),
 			headers=self.orthanc_request_headers(headers=headers), verify=verify)
 
 		# Parse response
@@ -544,10 +592,12 @@ class OrthancServerBase(SonadorBaseObject):
 		r = self._request_get(
 			self.orthanc_apiurl('system'), 
 			error_msg=lambda r: request_client_error(
-				'Unable to retrieve configuration from PACS %s. Status code: %s.' % (self.server_label, r.status_code), r),
-			headers=self.orthanc_request_headers(headers=kwargs.get('headers', {})), **kwargs)
+				'Unable to retrieve configuration from PACS %s (url="%s"). Status code: %s.' % (
+					self.server_label, r.request.url, r.status_code
+				), r),
+			headers=self.orthanc_request_headers(**kwargs), **kwargs)
 
-		return r.json()
+		return server_controloperation_json_response(r)		
 
 
 
@@ -589,8 +639,8 @@ class ImagingServerChildCollectionFetchMixin:
 
 		if not error_msg:
 			error_msg = lambda r: request_client_error(
-				'Unable to retrieve model %s from PACS server %s. Status code: %s.' % (
-					cls.model.__name__, pacs.server_label, r.status_code
+				'Unable to retrieve model %s from PACS server %s (url="%s"). Status code: %s.' % (
+					cls.model.__name__, pacs.server_label, r.request.url, r.status_code
 				), r)
 
 		# Retrieve server data
@@ -613,8 +663,8 @@ class ImagingServerChildCollectionFetchMixin:
 
 		if not error_msg:
 			error_msg = lambda r: request_client_error(
-				'Unable to retrieve %s=%s from PACS server %s. Status code: %s' % (
-					cls.model.__name__, pacs.server_label, r.status_code
+				'Unable to retrieve %s=%s from PACS server %s (url="%s"). Status code: %s' % (
+					cls.model.__name__, pacs.server_label, r.request.url, r.status_code
 				), r)
 
 		return fetch_sonador_dataobject(

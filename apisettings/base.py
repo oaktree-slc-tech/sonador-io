@@ -48,6 +48,7 @@ from highdicom.sr.templates import Code, CodedConcept, MeasurementsAndQualitativ
 	DEFAULT_LANGUAGE as DCMSR_DEFAULT_LANGUAGE
 from highdicom.sr.value_types import ContainerContentItem, CodeContentItem, TextContentItem, NumContentItem
 
+from client.remote.serialization import DCM_DATETIME_STRFORMAT, DCM_DATETIME_STRFORMAT_ALT1
 from client.utils.object import pick, omit, gextend
 from client.utils.colors import RGB
 from client.utils.microservices import JsonBaseObject, JsonObjectCollection
@@ -90,6 +91,7 @@ DCM_JSON_MIMETYPE = 'application/json'
 
 # DICOM Metadata key/value data structures
 DicomMetaKey = namedtuple('DicomMetaKey', ('resource', 'header', 'uid'))
+
 
 class DicomMeta:
 	'''	Helper data class for working with DICOM metadata
@@ -212,6 +214,9 @@ DCMHEADER_CONTEXT_GROUP_VERSION = 'ContextGroupVersion'
 DCMCODE_CONTEXT_UID = ('0008', '0117')
 DCMHEADER_CONTEXT_UID = 'ContextUID'
 
+IMAGING_SERVER_LEVEL = 'Level'
+IMAGING_SERVER_WILDCARD = '*'
+IMAGING_SERVER_LABELS = 'Labels'
 
 IMAGING_SERVER_RESOURCE_PATIENT = 'Patient'
 IMAGING_SERVER_RESOURCE_STUDY = 'Study'
@@ -219,10 +224,15 @@ IMAGING_SERVER_RESOURCE_SERIES = 'Series'
 IMAGING_SERVER_RESOURCE_IMAGE = 'Instance'
 IMAGING_SERVER_RESOURCE_REPORT = 'Report'
 
+IMAGING_SERVER_DCM_TAG = 'DcmTag'
+IMAGING_SERVER_DCM_TAG_VALUE = 'DcmTagValue'
+
 IMAGING_SERVER_UID_REGEX_STR = r'(.+)?(?P<uid>([0-9a-fA-F]{8}\-?){5})(.+)?'
 IMAGING_SERVER_UID_REGEX = re.compile(IMAGING_SERVER_UID_REGEX_STR)
 DICOM_UID_REGEX_STR = r'(?P<uid>(\b[0-9]+(\.[0-9]+)+\b))'
 DICOM_UID_REGEX = re.compile(DICOM_UID_REGEX_STR)
+IMAGING_SESRVER_GROUP_UID_REGEX_STR = r'.*?(?P<group>\d+).*?'
+IMAGING_SESRVER_GROUP_UID_REGEX = re.compile(IMAGING_SESRVER_GROUP_UID_REGEX_STR)
 
 IMAGING_SERVER_RESOURCE_SUPPORTED = (
 	IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES)
@@ -231,6 +241,11 @@ IMAGING_SERVER_RESOURCE_LEVEL = {
 	IMAGING_SERVER_RESOURCE_STUDY: 1,
 	IMAGING_SERVER_RESOURCE_SERIES: 2,
 	IMAGING_SERVER_RESOURCE_IMAGE: 3,
+}
+IMAGING_SERVER_AUTHREQUEST_LEVEL_LOOKUP = {
+	IMAGING_SERVER_RESOURCE_PATIENT.lower(): IMAGING_SERVER_RESOURCE_PATIENT,
+	IMAGING_SERVER_RESOURCE_STUDY.lower(): IMAGING_SERVER_RESOURCE_STUDY,
+	IMAGING_SERVER_RESOURCE_SERIES.lower(): IMAGING_SERVER_RESOURCE_SERIES,
 }
 
 IMAGING_SERVER_LAST_UPDATE = 'LastUpdate'
@@ -241,6 +256,7 @@ IMAGING_SERVER_PATIENT_MAINDICOM = 'PatientMainDicomTags'
 IMAGING_SERVER_DICOMTAGS_SIGNATURE = 'MainDicomTagsSignature'
 IMAGING_SERVER_PARENT_PATIENT = 'ParentPatient'
 IMAGING_SERVER_PARENT_STUDY = 'ParentStudy'
+IMAGING_SERVER_REQUESTED_TAGS = 'RequestedTags'
 
 
 # DICOM Versions
@@ -256,6 +272,11 @@ DCM_QUERY_ALLFIELDS = 'allFields'
 DCM_QUERY_NULL = '(null)'
 DCM_QUERY_NOT_NULL = '!%s' % DCM_QUERY_NULL
 
+
+# DICOM Code Enumerated Values
+
+DCM_YES = 'YES'
+DCM_NO = 'NO'
 
 
 # DICOM Header Definitions
@@ -411,10 +432,14 @@ DCMHEADER_REFERRING_PHYSICIAN = 'ReferringPhysicianName'
 DCMHEADER_PHYSICIANS_OF_RECORD = 'PhysiciansOfRecord'
 
 DCMHEADER_MANUFACTURER = 'Manufacturer'
+DCMHEADER_MANUFACTER_MODEL_NAME = 'ManufacturerModelName'
 DCMHEADER_STATION_NAME = 'StationName'
 
 DCMHEADER_REQUESTED_PROCEDURE_ID = 'RequestedProcedureID'
 DCMHEADER_REQUESTED_PROCEDURE_DESCRIPTION = 'RequestedProcedureDescription'
+
+
+# Clinical Trial and Data Headers
 
 DCMHEADER_CLINICAL_TRIAL_SERIES_ID = 'ClinicalTrialSeriesID'
 DCMHEADER_CLINICAL_TRIAL_PROTOCOLID = 'ClinicalTrialProtocolID'
@@ -425,6 +450,9 @@ DCMHEADER_CLINICAL_TRIAL_COORDINATING_CENTER_NAME = 'ClinicalTrialCoordinatingCe
 DCMHEADER_CLINICAL_TRIAL_TIMEPOINT_ID = 'ClinicalTrialTimePointID'
 DCMHEADER_CLINICAL_TRIAL_SITE_ID = 'ClinicalTrialSiteID'
 DCMHEADER_CLINICAL_TRIAL_SITE_NAME = 'ClinicalTrialSiteName'
+
+DCMCODE_SYNTHETIC_DATA = ('0008', '001C')
+DCMHEADER_SYNTHETIC_DATA = 'SyntheticData'
 
 
 # Coordinate System and Spatial Headers
@@ -554,10 +582,17 @@ DCMHEADER_LATERALITY = 'Laterality'
 
 DCM_LATERALITY_RIGHT = 'R'
 DCM_LATERALITY_LEFT = 'L'
+LATERALITY_RIGHT_LABEL = 'right'
+LATERALITY_LEFT_LABEL = 'left'
+
+PROXIMAL_LABEL = 'proximal'
+DISTAL_LABEL = 'distal'
 
 DCMHEADER_SERIES_NUMBER = 'SeriesNumber'
 DCMHEADER_SERIES_TYPE = 'SeriesType'
 DCMHEADER_OPERATORS_NAME = 'OperatorsName'
+
+DCMHEADER_SOFTWARE_VERSIONS = 'SoftwareVersions'
 
 DCMHEADER_IMAGES_IN_ACQUISITION = 'ImagesInAcquisition'
 DCMHEADER_CARDIAC_NUMBER_OF_IMAGES = 'CardiacNumberOfImages'
@@ -611,6 +646,7 @@ DCMSR_UNITS_MM = dcmcodes.UCUM.mm
 DCMSR_UNITS_ANGLE_DEGREE = dcmcodes.UCUM.Degree
 DCMSR_UNITS_ANGLE_RADIAN = dcmcodes.UCUM.Radian
 
+DCMHEADER_SR_CONTENT_SEQUENCE = 'ContentSequence'
 DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE = 'PertinentOtherEvidenceSequence'
 DCMHEADER_SR_REF_SERIES_SEQ = 'ReferencedSeriesSequence'
 DCMHEADER_SR_REF_INSTANCE_SEQ = 'ReferencedInstanceSequence'
@@ -663,8 +699,6 @@ DCM_PATIENT_POSITION_LABELS = {
 	DCM_PATIENT_POSITION_FFDL: 'Feet First Decubitus Left',
 }
 
-DCM_DATETIME_STRFORMAT = '%Y%m%d%H%M%S.%f'
-DCM_DATETIME_STRFORMAT_ALT1 = '%Y%m%d%H%M%S'
 DCM_DATE_STRFORMAT = '%Y%m%d'
 DCM_DATE_STRFORMAT_ALT1 = '%Y-%m%d'
 DCM_DATE_STRFORMAT_ALT2 = '%m/%d/%Y'
@@ -684,10 +718,12 @@ DCM_MODALITY_BI = 'BI'
 DCM_MODALITY_BMD = 'BMD'
 DCM_MODALITY_CR = 'CR'
 DCM_MODALITY_CT = 'CT'
+DCM_MODALITY_CR = 'CR'
 DCM_MODALITY_CTPROTOCOL = 'CTPROTOCOL'
 DCM_MODALITY_DG = 'DG'
 DCM_MODALITY_DOC = 'DOC'
 DCM_MODALITY_DX = 'DX'
+DCM_MODALITY_DR = 'DR'
 DCM_MODALITY_ECG = 'ECG'
 DCM_MODALITY_EPS = 'EPS'
 DCM_MODALITY_ES = 'ES'
@@ -746,9 +782,12 @@ DCM_MODALITY_US = 'US'
 DCM_MODALITY_VA = 'VA'
 DCM_MODALITY_XA = 'XA'
 DCM_MODALITY_XC = 'XC'
+DCM_MODALITY_XR = 'XR'
 
 DCM_MODALITIES_MRI = [DCM_MODALITY_MR, 'MRI', 'MR\\SD']
 DCM_MODALITIES_CT = [DCM_MODALITY_CT, DCM_MODALITY_IVOCT, DCM_MODALITY_CTPROTOCOL]
+DCM_MODALITIES_XRAY = [
+	DCM_MODALITY_CR, DCM_MODALITY_DX, DCM_MODALITY_DR, DCM_MODALITY_OT, DCM_MODALITY_PX, DCM_MODALITY_XR]
 
 DCM_MODALITIES = (
 	DCM_MODALITY_AR, DCM_MODALITY_ASMT, DCM_MODALITY_AU,
@@ -1076,8 +1115,8 @@ class ImageCoordCollection(SRDataObjectCollection):
 
 
 class Finding(SRDataCollectionMember):
-	'''	Qualitative finding associated with a resource. (Provides a sim;lified
-			implementation of DICOM-SR TID E501.)
+	'''	Qualitative finding associated with a resource. (Provides a simlified
+		implementation of DICOM-SR TID E501.)
 	'''
 	def __init__(self, name, finding, finding_type=None, **kwargs):
 		'''	Initialize finding
@@ -1097,7 +1136,6 @@ class Finding(SRDataCollectionMember):
 	def finding(self):
 		return self._finding
 
-	@property
 	def create_sr(self, **kwargs):
 		from .sr import srencode_finding
 		return srencode_finding(self, **kwargs)

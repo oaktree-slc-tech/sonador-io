@@ -1,18 +1,24 @@
 import six, requests, json, csv, collections, logging, posixpath, zipfile, time
+from warnings import warn
+
 from urllib.parse import urlencode
 from pprint import pprint
 from io import BytesIO
 
+from typing import List, Union
+
 from tabulate import tabulate
 from collections import OrderedDict
 from collections.abc import Iterable
+
+from highdicom.sr import CodedConcept
 
 from client import apisettings as gcapicodes
 from client import auth as guru_auth
 from client.utils.urls import build_url
 from client.utils.object import pick, omit
 from client.utils.microservices import RemotePage, server_controloperation_json_response
-from client.utils.format import formerrors2str
+from client.utils.format import formerrors2str, ERRORS_ALL
 from client.utils.conversion import str2bool
 from client.errors import ClientOperationError, ConfigurationError
 from client.remote import RemoteServer, request_client_error
@@ -27,16 +33,18 @@ from ..helpers import request_client_error, fetch_sonador_session_token, API_ACC
 from ..remote import SonadorBaseObject, SonadorObjectCollection, \
 	fetch_sonador_data_collection, fetch_sonador_dataobject, \
 	sonador_dataobject_create, sonador_dataobject_update
+from ..errors import only_duplicate_resource_error
 
-from .base import OrthancServerBase, ImagingServerChildBaseObject, ImagingServerChildCollection
+from .base import OrthancServerBase, ImagingServerChildBaseObject, ImagingServerChildCollection, OrthancServerAuthDataCollectionMixin
 from .dicom import ImagingServerModalityMixin, DicomImagingModality, DicomImagingModalityCollection, \
 	RemoteDICOMwebServer, RemoteDICOMwebServerCollection
+from .auth import SonadorGroupAccessControlListCollection
 
 logger = logging.getLogger(__name__)
 
 
 
-# PACS Imaging Servers
+# Sonador Server
 
 IMAGING_SERVER_OUTPUT_COLUMNS = OrderedDict((
 		('pk', 'ID'),
@@ -57,7 +65,7 @@ class SonadorServer(RemoteServer):
 	'''
 
 	def __init__(self, sonador_url, access_id=None, secret_key=None, apitoken=None, verify=False,
-			internal_dns=False, localenv=None):
+			internal_dns=False, localenv=None, sonador_authdata=None, apitoken_type=None):
 		'''	Initialize the server instance
 
 			@input sonador_url (str): Full URL to the server instance
@@ -70,13 +78,17 @@ class SonadorServer(RemoteServer):
 		self.internal_dns = internal_dns
 		
 		# Auth: API token and token type
-		self.sonador_authdata = None
+		self.sonador_authdata = sonador_authdata
 
 		# Local environment variables for the Sonador Server instance.
 		self.localenv = localenv or {}
 
 		# Initialize parent class
-		super().__init__(sonador_url, access_id=access_id, secret_key=secret_key, apitoken=apitoken, verify=verify)
+		super().__init__(sonador_url, access_id=access_id, secret_key=secret_key, 
+			apitoken=apitoken, apitoken_type=apitoken_type, verify=verify)
+
+	def with_credentials(self, **kwargs):
+		return super().with_credentials(internal_dns=self.internal_dns, **kwargs)
 
 	@property
 	def apitoken(self):
@@ -92,7 +104,7 @@ class SonadorServer(RemoteServer):
 			required to access a secure resource.
 		'''
 		# Add API token as a request header (if present)
-		if self.apitoken_type == API_ACCESS_TOKEN and self.apitoken:
+		if self.apitoken_type in (API_ACCESS_TOKEN, OAUTH_TOKEN_TYPE_BEARER) and self.apitoken:
 			return build_url(self.scheme, self.netloc, resource_endpoint)
 
 		# Add optional URL signature components
@@ -118,6 +130,10 @@ class SonadorServer(RemoteServer):
 		if self.apitoken_type == API_ACCESS_TOKEN and self.apitoken:
 			headers.update({ API_ACCESS_TOKEN: self.apitoken })
 
+		# Add Bearer token to Authorization header (if present)
+		elif self.apitoken_type == OAUTH_TOKEN_TYPE_BEARER and self.apitoken:
+			headers.update({ gcapicodes.AUTH.title(): '%s %s' % (OAUTH_TOKEN_TYPE_BEARER, self.apitoken) })
+
 		return headers
 
 	def sonador_apiurl(self, *args, **kwargs):
@@ -142,6 +158,10 @@ class SonadorServer(RemoteServer):
 
 		return verify
 
+	@property
+	def imageserver_datacollection_class(self):
+		return SonadorImagingServerCollection
+
 	def get_imageserver(self, uid, imageserver_datamodel_class=None, **kwargs):
 		'''	Retrieve model data for the specified Imaging/PACS server
 
@@ -153,10 +173,16 @@ class SonadorServer(RemoteServer):
 			@returns SonadorImagingServer model instance
 		'''		
 		if imageserver_datamodel_class is None:
-			imageserver_datamodel_class = SonadorImagingServer
+			imageserver_datamodel_class = self.imageserver_datacollection_class.model
 
 		return fetch_sonador_dataobject(self, imageserver_datamodel_class, uid, verify=self.verify_ssl(**kwargs), 
 			**omit(kwargs, ('verify',)))
+
+	def imageserver_modelinstance_from_json(self, jdata, **kwargs):
+		'''	Initialize Imaging/PACS server from JSON data
+		'''
+		return self._init_dataclass(
+			self.imageserver_datacollection_class.model, jdata, **kwargs)
 
 	def get_gateway(self, uid, gateway_datamodel_class=None, **kwargs):
 		'''	Retrieve model data for the specified Clinical Gateway
@@ -198,22 +224,26 @@ class SonadorServer(RemoteServer):
 		'''
 		return fetch_sonador_session_token(self, verify=self.verify_ssl(**kwargs))
 
-	def fetch_imageservers(self, *args, imageserver_collection_class=None, **kwargs):
+	def fetch_imageservers(self, *args, imageserver_datacollection_class=None, **kwargs):
 		''' Retrieve collection of PACS servers for a given Sonador instance
 		'''
-		if imageserver_collection_class is None:
-			imageserver_collection_class = SonadorImagingServerCollection
+		if imageserver_datacollection_class is None:
+			imageserver_datacollection_class = self.imageserver_datacollection_class
 
 		return fetch_sonador_data_collection(
-			self, imageserver_collection_class, *args, verify=self.verify_ssl(**kwargs), **omit(kwargs, ('verify',)))
+			self, imageserver_datacollection_class, *args, verify=self.verify_ssl(**kwargs), **omit(kwargs, ('verify',)))
+
+	@property
+	def credential_datacollection_class(self):
+		from .auth import SonadorSecureApiCredentialCollection
+		return SonadorSecureApiCredentialCollection
 
 	def fetch_user_apiaccess_credentials(self, *args, credential_class=None, **kwargs):
 		'''	Retrieve secure API access credentials for the user. (User identity is taken from the
 			Sonador server Access ID/secret or active auth token.)
 		'''		
 		if credential_class is None:
-			from .auth import SonadorSecureApiCredentialCollection
-			credential_class = SonadorSecureApiCredentialCollection
+			credential_class = self.credential_datacollection_class
 
 		return fetch_sonador_data_collection(self, credential_class, *args, 
 			verify=self.verify_ssl(**kwargs), **omit(kwargs, ('verify',)))
@@ -222,19 +252,22 @@ class SonadorServer(RemoteServer):
 		'''	Create API access credential for the user
 		'''
 		if credential_class is None:
-			from .auth import SonadorSecureApiCredential
-			credential_class = SonadorSecureApiCredential
+			credential_class = self.credential_datacollection_class.model
 
 		return sonador_dataobject_create(self, credential_class, object_data or {}, 
 			verify=self.verify_ssl(**kwargs), **omit(kwargs, ('verify',)))
+
+	@property
+	def apitoken_datacollection_class(self):
+		from  .auth import SonadorApiTokenCollection
+		return SonadorApiTokenCollection
 
 	def fetch_user_apitokens(self, object_data=None, credential_class=None, **kwargs):
 		'''	Retrieve API access tokens for the user. (User identity is taken from the Sonador server Access ID/secret
 			or the active auth token.)
 		'''
 		if credential_class is None:
-			from .auth import SonadorApiTokenCollection
-			credential_class = SonadorApiTokenCollection
+			credential_class = self.apitoken_datacollection_class
 
 		return fetch_sonador_data_collection(self, credential_class, verify=self.verify_ssl(**kwargs), 
 			**omit(kwargs, ('verify',)))
@@ -243,21 +276,285 @@ class SonadorServer(RemoteServer):
 		'''	Create an API access token for the user
 		'''
 		if credential_class is None:
-			from .auth import SonadorApiToken
-			credential_class = SonadorApiToken
+			credential_class = self.apitoken_datacollection_class.model
 		
 		return sonador_dataobject_create(self, credential_class, object_data or {}, \
 			verify=self.verify_ssl(**kwargs), **omit(kwargs, ('verify',)))
 
+	@property
+	def group_datacollection_class(self):
+		from .auth import SonadorGroupCollection
+		return SonadorGroupCollection
 
-class SonadorImagingServer(OrthancServerBase):
+	def _admin_group_query(self, query, group_datacollection_class=None, **kwargs):
+		'''	Submit a group query to Sonador admin endpoint with the provided filter terms.
+
+			@input query (dict): dictionary of terms for the query
+
+			returns instance of group_datacollection_class
+		'''
+		if group_datacollection_class is None:
+			group_datacollection_class = self.group_datacollection_class
+
+		return fetch_sonador_data_collection(self, group_datacollection_class, filters=query, verify=self.verify_ssl(**kwargs))
+
+	def admin_group_lookup(self, group_uids: List[int], group_datacollection_class=None, **kwargs):
+		'''	Retrieve the details of the groups specified in the group_uids
+
+			@input group_uids (list of integer user IDs/int): group IDs for the which the details should be retrieved
+
+			@returns collection of group instances
+		'''
+		if group_datacollection_class is None:
+			group_datacollection_class = self.group_datacollection_class
+
+		r = requests.post(self.sonador_apiurl(posixpath.join(group_datacollection_class.model.fetch_endpoint, 'lookup')),
+			json={ 'groups': group_uids }, verify=self.verify_ssl(**kwargs), headers=self.sonador_request_headers())
+
+		if not r.ok:
+			return request_client_error('Unable to execute group lookup due to an error.', r)
+
+		rdata = server_controloperation_json_response(r)
+		return self._init_dataclass_from_json(
+			group_datacollection_class, rdata.get('results', []), **omit(kwargs, ('verify',)))
+	
+	def admin_create_group(self, name, group_datacollection_class=None, attrs=None, fetch_existing=True, **kwargs):
+		''' Create a group for users on Sonador server.
+		'''
+		if group_datacollection_class is None:
+			group_datacollection_class = self.group_datacollection_class
+
+		try:
+
+			# Add name to group attributes
+			attrs = attrs or {}
+			attrs.update({ 'name': name })
+
+			# Create group instance
+			_r = sonador_dataobject_create(self, group_datacollection_class.model, attrs, verify=self.verify_ssl(**kwargs), 
+				**omit(kwargs, ('verify',)))
+
+			# Retrieve group instance UID
+			_uid = _r.get(gcapicodes.OBJECT_DATA, {}).get(group_datacollection_class.model.pk_attr)
+			if not _uid:
+				raise ValueError('Unable to retrieve group ID from creation request, unable to set attributes')
+
+			# Add id attribute and retrieve instance from Server
+			return self.admin_get_group(_uid, group_datacollection_class=group_datacollection_class)
+
+		# If a group instance already exists, return the existing model instance
+		except ClientOperationError as err:
+
+			# Attempt to retrieve existing instance of the group
+			if fetch_existing and only_duplicate_resource_error(err, field_check='name'):
+				_groups = self._admin_group_query({ 'name': name }, group_datacollection_class=group_datacollection_class, **kwargs)
+				if len(_groups) == 1:
+					return _groups[0]
+
+			# Raise operation error
+			raise err
+	
+	def admin_get_group(self, uid, group_datacollection_class=None, **kwargs):
+		'''	Retrieve group instance from the Sonador server. This method requires admin access to the server.
+		'''
+		if group_datacollection_class is None:
+			group_datacollection_class = self.group_datacollection_class
+
+		return fetch_sonador_dataobject(self, group_datacollection_class.model, uid, verify=self.verify_ssl(**kwargs),
+			**omit(kwargs, ('verify',)))
+
+	@property
+	def user_datacollection_class(self):
+		from .auth import SonadorUserCollection
+		return SonadorUserCollection
+
+	def _admin_user_query(self, query, user_datacollection_class=None, **kwargs):
+		'''	Submit a user query to Sonador admin endpoint with the provided filter terms.
+
+			@input query (dict): dictionary of terms for the query
+
+			@returns instance of user_datacollection_class
+		'''
+		if user_datacollection_class is None:
+			user_datacollection_class = self.user_datacollection_class
+
+		return fetch_sonador_data_collection(self, user_datacollection_class, filters=query, verify=self.verify_ssl(**kwargs))
+
+	def admin_user_lookup(self, user_uids: List[int], user_datacollection_class=None, **kwargs):
+		'''	Retrieve the details of the users specified in user_uids
+
+			@input user_uids (list of integer user IDs/int): user IDs for which the details should be retrieved
+
+			@returns collection of user instances
+		'''
+		if user_datacollection_class is None:
+			user_datacollection_class = self.user_datacollection_class
+
+		r = requests.post(self.sonador_apiurl(posixpath.join(user_datacollection_class.model.fetch_endpoint, 'lookup')),
+			json={ 'users': user_uids }, verify=self.verify_ssl(**kwargs), headers=self.sonador_request_headers())
+
+		if not r.ok:
+			return request_client_error('Unable to execute user lookup due to an error.', r)
+
+		rdata = server_controloperation_json_response(r)
+		return self._init_dataclass_from_json(
+			user_datacollection_class, rdata.get('results', []), **omit(kwargs, ('verify',)))
+
+	def admin_create_user(self, username, password, is_staff=False, is_superuser=False, 
+			user_datacollection_class=None, attrs=None, fetch_existing=True, update_existing=True, **kwargs):
+		'''	Create a user account on the Sonador server. User creation is a two-step process.
+			The user instance is first created and then the account attributes are set
+			via an update request. This method requires admin access to the server.
+
+			@returns user_class instance
+		'''
+		if user_datacollection_class is None:
+			user_datacollection_class = self.user_datacollection_class
+
+		# Create attributes hash
+		attrs = attrs or {}
+		attrs.update({ 'is_staff': is_staff, 'is_superuser': is_superuser })
+
+		try:
+
+			# Create user instance
+			_r = sonador_dataobject_create(self, user_datacollection_class.model, {
+					'username': username, 'password1': password, 'password2': password,
+				}, verify=self.verify_ssl(**kwargs), **omit(kwargs, ('verify',)))
+
+			# Retrieve user instance UID
+			_uid = _r.get(gcapicodes.OBJECT_DATA, {}).get(user_datacollection_class.model.pk_attr)
+			if not _uid:
+				raise ValueError('Unable to retrieve user ID from creation request, unable to set attributes')
+
+			# Add user attributes and retrieve instance from server
+			self.admin_get_user(_uid, user_datacollection_class=user_datacollection_class).update(attrs)
+			return self.admin_get_user(_uid, user_datacollection_class=user_datacollection_class)
+
+		# If user instance already exists, return the existing model instance
+		except ClientOperationError as err:
+
+			# Attempt to retrieve existing instance of the user
+			if fetch_existing and only_duplicate_resource_error(err, field_check='username'):
+				_users = self._admin_user_query({ 'username': username }, user_datacollection_class=user_datacollection_class, **kwargs)
+				if len(_users) == 1:
+					_user = _users[0]
+
+					if update_existing:
+						_user.update(attrs)
+						_user = self.admin_get_user(_user.pk, user_datacollection_class=user_datacollection_class)
+
+					return _user
+
+			# Raise operation error
+			raise err
+
+	def admin_get_user(self, uid, user_datacollection_class=None, **kwargs):
+		'''	Retrieve user instance from the Sonador server. This method requires admin access to the server.
+		'''
+		if user_datacollection_class is None:
+			user_datacollection_class = self.user_datacollection_class
+
+		return fetch_sonador_dataobject(self, user_datacollection_class.model, uid, verify=self.verify_ssl(**kwargs),
+			**omit(kwargs, ('verify',)))
+
+	def _check_userinstance(self, user, user_datacollection_class=None, **kwargs):
+		'''	Ensure that the provided user instance matches the user type for the server
+		'''
+		if user_datacollection_class is None:
+			user_datacollection_class = self.user_datacollection_class
+
+		if not isinstance(user, user_datacollection_class.model):
+			raise TypeError('Invalid user instance, must be of type: %s' % user_datacollection_class.model.__name__)
+
+	@property
+	def admin_credential_datacollection_class(self):
+		from .auth import AdminSonadorSecureApiCredentialCollection
+		return AdminSonadorSecureApiCredentialCollection
+
+	def admin_fetch_user_apiaccess_credentials(self, user, credential_class=None, **kwargs):
+		'''	Retrieve secure API access credentials for the provided user instance via the Sonador
+			admin API.
+		'''
+		if credential_class is None:
+			credential_class = self.admin_credential_datacollection_class
+
+		# Specify data collection endpoint, retrieve the credentials for the provided user
+		self._check_userinstance(user, **kwargs)
+		kwargs['data_collection_endpoint'] = posixpath.join(user.url, credential_class.model.cred_urlroot)
+		return self.fetch_user_apiaccess_credentials(credential_class=credential_class, user=user, **kwargs)
+
+	def admin_create_user_apiaccess_credential(self, user, credential_class=None, **kwargs):
+		'''	Create API access credentials for the specified user instance from the Sonador admin API
+		'''
+		if credential_class is None:
+			credential_class = self.admin_credential_datacollection_class.model
+
+		# Specify data creation endpoint, create the credentials for the provided user
+		self._check_userinstance(user, **kwargs)
+		kwargs['dataobject_endpoint'] = posixpath.join(user.url, credential_class.cred_urlroot)
+		return self.create_user_apiaccess_credential(credential_class=credential_class, user=user, **kwargs)
+
+	@property
+	def admin_apitoken_datacollection_class(self):
+		from .auth import AdminSonadorApiTokenCollection
+		return AdminSonadorApiTokenCollection
+
+	def admin_fetch_user_apitokens(self, user, credential_class=None, **kwargs):
+		'''	Retrieve API access tokens for the provided user via the admin API.
+		'''
+		if credential_class is None:
+			credential_class = self.admin_apitoken_datacollection_class
+
+		# Specify data collection ednpoint, retrieve the API token instances for the provided user
+		self._check_userinstance(user, **kwargs)
+		kwargs['data_collection_endpoint'] = posixpath.join(user.url, credential_class.model.cred_urlroot)
+		return self.fetch_user_apitokens(credential_class=credential_class, user=user, **kwargs)
+
+	def admin_create_user_apitoken(self, user, credential_class=None, **kwargs):
+		'''	Create API access token for the provided user via the admin API.
+		'''
+		if credential_class is None:
+			credential_class = self.admin_apitoken_datacollection_class.model
+
+		# Specify data creation endpoint, create the credentials for the provided user
+		self._check_userinstance(user, **kwargs)
+		kwargs['dataobject_endpoint'] = posixpath.join(user.url, credential_class.cred_urlroot)
+		return self.create_user_apitoken(credential_class=credential_class, user=user, **kwargs)
+
+	def admin_verify_user_credentials(self, token_key, token_value, **kwargs):
+		'''	Verify the provided token key and value using the Sonador global endpoint.
+			If valid, a copy of the full user context (profile and group membership) will be
+			part of the response.
+
+			@returns response-like object
+		'''
+		r = requests.post(self.sonador_apiurl('/visionaire/api/user/introspect/profile'),
+			json={ 'token_key': token_key, 'token_value': token_value, },
+			verify=self.verify_ssl(**kwargs), headers=self.sonador_request_headers())
+
+		if not r.ok:
+			request_client_error('Unable to verify Sonador API credentials due to an error.', r)
+
+		return server_controloperation_json_response(r)
+
+
+
+# Imaging Server
+
+class SonadorImagingServer(OrthancServerAuthDataCollectionMixin, OrthancServerBase):
 	'''	Object representation of a Sonador imaging server
 	'''
 	fetch_endpoint = '/visionaire/api/pacs'
 	tabulate_output_columns = IMAGING_SERVER_OUTPUT_COLUMNS
 	tools_endpoint = 'tools'
+	tools_secure_find_endpoint = 'tools/secure-find'
 
-	def _request_get(self, resource_endpoint, error_msg=None, headers=None, verify=None, **kwargs):
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.init_auth_collection_mixin(*args, **kwargs)
+
+	def _request_get(self, resource_endpoint, error_msg=None, headers=None, **kwargs):
 		''' Send a GET request to the imaging server. Raises an exception with the provided error message
 			if the request could not be completed successfully.
 
@@ -267,10 +564,8 @@ class SonadorImagingServer(OrthancServerBase):
 
 			@returns request.Response or JSON object (dict/array)
 		'''
-		if verify is None:
-			verify = self.server.verify
-
-		r = requests.get(resource_endpoint, headers=headers, verify=verify, **kwargs)
+		r = requests.get(resource_endpoint, headers=headers, verify=self.server.verify_ssl(**kwargs), 
+			**omit(kwargs, ('verify',)))
 		if not r.ok:
 
 			# Custom error message
@@ -285,16 +580,14 @@ class SonadorImagingServer(OrthancServerBase):
 
 		return r
 
-	def _request_post(self, resource_endpoint, error_msg=None, headers=None, verify=None, **kwargs):
+	def _request_post(self, resource_endpoint, error_msg=None, headers=None, **kwargs):
 		'''	Send a POST request to the imaging server. Raises an exception with the provided error message
 			if the request could not be completed successfully.
 
 			@returns request.Response or JSON object (dict/array)
 		'''
-		if verify is None:
-			verify = self.server.verify
-
-		r = requests.post(resource_endpoint, headers=headers, verify=verify, **kwargs)
+		r = requests.post(resource_endpoint, headers=headers, verify=self.server.verify_ssl(**kwargs), 
+				**omit(kwargs, ('verify',)))
 		if not r.ok:
 
 			# Custom error message
@@ -309,16 +602,14 @@ class SonadorImagingServer(OrthancServerBase):
 
 		return r
 
-	def _request_delete(self, resource_endpoint, error_msg=None, headers=None, verify=None, **kwargs):
+	def _request_delete(self, resource_endpoint, error_msg=None, headers=None, **kwargs):
 		'''	Send a DELETE request to the imaging server. Raises an exception with the provided error message
 			if the request could not be completed successfully.
 
 			@returns request.Response or JSON object (dict/array)
 		'''
-		if verify is None:
-			verify= self.server.verify
-
-		r = requests.delete(resource_endpoint, headers=headers, verify=verify, **kwargs)
+		r = requests.delete(resource_endpoint, headers=headers, verify=self.server.verify_ssl(**kwargs), 
+				**omit(kwargs, ('verify',)))
 		if not r.ok:
 
 			# Custom error message
@@ -342,7 +633,8 @@ class SonadorImagingServer(OrthancServerBase):
 		if verify is None:
 			verify= self.server.verify
 
-		r = requests.put(resource_endpoint, headers=headers, verify=verify, **kwargs)
+		r = requests.put(resource_endpoint, headers=headers, verify=self.verify_ssl(**kwargs), 
+				**omit(kwargs, ('verify',)))
 		if not r.ok:
 
 			# Custom error message
@@ -357,10 +649,69 @@ class SonadorImagingServer(OrthancServerBase):
 
 		return r
 
+	def _orthanc_group_datamodel_class(self, orthanc_group_datamodel_class=None, **kwargs):
+		'''	Retrieve the Orthanc group data model class to be used for operations
+		'''
+		if orthanc_group_datamodel_class is None:
+			orthanc_group_datamodel_class = self.orthanc_group_datamodel_class
+
+		return orthanc_group_datamodel_class
+
 	def __init__(self, *args, **kwargs):
 
 		# Cache to be used when fetching resources
 		super().__init__(*args, **kwargs)
+
+	def query_url(self, resource_modelcollection_class, secure_find=True, rapid_lookup=True, order_by=None, *args, **kwargs):
+		'''	Retrieve the URL which should be used for resource queries:
+			
+			Cloud query URLs:
+			* /tools/secure-find: ACL mediated (unified) query endpoint. Provides
+				the same set of functionality and features as the Sonador resource
+				cache endpoints (see below).
+			* /cache/{resource-type} (DEPRECATED): query endpoint provided by the
+				Sonador resource cache which provides additional functionality
+				beyond the built-in (database) API of Orthanc. Requires administrative access.
+			* /tools/find: build-in (database) interface provided by Orthanc. Requires administrative access.
+
+			@input secure_find (bool or None, default=True): Utilize the /tools/secure-find 
+				endpoint for resource queries. /tools/secure-find is a cache-enabled, 
+				ACL mediated endpoint that provides the same API as the internal /tools/find, 
+				and is equivalent to the Sonador cache resource specific endpoint.
+			@input rapid_lookup (bool or None, default=None): DEPRECATED. Use the Orthanc/Sonador 
+				cache API to perform queries. (The resource cache is a retrieved from a REST 
+				endpoint and is distinct from the local image server cache.)
+				Cache API queries are faster than the `/tools/find` but are "eventually 
+				consistent" and may return different results than the traditional endpoint.
+				True will use resource cache endpoints and indicate that linked resources 
+				should also cache endpoints when calling query methods. False will set a strong 
+				preference against use of the cache (also propagates to linked resources),
+				None will avoid use of cache endpoints but does not propagate to child resources.
+
+			@returns str: query endpoint
+
+			Using `secure_find=False` and `rapid_lookup=True` will cause the cache
+			endpoint to be used. To direct requests to `/tools/find`, both `secure_find` 
+			and `rapid_lookup` must be false.
+		'''
+		# Deprecation warning for the use of RapidLookup by itself
+		if not secure_find and rapid_lookup:
+			warn('The use of `rapid_lookup=True` via Sonador resource cache endpoints is deprecated, use `/tools/secure-find` '
+				+ '(`secure_find=True` option) instead.', DeprecationWarning, stacklevel=2)
+
+		# Use /tools/secure-find
+		if secure_find:
+			query_endpoint = self.tools_secure_find_endpoint
+
+		# /cache/{resource-type} Sonador resource cache endpoint (requires administrative permissions)
+		elif not secure_find and rapid_lookup:
+			query_endpoint = resource_modelcollection_class.model.cache_queryurl
+
+		# Database lookup: /tools/find
+		else:
+			query_endpoint = self.tools_find_endpoint
+
+		return self.orthanc_apiurl(query_endpoint)
 
 	@property
 	def modality_datacollection_class(self):
@@ -369,6 +720,46 @@ class SonadorImagingServer(OrthancServerBase):
 	@property
 	def dicomweb_remote_datacollection_class(self):
 		return RemoteDICOMwebServerCollection
+
+	@property
+	def group_acl_datacollection_class(self, *args, **kwargs):
+		'''	Data collection class which should be used by the server base for managing ACL instances.
+		'''
+		return SonadorGroupAccessControlListCollection
+
+	@property
+	def orthanc_group_datamodel_class(self, *args, **kwargs):
+		from ..imaging.orthanc.group import OrthancGroup
+		return OrthancGroup
+
+	def fetch_acl(self, verify=None, **kwargs):
+		'''	Retrieve access control lists associated with the server
+		'''
+		return fetch_sonador_data_collection(self.server, self.group_acl_datacollection_class, pacs=self, 
+			verify=self.server.verify_ssl(**kwargs),
+			data_collection_endpoint=posixpath.join(self.fetch_endpoint, str(self.pk), self.group_acl_datacollection_class.model.acl_urlroot),
+			**omit(kwargs, ('verify',)))
+
+	@property
+	def acl(self):
+		'''	Group access control lists associated with the server
+		'''
+		if getattr(self, '_acl', None) is None:
+			setattr(self, '_acl', self.fetch_acl())
+
+		return self._acl
+
+	def get_acl(self, rid, group_acl_datacollection_class=None,  **kwargs):
+		'''	Retrieve group access control list
+		'''
+		if group_acl_datacollection_class is None:
+			group_acl_datacollection_class = self.group_acl_datacollection_class
+
+		return fetch_sonador_dataobject(
+			self.server, group_acl_datacollection_class.model, rid, pacs=self, verify=self.server.verify_ssl(**kwargs),
+			dataobject_endpoint=posixpath.join(
+				self.fetch_endpoint, str(self.pk), self.group_acl_datacollection_class.model.acl_urlroot, str(rid)),
+			**omit(kwargs, ('verify',)))
 
 	@property
 	def internal_netloc(self):
@@ -467,7 +858,7 @@ class SonadorImagingServer(OrthancServerBase):
 		'''
 		if not resources:
 			raise ValueError('You must set resources to be deleted')
-        
+		
 		bulk_delete_dict = {'Resources': resources,}
 
 		# Execute operation
@@ -480,14 +871,14 @@ class SonadorImagingServer(OrthancServerBase):
 			verify=None, create_archive_dict: dict=None, **kwargs) -> dict:
 		''' Create a zip archive containing the requested DICOM resources (patients, studies, series, and instances).
 
-            @input resources (list): Orthanc UIDs of resources to include in the archive file.
+			@input resources (list): Orthanc UIDs of resources to include in the archive file.
 			@input asynchronous (boolean, default=False): 
 			@input priority (integer, default=0): In asynchronous mode, the priority of the job. 
 				The lower the value, the higher the priority.
 			@input transcode(string, default=None): If present, the DICOM files in the archive 
 				will be transcoded to the provided transfer syntax: https://book.orthanc-server.com/faq/transcoding.html
-        	
-        	@returns OrthancJob if async is True, otherwise zipfile.ZipFile archive.
+			
+			@returns OrthancJob if async is True, otherwise zipfile.ZipFile archive.
 		'''
 		create_archive_dict = create_archive_dict or {}
 
@@ -522,12 +913,12 @@ class SonadorImagingServer(OrthancServerBase):
 	
 	def fetch_bulk_content(self, uids: list, full: bool=False, metadata: str=True, resource=None,
 			short: bool=False, headers: dict=None, verify=None, bulk_content_dict: dict=None, cache=False, 
-			rapid_lookup: bool=False, **kwargs) -> dict:
+			bulk_endpoint=None, rapid_lookup: bool=True, **kwargs) -> dict:
 		''' Get the content all the DICOM patients, studies, series or instances whose identifiers are provided in 
-            the Resources field, in one single call.
+			the Resources field, in one single call.
 
-            @input uids (list): Orthanc resource UIDS (pk) of the Orthanc identifiers of the 
-            	patients/studies/series/instances of interest.
+			@input uids (list): Orthanc resource UIDS (pk) of the Orthanc identifiers of the 
+				patients/studies/series/instances of interest.
 			@input resource (string): Optional argument which specifies the level of interest (can be Patient, Study, 
 				Series or Instance). Orthanc will loop over the items inside Resources, and explore upward or 
 				downward in the DICOM hierarchy in order to find the level of interest.
@@ -536,6 +927,8 @@ class SonadorImagingServer(OrthancServerBase):
 			@input metadata(bool, default=True): If set to true (default value), the metadata 
 				associated with the resources will also be retrieved. 
 			@input short (bool, default=False): If set to true, report the DICOM tags in hexadecimal format.
+			@input bulk_endpoint (str, default='/tools/bulk-content'): bulk endpoint to which the request
+				should be sent
 		'''	
 		bulk_content_dict = bulk_content_dict or {}
 
@@ -544,20 +937,20 @@ class SonadorImagingServer(OrthancServerBase):
 			'Full': full, 
 			'Metadata': metadata,
 			'Resources': uids,
-			'Short': short 
+			'Short': short,
+			'RapidLookup': rapid_lookup,
 		})
 
 		if resource:
 			bulk_content_dict['Level'] = resource
 
 		# Determine bulk endpoint URL to use
-		bulk_endpoint = posixpath.join('cache', self.tools_endpoint, 'bulk-content') if rapid_lookup \
-			else posixpath.join(self.tools_endpoint, 'bulk-content')
+		bulk_endpoint = bulk_endpoint or posixpath.join(self.tools_endpoint, 'bulk-content')
 
 		# Execute operation
 		logger.debug('Structure of bulk content request:\n%s' % json.dumps(bulk_content_dict))
 		resources_response = self._bulk_content_request(
-			bulk_endpoint, bulk_content_dict, headers=headers, verify=verify, cache=cache)
+			posixpath.join(self.tools_endpoint, 'bulk-content'), bulk_content_dict, headers=headers, verify=verify, cache=cache)
 		resources = {}
 
 		# Initialize resource model instances
@@ -610,32 +1003,32 @@ class SonadorImagingServer(OrthancServerBase):
 			 
 			@input resources (list): List of the Orthanc identifiers of the patients/studies/series/instances of interest.
 			@input replace (dict): Associative array to change the value of some DICOM tags in the DICOM instances. 
-			 	Starting with Orthanc 1.9.4, paths to subsequences can be provided using the same syntax 
+				Starting with Orthanc 1.9.4, paths to subsequences can be provided using the same syntax 
 				as the dcmodify command-line tool (wildcards are supported as well).
 			@input asynchronous (bool, default=False): If true, run the job in asynchronous mode, which 
-			 	means that the REST API call will immediately return, reporting the identifier of a job. 
-			 	Prefer this flavor wherever possible.
+				means that the REST API call will immediately return, reporting the identifier of a job. 
+				Prefer this flavor wherever possible.
 			@input force (boolean, default=False): Allow the modification of tags related to DICOM 
-			 	identifiers, at the risk of breaking the DICOM model of the real world.
+				identifiers, at the risk of breaking the DICOM model of the real world.
 			@input keep (list, default=None): Keep the original value of the specified tags, to be 
-			 	chosen among the StudyInstanceUID, SeriesInstanceUID and SOPInstanceUID tags. Avoid this 
-			 	feature as much as possible, as this breaks the DICOM model of the real world.
+				chosen among the StudyInstanceUID, SeriesInstanceUID and SOPInstanceUID tags. Avoid this 
+				feature as much as possible, as this breaks the DICOM model of the real world.
 			@input keep_sources (bool, default=True): If set to false, instructs Orthanc to the remove 
-			 	original resources. By default, the original resources are kept in Orthanc.
+				original resources. By default, the original resources are kept in Orthanc.
 			@input level (str, default=None): Level of the modification (Patient, Study, Series or Instance). 
-			 	If absent, the level defaults to Instance, but is set to Patient if PatientID is modified, 
-			 	to Study if StudyInstanceUID is modified, or to Series if SeriesInstancesUID is modified
+				If absent, the level defaults to Instance, but is set to Patient if PatientID is modified, 
+				to Study if StudyInstanceUID is modified, or to Series if SeriesInstancesUID is modified
 			@input permissive (bool, default=True): If true, ignore errors during the individual steps of the job.
 			@input priority (int, default=0): In asynchronous mode, the priority of the job. The lower the value, 
-			 	the higher the priority.
+				the higher the priority.
 			@input private_creator (string, default=None): The private creator to be used for private tags in Replace.
 			@input remove (list, default=None): List of tags that must be removed from the DICOM instances. 
-			 	Starting with Orthanc 1.9.4, paths to subsequences can be provided using the same syntax as 
-			 	the dcmodify command-line tool (wildcards are supported as well).
+				Starting with Orthanc 1.9.4, paths to subsequences can be provided using the same syntax as 
+				the dcmodify command-line tool (wildcards are supported as well).
 			@input remove_private_tags (bool, default=False): Remove the private tags from the DICOM instances 
-			 	(defaults to false).
+				(defaults to false).
 			@input transcode (str, default=None): iterable ot tags to be removed outside of those
-			 	specified in the standard.
+				specified in the standard.
 
 			@returns request.Response
 		'''
@@ -701,13 +1094,13 @@ class SonadorImagingServer(OrthancServerBase):
 			'%s (%s)' % (self.name, self.pk)
 		return self.pk
 
-	def orthanc_apiurl(self, resource_endpoint, query_params=''):
+	def orthanc_apiurl(self, resource_endpoint, query_params='', query_lowercase=False):
 		'''	Create URL for Orthanc API call
 		'''
 		if self.server.internal_dns:
-			return build_url(self.internal_scheme, self.internal_netloc, resource_endpoint, query_params=query_params)
+			return build_url(self.internal_scheme, self.internal_netloc, resource_endpoint, query_params=query_params, query_lowercase=query_lowercase)
 
-		return super().orthanc_apiurl(resource_endpoint, query_params=query_params)
+		return super().orthanc_apiurl(resource_endpoint, query_params=query_params, query_lowercase=query_lowercase)
 
 	def orthanc_request_headers(self, headers=None):
 		'''	Add headers required by Orthanc API
@@ -733,7 +1126,7 @@ class SonadorImagingServer(OrthancServerBase):
 		rdata = super().update(odata, *args, **kwargs)
 		return self.server.get_imageserver(self.pk)
 
-	def connection_state(self, *args, headers=None, **kwargs):
+	def connection_state(self, *args, **kwargs):
 		'''	Retrieve the connection state for the server
 		'''
 		return self._request_get(
@@ -741,19 +1134,19 @@ class SonadorImagingServer(OrthancServerBase):
 			lambda r: request_client_error(
 				'Unable to retrieve connection status for server %s. Status code: %s.' % (self.server_label, r.status_code),
 				r),
-			headers=self.orthanc_request_headers(headers=headers), **kwargs)
+			headers=self.orthanc_request_headers(**kwargs), **kwargs)	
 
-	def cache_dcm_tags(self, *args, headers=None, sep=',', **kwargs):
+	def cache_dcm_tags(self, *args, sep=',', **kwargs):
 		'''	Retrieve list of DICOM tags configured for the server
 		'''
 		dcmtags = kwargs.get('dcmtags') or OrderedDict()
 
 		rtags = self._request_get(
 			self.orthanc_apiurl('/cache/dcm-tags'),
-			lambda r: request_client_error(
-				'Unable to retrieve DICOM tags for server %s. Status code: %s.' % (self.server_label, r.status_code),
-				r),
-			headers=self.orthanc_request_headers(headers=headers), **kwargs)
+			lambda r: request_client_error('Unable to retrieve DICOM tags for server %s. Status code: %s.' % (
+					self.server_label, r.status_code
+				), r),
+			headers=self.orthanc_request_headers(**kwargs), **omit(kwargs, ('headers',)))
 
 		# Unpack DICOM tag data
 		for rtype, rtags in rtags.json().items():
@@ -772,6 +1165,206 @@ class SonadorImagingServer(OrthancServerBase):
 				dcmtags[_code] = (rtype, DicomHeaderData(dcm.get('tag'), _code, int(_code[1], 16), _vr))
 
 		return dcmtags
+
+	def admin_create_acl(self, group, perms, group_acl_datacollection_class=None, 
+			fetch_existing=True, update_existing=True, **kwargs):
+		'''	Create ACL policy for the provided group contining the specified permissions
+
+			@input group (SonadorGroup): Sonador group instance for which the policy should be created
+			@input perms (dict): permissions which should be applied to the group
+			@input fetch_existing (bool, default=True): if a policy exists for the specified group, retrieve
+				the existing instance
+			@input update_existing (bool, default=True): if a policy exists for the specified group, update
+				the permissions of the existing instance to match those provided in perms.
+
+			@returns ACL instance
+		'''
+		group_datacollection_class = self._group_datacollection_class(**kwargs)
+		if group_acl_datacollection_class is None:
+			group_acl_datacollection_class = self.group_acl_datacollection_class
+
+		if not isinstance(group, group_datacollection_class.model):
+			raise TypeError('Invalid group instance, must be of type %s' % group_datacollection_class.model.__name__)
+		if not isinstance(perms, dict):
+			raise TypeError('Invalid permissions dict')
+
+		# Create JSON payload for request
+		perms['group'] = group.pk
+
+		try:
+
+			# Create ACL instance
+			_r = sonador_dataobject_create(self.server, group_acl_datacollection_class, perms, pacs=self, 
+				verify=self.server.verify_ssl(**kwargs),
+				dataobject_endpoint=posixpath.join(self.fetch_endpoint, self.pk, group_acl_datacollection_class.model.acl_urlroot),
+				**omit(kwargs, ('verify', 'group_datacollection_class')))
+
+			# Retrieve ACL instance UID
+			_uid = _r.get(gcapicodes.OBJECT_DATA, {}).get(group_acl_datacollection_class.model.pk_attr)
+			if not _uid:
+				raise ValueError('Unable to retrieve ACL ID from creation request.')
+
+			# Retrieve ACL model instance
+			return self.get_acl(_uid)
+
+		except ClientOperationError as err:
+
+			# Check to see if the only error is due to an already existing policy, if so
+			# retrieve the existing instance and update.
+			if fetch_existing and only_duplicate_resource_error(err):
+				_acls = fetch_sonador_data_collection(self.server, group_acl_datacollection_class, pacs=self,
+					verify=self.verify_ssl(**kwargs),
+					data_collection_endpoint=posixpath.join(self.fetch_endpoint, self.pk, group_acl_datacollection_class.model.acl_urlroot),
+					filters={ 'group': group.name })
+				if len(_acls) == 1:
+					_acl = _acls[0]
+
+					if update_existing:
+						_acl.update(perms)
+						_acl = self.get_acl(_acl.pk, group_acl_datacollection_class=group_acl_datacollection_class)
+
+					return _acl
+			
+			# Raise operation error
+			raise err
+
+	def admin_verify_user_credentials(self, token_key, token_value, **kwargs):
+		'''	Verify the provided token key and value using the imaging server introspection endpoint. If valid, a copy of the
+			user context will be provided for the server including the profile and the groups
+			that have been authorized for the imaging server instance.
+
+			@returns response-like object
+		'''
+		r = requests.post(self.server.sonador_apiurl(posixpath.join(self.fetch_endpoint, self.pk, 'user/introspect/profile')),
+			json={ 'token_key': token_key, 'token_value': token_value },
+			verify=self.server.verify_ssl(**kwargs), headers=self.server.sonador_request_headers())
+
+		if not r.ok:
+			request_client_error(
+				'Unable to verify Sonador API credentials server="%s" due to an error.' % self.server_label, r)
+
+		return server_controloperation_json_response(r)
+
+	def user_query(self, ufilter, *args, **kwargs):
+		'''	Submit a user query to Sonador with the provided filter terms. Search results are only those
+			users which have a group policy authorizing access to the imaging server.
+		'''
+		user_datacollection_class = self._user_datacollection_class(**kwargs)
+
+		r = requests.post(self.server.sonador_apiurl(posixpath.join(self.fetch_endpoint, self.pk, 'user/search')),
+			json=ufilter, verify=self.server.verify_ssl(**kwargs), headers=self.server.sonador_request_headers())
+
+		if not r.ok:
+			request_client_error('Unable to execute user search query due to an error.', r)
+
+		rdata = server_controloperation_json_response(r)
+		return self.server._init_dataclass_from_json(
+			user_datacollection_class, rdata.get('results', []), *args, **omit(kwargs, ('verify', 'user_datacollection_class')))
+
+	def user_lookup(self, user_uids: List[int], **kwargs):
+		'''	Retrieve the details of the users specified in users_uids
+
+			@input user_uids (list of integer user IDs/int): user IDs for which the details should be retrieved
+
+			@returns collection of user instances
+		'''
+		user_datacollection_class = self._user_datacollection_class(**kwargs)
+				
+		r = requests.post(self.server.sonador_apiurl(posixpath.join(self.fetch_endpoint, self.pk, 'user/lookup')),
+			json={ 'users': user_uids }, verify=self.server.verify_ssl(**kwargs), headers=self.server.sonador_request_headers())
+
+		if not r.ok:
+			return request_client_error('Unable to execute user lookup due to an error.', r)
+
+		rdata = server_controloperation_json_response(r)
+		return self.server._init_dataclass_from_json(
+			user_datacollection_class, rdata.get('results', []), **omit(kwargs, ('verify', 'user_datacollection_class')))
+
+	def group_query(self, gfilter, *args, **kwargs):
+		'''     Submit a group query to Sonador with the provided filter terms
+		'''
+		group_datacollection_class = self._group_datacollection_class(**kwargs)
+
+		r = requests.post(self.server.sonador_apiurl(posixpath.join(self.fetch_endpoint, self.pk, 'group/search')),
+			json=gfilter, verify=self.server.verify_ssl(**kwargs), headers=self.server.sonador_request_headers())
+
+		if not r.ok:
+			return request_client_error('Unable to execute group search query due to an error.', r)
+
+		rdata = server_controloperation_json_response(r)
+		return self.server._init_dataclass_from_json(
+			group_datacollection_class, rdata.get('results', []), *args, **omit(kwargs, ('verify', 'group_datacollection_class')))
+
+	def group_lookup(self, group_uids: List[int], **kwargs):
+		'''	Retrieve the details of the groups specified in groups_uids
+
+			@input group_uids (list of integer user IDs/int): group IDs for which the details should be retrieved
+
+			@returns collection of group instances
+		'''
+		group_datacollection_class = self._group_datacollection_class(**kwargs)
+
+		r = requests.post(self.server.sonador_apiurl(posixpath.join(self.fetch_endpoint, self.pk, 'group/lookup')),
+			json={ 'groups': group_uids }, verify=self.server.verify_ssl(**kwargs), headers=self.server.sonador_request_headers())
+
+		if not r.ok:
+			return request_client_error('Unable to execute group lookup due to an error.', r)
+
+		rdata = server_controloperation_json_response(r)
+		return self.server._init_dataclass_from_json(
+			group_datacollection_class, rdata.get('results', []), **omit(kwargs, ('verify',)))
+
+	def create_tag(self, group, tag, orthanc_group_datamodel_class=None, **kwargs):
+		'''	Create a tag from the provided concept
+
+			@input group (sonador.servers.auth.SonadorGroup): group which the tag should be added to
+			@input tag (highdicom.sr.CodedConcept): coded concept that should be used to create the tag
+		'''
+		group_datacollection_class = self._group_datacollection_class(**kwargs)
+		orthanc_group_datamodel_class = self._orthanc_group_datamodel_class(**kwargs)
+
+		if not isinstance(group, group_datacollection_class.model):
+			raise TypeError('Invalid group instance, must be of type %s' % group_datacollection_class.model.__name__)
+		if not isinstance(tag, CodedConcept):
+			raise TypeError('Invalid concept %s, must be of type %s' % (content, CodedConcept.__name__))
+
+		# Initialize Orthanc group instance and create tag
+		orthanc_group = orthanc_group_datamodel_class(self, group)
+		return orthanc_group.create_tag(tag, 
+			**omit(kwargs, ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')))
+
+	def fetch_tags(self, group, **kwargs):
+		''' Retrieve the tags for the provided group
+		'''
+		group_datacollection_class = self._group_datacollection_class(**kwargs)
+		orthanc_group_datamodel_class = self._orthanc_group_datamodel_class(**kwargs)
+
+		if not isinstance(group, group_datacollection_class.model):
+			raise TypeError('Invalid group instance, must be of type %s' % group_datacollection_class.model.__name__)
+
+		# Initialize Orthanc group instance and fetch tag collection
+		orthanc_group = orthanc_group_datamodel_class(self, group)
+		return orthanc_group.fetch_tags(
+			**omit(kwargs, ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')))
+
+	def get_tag(self, group, uid, *args, **kwargs):
+		'''	Retrieve a tag instance
+		'''
+		group_datacollection_class = self._group_datacollection_class(**kwargs)
+		orthanc_group_datamodel_class = self._orthanc_group_datamodel_class(**kwargs)
+
+		if not isinstance(group, group_datacollection_class.model):
+			raise TypeError('Invalid group instance, must be of type %s' % group_datacollection_class.model.__name__)
+
+		# Initialize Orthanc group instance and fetch tag collection
+		orthanc_group = orthanc_group_datamodel_class(self, group)
+		return orthanc_group.get_tag(uid, 
+			**omit(kwargs, ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')))
+
+	def with_credentials(self, *args, **kwargs):
+		'''	Initialize an instance of the imaging server with the provided credentials
+		'''
+		return self.server.with_credentials(*args, **kwargs).imageserver_modelinstance_from_json(self._objectdata)
 
 
 class SonadorImagingServerCollection(SonadorObjectCollection):

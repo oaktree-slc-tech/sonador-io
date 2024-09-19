@@ -2,43 +2,89 @@ import posixpath, functools
 from collections import OrderedDict
 
 from client.utils.decorators import classproperty
+from client.utils.object import pick, omit
 
 from ..remote import fetch_sonador_data_collection, SonadorObjectUpdateMixin
 
-from .base import SonadorBaseObject, SonadorObjectCollection
+from .base import SonadorBaseObject, SonadorObjectCollection, ImagingServerChildBaseObject, \
+	ImagingServerChildCollection
+from .dicom import ImagingServerModalityMixin
 
 
-class SonadorUser(SonadorBaseObject):
+# Groups and Users
+
+class SonadorGroup(SonadorObjectUpdateMixin, SonadorBaseObject):
+	''' Sonador group
+	'''
+	pk_attr = 'id'
+	fetch_endpoint = '/visionaire/api/group'
+
+	def __str__(self):
+		return self.name
+	
+	@property
+	def url(self):
+		return posixpath.join(self.fetch_endpoint, str(self.pk))
+
+
+class SonadorGroupCollection(SonadorObjectCollection):
+	'''	Collection of Sonador group instances
+	'''
+	model = SonadorGroup
+
+
+class SonadorUser(SonadorObjectUpdateMixin, SonadorBaseObject):
 	''' Sonador user
 	'''
+	pk_attr = 'id'
+	fetch_endpoint = '/visionaire/api/user'
+
 	def __str__(self):
 
 		# Display name, ID and username
 		if getattr(self, 'name', None) and getattr(self, 'id', None) and getattr(self, 'username', None):
-			return '%s (id=%s username=%s)' % (self.name, self.id, self.username)
+			return '%s (id=%s username=%s)' % (self.name, self.pk, self.username)
 
 		# Username and ID
-		elif getattr(self, 'username', None) and getattr(self, 'id', None):
-			return '%s (id=%s)' % (self.username, self.id)
+		elif getattr(self, 'username', None) and getattr(self, 'pk', None):
+			return '%s (id=%s)' % (self.username, self.pk)
 
 		# User ID
 		elif getattr(self, 'id', None):
-			return self.id
+			return self.pk
 
 		return ''
 
+	@property
+	def url(self):
+		return posixpath.join(self.fetch_endpoint, str(self.pk))
+
+
+class SonadorUserCollection(SonadorObjectCollection):
+	'''	Collection of Sonador user instances
+	'''
+	model = SonadorUser
+
 
 class SonadorUserObjectMixin:
-	'''	Mixin class wwhich provides properites for parsing Sonador user attributes
+	'''	Mixin class which provides properites for parsing Sonador user attributes
 	'''
+	user_attr = 'user'
+
+	def _init_user(self, *args, user=None, **kwargs):
+		self._user = user
+		self.user_attr = kwargs.get('user_attr', self.user_attr)
+
 	@property
-	@functools.lru_cache()
 	def user(self):
-		return SonadorUser(self.server, (self._objectdata.get('user') or {}))
+		if getattr(self, '_user', None) is None:
+			setattr(self, '_user', SonadorUser(self.server, (self._objectdata.get(self.user_attr) or {})))
+
+		return self._user
 
 	@property
 	def user_id(self):
-		return self.user.id
+		return self.user.pk
 
 	@property
 	def username(self):
@@ -47,6 +93,30 @@ class SonadorUserObjectMixin:
 	@property
 	def user_displayname(self):
 		return self.user.name
+
+
+class SonadorAdminUserObjectMixin:
+	'''	Mixin class which provides user properties for objects created via the Sonador admin user API
+	'''
+	def _init_adminuser(self, *args, **kwargs):
+		if not self.user:
+			raise ValueError('Unable to initialize API credential, invalid user instance')
+
+
+class SonadorAdminUserCollectionObjectMixin:
+	'''	Mixin class which provides user properties for collections of objects created via the Sonador admin user API
+	'''
+	def _init_empty_collection(self, *args, **kwargs):
+		if kwargs.get('user') is None and self.user:
+			kwargs['user'] = self.user
+
+		return super()._init_empty_collection(*args, **kwargs)
+
+	def _init_collection_models(self, **kwargs):
+		if self.user:
+			kwargs['user'] = self.user
+
+		return super()._init_collection_models(**kwargs)
 
 
 
@@ -70,6 +140,10 @@ class SonadorSecureApiCredential(SonadorUserObjectMixin, SonadorObjectUpdateMixi
 	tabulate_output_columns = SECURE_API_CREDENTIAL_OUTPUT_COLUMNS
 	fetch_endpoint = '/auth/api/cred/access'
 
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **omit(kwargs, ('user',)))
+		self._init_user(*args, **kwargs)
+
 	@property
 	def url(self):
 		return posixpath.join(self.fetch_endpoint, self.pk)
@@ -79,6 +153,38 @@ class SonadorSecureApiCredentialCollection(SonadorObjectCollection):
 	'''	Collection which can be used to work with user secure access API credentials
 	'''
 	model = SonadorSecureApiCredential
+
+
+class AdminSonadorSecureApiCredential(SonadorAdminUserObjectMixin, SonadorSecureApiCredential):
+	''' Data object representing a secure API access credential (access ID and secret key) issued
+		via the admin API. Admin credential instances differ from user credential instances in that they require
+		a user instance to initialize the class instance. Regular credential instances are identified via the
+		API by the user credentials which were used to retrieve them.
+	'''
+	cred_urlroot = 'cred/access'
+
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self._init_adminuser(*args, **kwargs)
+
+	@property
+	def fetch_endpoint(self):
+		return posixpath.join(self.user.url, self.cred_urlroot)
+
+
+class AdminSonadorSecureApiCredentialCollection(SonadorAdminUserCollectionObjectMixin, 
+		SonadorUserObjectMixin, SonadorAdminUserObjectMixin, SonadorObjectCollection):
+	'''	Collection which can be used to work with user secure access API credentials via the admin API.
+		Admin credential instances differ from user credential instances in that they require an explicit
+		user instance be passed in during init. Regular credential instances are identified via the API
+		by the user credentials used to retrieve them.
+	'''
+	model = AdminSonadorSecureApiCredential
+
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **omit(kwargs, ('user',)))
+		self._init_user(*args, **kwargs)
+		self._init_adminuser(*args, **kwargs)
 
 
 
@@ -117,6 +223,10 @@ class SonadorApiToken(SonadorUserObjectMixin, SonadorObjectUpdateMixin, SonadorB
 	tabulate_output_columns = AUTHTOKEN_OUTPUT_COLUMNS
 	fetch_endpoint = '/auth/api/cred/token'
 
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **omit(kwargs, ('user',)))
+		self._init_user(*args, **kwargs)
+
 	@classproperty
 	def url(cls):
 		return cls.fetch_endpoint
@@ -139,3 +249,125 @@ class SonadorApiTokenCollection(SonadorObjectCollection):
 	'''	Collection of user API authentication tokens
 	'''
 	model = SonadorApiToken
+
+
+class AdminSonadorApiToken(SonadorAdminUserObjectMixin, SonadorApiToken):
+	'''	Data object representing a Sonador authentication token issued via the admin API.
+		Admin credential instances differ from user credential instances in that they require an explicit
+		user instance be passed in during init. Regular credential instances are identified via the API
+		by the user credentials used to retrieve them.
+	'''
+	cred_urlroot = 'cred/token'
+
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self._init_adminuser(*args, **kwargs)
+
+	@property
+	def fetch_endpoint(self):
+		return posixpath.join(self.user.url, self.cred_urlroot)
+
+	@property
+	def url(self):
+		return self.fetch_endpoint
+
+
+class AdminSonadorApiTokenCollection(SonadorAdminUserCollectionObjectMixin,
+		SonadorUserObjectMixin, SonadorAdminUserObjectMixin, SonadorObjectCollection):
+	'''	Collection which can be used to work with API token instances via the admin API.
+		Admin credential instances differ from user credential instances in that they require an explicit
+		user instance be passed in during init. Regular credential instances are identified via the API
+		by the user credentials used to retrieve them.
+	'''
+	model = AdminSonadorApiToken
+
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **omit(kwargs, ('user',)))
+		self._init_user(*args, **kwargs)
+		self._init_adminuser(*args, **kwargs)
+
+
+
+# Sonador Access Control Management
+ACL_PERM_QUERY = 'query'
+ACL_PERM_UPLOAD = 'upload'
+ACL_PERM_VIEW = 'view'
+ACL_PERM_MODIFY = 'modify'
+ACL_PERM_REMOVE = 'remove'
+ACL_PERM_COMMENT_EDIT = 'comment_edit'
+ACL_PERM_COMMENT_VIEW = 'comment_view'
+ACL_PERM_ACL = 'acl'
+
+ACL_PERM_SERVER = (ACL_PERM_QUERY, ACL_PERM_UPLOAD)
+ACL_PERM_RESOURCE = (ACL_PERM_VIEW, ACL_PERM_MODIFY, ACL_PERM_REMOVE, 
+	ACL_PERM_COMMENT_EDIT, ACL_PERM_COMMENT_VIEW, ACL_PERM_ACL)
+
+ACL_OUTPUT_COLUMNS = OrderedDict((
+	('imaging_server', 'Imaging Server ID'),
+	('group', 'Group'),
+	('pk', 'ACL ID'),
+	(ACL_PERM_QUERY, 'Query'),
+	(ACL_PERM_UPLOAD, 'Upload'),
+	('resource', 'Resource'),
+	(ACL_PERM_VIEW, 'View'),
+	(ACL_PERM_MODIFY, 'Modify'),
+	(ACL_PERM_REMOVE, 'Remove'),
+	(ACL_PERM_COMMENT_EDIT, 'Manage Comments'),
+	(ACL_PERM_COMMENT_VIEW, 'View Comments'),
+	(ACL_PERM_ACL, 'Access Control'),
+))
+
+
+class SonadorGroupAccessControlList(
+		ImagingServerModalityMixin, SonadorObjectUpdateMixin, ImagingServerChildBaseObject):
+	'''	Data object representing a group access control list (ACL) for an imaging server. ACLs provide
+		a set of permissions for a group that authorize members of a group to access resources stored
+		on an imaging server.
+	'''	
+	tabulate_output_columns = ACL_OUTPUT_COLUMNS
+	acl_urlroot = 'acl'
+
+	def update(self, object_data, *args, **kwargs):
+		'''	Update the group access control policy
+		'''
+		# Add data object update endpoint
+		kwargs['dataobject_endpoint'] = self.url
+		return super().update(object_data, *args, **kwargs)
+
+	@property
+	def url(self):
+		if not self.pacs:
+			raise ValueError('Unable to update group access control policy, no image server instance')
+
+		return posixpath.join(self.pacs.fetch_endpoint, str(self.pacs.pk), self.acl_urlroot, str(self.pk))
+
+
+class SonadorGroupAccessControlListCollection(ImagingServerChildCollection):
+	'''	Collection of group access control lists
+	'''
+	model = SonadorGroupAccessControlList
+
+
+class SonadorGroupObjectMixin:
+	'''	Mixin class which provides properites for parsing Sonador user attributes
+	'''
+	group_attr = 'group'
+
+	def _init_group(self, *args, group=None, **kwargs):
+		self._group = group
+		self.group_attr = kwargs.get('group_attr', self.group_attr)
+
+	@property
+	def group(self):
+		if getattr(self, '_group', None) is None:
+			setattr(self, '_group', SonadorGroup(self.server, (self._objectdata.get(self.group_attr) or {})))
+
+		return self._group
+
+	@property
+	def group_id(self):
+		return self.group.pk
+
+	@property
+	def group_name(self):
+		return self.group.name

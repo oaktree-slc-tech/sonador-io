@@ -133,7 +133,7 @@ class SonadorAuthenticationTests(SonadorBaseTestCase):
         self.assertTrue(os.environ.get(SONADOR_ACCESS_ID) is not None,
             msg='No acess ID provided as part of test environment.')
         self.assertTrue(os.environ.get(SONADOR_SECRET_KEY) is not None,
-            msg='No secrey key provided as part test environment.')
+            msg='No secret key provided as part test environment.')
 
         # Retrieve Sonador connection from env and retrieve imaging server
         sconn = self.getSonadorConnection(*args, **kwargs)
@@ -255,7 +255,7 @@ class SonadorAuthenticationTests(SonadorBaseTestCase):
 
             # Check the Orthanc instance to ensure that the image was indexed correctly
             for hkey, hmeta in hcache.items():
-                results = iserver.query({ hkey.header: hkey.uid }, resource=hkey.resource)
+                results = iserver.query({ hkey.header: hkey.uid }, resource=hkey.resource, rapid_lookup=False)
                 self.assertEqual(len(results), 1,
                     msg="Retrieved more than a single match for resource (%s) %s=%s." % (hkey.resource, hkey.header, hkey.uid))
 

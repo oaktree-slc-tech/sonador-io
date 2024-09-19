@@ -7,6 +7,7 @@ from io import BytesIO
 import numpy as np
 
 import pydicom
+from pydicom import DataElement
 import pydicom.datadict as dcmcodes
 from pydicom.dataset import Dataset, FileDataset
 from pydicom.uid import generate_uid, RLELossless
@@ -197,7 +198,14 @@ def dcm_encode_filedata(dcm_attrs: dict, dcm_file=None, dcmfile_meta=None, dcm_p
 
 	# Add media file attributes
 	for dcm_key, dcm_val in dcm_attrs.items():
-		setattr(ds, dcm_key, dcm_val)
+
+		# For values encoded as data elements, add the dataset directly
+		if isinstance(dcm_val, DataElement):
+			ds.add(dcm_val)
+		
+		# Set via attribute string (implicit conversion)
+		else:
+			setattr(ds, dcm_key, dcm_val)
 
 	return ds
 
@@ -216,7 +224,7 @@ def array2dcmimg(arr: np.ndarray, photometric_interpretation=DCM_PHOTOMETRIC_INT
 
 		@returns pydicom.FileDataset
 	'''
-	dcm_attrs = dcm_attrs or {}	
+	dcm_attrs = dcm_attrs or {}
 
 	# Populate the Storage SOP Class UID with a default value (secondary capture) if 
 	# one was not provided

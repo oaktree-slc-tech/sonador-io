@@ -1,12 +1,17 @@
-import os, logging, unittest, pkgutil, contextlib
+import os, logging, unittest, pkgutil, contextlib, traceback
 
+from time import sleep
+
+import client.apisettings as gcapi
 from client.utils.conversion import str2bool
 
-from .helpers import initenv_sonador_server
-from .servers import sonador_apitoken_fetch
-from .apisettings import SONADOR_IMAGING_SERVER, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
+from ..helpers import initenv_sonador_server
+from ..servers import sonador_apitoken_fetch
+from ..servers.auth import AdminSonadorApiToken
+from ..apisettings import SONADOR_IMAGING_SERVER, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
 	SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, SONADOR_INTERNAL_DNS, SONADOR_VERIFY_SSL
-from .tasks.uploads import imageserver_upload_archive
+from ..tasks.uploads import imageserver_upload_archive
+from ..tasks.maintenance import imageserver_clear_index, imageserver_index_seriesdata
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +54,7 @@ class SonadorBaseTestCase(unittest.TestCase):
 		internal_dns = internal_dns or str2bool(os.environ.get(SONADOR_INTERNAL_DNS))
 		verify_ssl = verify_ssl or str2bool(os.environ.get(SONADOR_VERIFY_SSL))
 
-		from .servers import SonadorServer
+		from ..servers import SonadorServer
 		return SonadorServer(sonador_url, access_id=access_id, secret_key=secret_key, apitoken=apitoken,
 			internal_dns=internal_dns, verify=verify_ssl, **kwargs)
 
@@ -66,6 +71,12 @@ class SonadorBaseTestCase(unittest.TestCase):
 		
 		iserver = self.getSonadorConnection(*args, **kwargs).get_imageserver(iserverid)
 		return iserver
+
+	def logErrorDetails(self, msg, err):
+		'''	Log the details and traceback for the provided error instance
+		'''
+		logger.error('%s Error: "%s"\n%s\n%s' % (msg, err, getattr(err, 'details', None), traceback.format_exc()))
+		raise err
 	
 	def cleanupImageUpload(self, iserver, hcache, remove_study=False):
 		'''	Iterate through the resources in the provided cache and remove them from the server
@@ -103,6 +114,12 @@ class SonadorBaseTestCase(unittest.TestCase):
 					except Exception as err:
 						logger.info('Unable to remove series "%s". Error:\n%s' % (r.pk, err))
 
+		# Clear any items which may be left in the cache as ghosts
+		for hkey, hmeta in hcache.items():
+
+			if hkey.resource == IMAGING_SERVER_RESOURCE_SERIES:
+				imageserver_clear_index(iserver.query_series({ hkey.header: hkey.uid }, rapid_lookup=True))
+
 	@contextlib.contextmanager
 	def stageImageArchiveTestData(self, iserver, afile, *args, **kwargs):
 		'''	Context manager: upload the provided archive file to Sonador. Removes the staged image data
@@ -111,10 +128,40 @@ class SonadorBaseTestCase(unittest.TestCase):
 		try:
 			# Upload archive data to Sonador
 			hcache, _ = imageserver_upload_archive(iserver, afile)
+
+			# Pause for 150 ms to allow for final upload to clear, then index series/study/patient data
+			sleep(0.15)
+			imageserver_index_seriesdata(iserver, hcache)
+			
 			yield hcache
 
 		# Remove all series added to the server
 		finally: self.cleanupImageUpload(iserver, hcache)
+
+	@contextlib.contextmanager
+	def getUserToken(self, sconn, user, *args, **kwargs):
+		'''	Context manager: create temporary set of credentials. The temporary credentials will be deleted
+			on exit. Yields a token instance.
+		'''
+		# Create temporary credentials
+		_auth = sconn.admin_create_user_apitoken(user, **kwargs)
+		_token = AdminSonadorApiToken(sconn, _auth.get(gcapi.OBJECT_DATA), user=user)
+
+		yield _token
+
+		# Remove credential instance
+		_token.delete()
+
+	@contextlib.contextmanager
+	def getLimitedImageServer(self, iserver, user, *args, **kwargs):
+		'''	Context manager: create temporary set of credentials for a set of operations using the provided
+			image server. The temporary credentials will be deleted on exit. Yields a new image server instance
+			using the temporary credentials.
+		'''	
+		# Create temporary credentials
+		with self.getUserToken(iserver.server, user) as _token:
+			iserver_limited = iserver.with_credentials(apitoken=_token.token)
+			yield iserver_limited
 
 
 class SonadorSeriesBaseTestCase(SonadorBaseTestCase):
@@ -135,9 +182,10 @@ class SonadorSeriesBaseTestCase(SonadorBaseTestCase):
 			sx = None
 			for hkey, hmeta in hcache.items():
 
+				# Retrieve first series from the  instance from the server
 				if hkey.resource == IMAGING_SERVER_RESOURCE_SERIES:
 
-					# Retrieve sereis from the server
+					# Retrieve series from the server
 					results = iserver.query({ hkey.header: hkey.uid }, resource=hkey.resource, rapid_lookup=rapid_lookup)
 					self.assertEqual(len(results), 1, msg=('Unable to retrieve match for resource (%s) %s=%s' if len(results) == 0
 						else 'Retrieved more than a single match for resource (%s) %s=%s') % (hkey.resource, hkey.header, hkey.uid))
@@ -149,3 +197,36 @@ class SonadorSeriesBaseTestCase(SonadorBaseTestCase):
 				raise ValueError('Unable to retrieve an imaging series from Sonador for the test.')
 
 			yield (sx, hcache)
+
+class SonadorStudyBaseTestCase(SonadorBaseTestCase):
+	'''	Unit Test case with helper methods for working with Sonador series data
+	'''
+	@contextlib.contextmanager
+	def stageImageArchiveStudy(self, iserver, afile, rapid_lookup=False, *args, **kwargs):
+		'''	Stage a single study from an archive file for a test case. Removes the staged image data
+			on exit. If multiple studies are found in the archive file, only the first instance is provided.
+			Yields the first study instance and the header cache.
+		'''
+		with self.stageImageArchiveTestData(iserver, afile, *args, **kwargs) as hcache:
+
+			if len(hcache) == 0:
+				raise ValueError('Unable to locate imaging study in zipfile.')
+
+			# Iterate through items n
+			s = None
+			for hkey, hmeta in hcache.items():
+
+				if hkey.resource == IMAGING_SERVER_RESOURCE_STUDY:
+
+					# Retrieve sereis from the server
+					results = iserver.query_study({ hkey.header: hkey.uid })
+					self.assertEqual(len(results), 1, msg=('Unable to retrieve match for resource (%s) %s=%s' if len(results) == 0
+						else 'Retrieved more than a single match for resource (%s) %s=%s') % (hkey.resource, hkey.header, hkey.uid))
+					s = results[0]
+
+					break
+
+			if s is None:
+				raise ValueError('Unable to retrieve an imaging study from Sonador for the test.')
+
+			yield (s, hcache)
