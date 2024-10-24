@@ -573,7 +573,7 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 	def group_acl(self):
 		'''	Group ACL policies associated with the resource
 		'''
-		if getattr(self, '_group_acl', self) is None:
+		if getattr(self, '_group_acl', None) is None:
 			setattr(self, '_group_acl', self.fetch_group_acl())
 
 		return self._group_acl
