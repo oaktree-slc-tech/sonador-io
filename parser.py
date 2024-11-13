@@ -170,6 +170,8 @@ def dicom_download_options(subparser):
 			+ 'into subfolders by patient, study, and series.')
 	subparser.add_argument('--extract', '-x', dest='extract', default=False, action='store_true',
 		help='Extract archive contents rather than saving data as a zip file.')
+	subparser.add_argument('--stream', '-s', dest='dcm_stream', default=False, action='store_true',
+		help='Stream the data (make one request per DICOM file), rather than use an archive')
 
 
 def dicomweb_remote_server_operation_options(subparser):

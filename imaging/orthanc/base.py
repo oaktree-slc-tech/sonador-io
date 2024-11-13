@@ -1839,6 +1839,13 @@ class ImagingSeries(ImagingSeriesCoreResource):
 		return self._objectdata.get('Instances')
 
 	@property
+	def instances(self):
+		'''	Retrieve instance UIDs for the series. Added to provide API compatibility
+			with SR and M3D series classes. Defers to ImagingSeries.slices
+		'''
+		return self.slices
+
+	@property
 	def instances_collection(self):
 		return self.slices_collection
 
