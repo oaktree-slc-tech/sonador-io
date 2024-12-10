@@ -1810,7 +1810,21 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 		return self.comments_modelcollection_class.fetch_modelinstance(self, cid, *args, **kwargs)
 
 
-class ImagingSeries(ImagingSeriesCoreResource):
+class ImagingSeriesDcm0Mixin:
+	'''	Mixin which provides methods and helpers for working with imaging series
+		data associated with the first instance (DCM0).
+	'''
+	@property
+	def dcm0(self):
+		'''	Retrieve the first DCM instance associated with the series
+		'''
+		if getattr(self, '_dcm0', None) is None:
+			self._dcm0 = self.instances_collection[0]
+
+		return self._dcm0
+		
+
+class ImagingSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 	'''	Imaging series: set of grouped images
 	'''
 	@property
@@ -1870,7 +1884,7 @@ class ImagingSeries(ImagingSeriesCoreResource):
 			raise ValueError("Input must be a instance of a DICOM instances collection")
 
 		setattr(self, '_slices', instances_collection)
-		
+
 	@property
 	@functools.lru_cache()
 	def shape(self):

@@ -10,13 +10,13 @@ from pydicom.sequence import Sequence
 from ...apisettings import IMAGING_SERVER_RESOURCE_REPORT, DCMHEADER_SERIES_INSTANCE_UID, \
 	DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE, DCMHEADER_SR_REF_SERIES_SEQ, \
 	DCMHEADER_SR_REF_SOP_SEQ, DCMHEADER_SR_REF_INSTANCE_UID
-from .base import ImagingSeriesCoreResource, ImagingSeriesCollection, ImagingServerChildCollection, \
+from .base import ImagingSeriesCoreResource, ImagingSeriesDcm0Mixin, ImagingSeriesCollection, ImagingServerChildCollection, \
 	DcmInstanceCoreResource, DcmInstanceCoreCollection, ImagingSeriesBulkPopulateMixin
 
 logger = logging.getLogger(__name__)
 
 
-class DcmSRSeries(ImagingSeriesCoreResource):
+class DcmSRSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 	'''	DICOM-SR: sturctured report of medical imaging results
 	'''
 	@property
