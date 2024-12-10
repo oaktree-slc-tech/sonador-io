@@ -221,10 +221,21 @@ def resource_cache_options(subparser):
 	'''
 	subparser.add_argument('--rapid-lookup', dest='rapid_lookup', action='store_true', default=False,
 		help='When present, uses the Sonador resource cache for query operations. The resource cache provides '
-			+ 'a set of tables for series, studyies, and patients that are more optimized than the traditional '
+			+ 'a set of tables for series, studies, and patients that are more optimized than the traditional '
 			+ '/tools/find endpoint of Orthanc. Requests using the resource cache may be as much as 100 times faster '
 			+ 'than the equivalent query to the primary Orthanc database. Responses from the resource cache will only contain '
 			+ 'headers which are part of Orthanc instance MainDicomTags or ExtraMainDicomTags.')
+
+
+def resource_cache_dblookup(subparser):
+	'''	Add database lookup as an option to the subparser
+	'''
+	subparser.add_argument('--database-lookup', dest='rapid_lookup', action='store_false', default=True,
+		help='When present, uses the Orthanc database for query operations rather than the Sonador resource cache.'
+			+ 'The resource cache provides a set of tables for series, studies, and patients that are more optimized '
+			+ 'than the traditional /tools/find endpoint of Orthanc. Requests using the resource cache may be as much '
+			+ 'as 100 times faster than the equivalent query to the primary Orthanc database. Responses from the resource '
+			+ 'cache will only contain headers which are part of Orthanc instance MainDicomTags or ExtraMainDicomTags. ')
 
 
 class SonadorApplicationCommandParser(argparse.ArgumentParser):
