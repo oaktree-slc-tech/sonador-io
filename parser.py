@@ -119,14 +119,23 @@ def datamodel_schema_options(subparser):
 		help='Include the schema for the model in the output')
 
 
-def datamodel_query_options(subparser):
+
+DATAMODEL_QUERY_TEMPLATE = '''%(helpstr_query_intro)s. Query values should be structured as key=value pairs. 
+	Example: %(helpstr_query_examples)s. Partial expressions can be matched by including a wildcard in the value. 
+	PatientName="Jones*" will match any patient name that includes "Jones".
+'''.replace('\t', '').replace('\n', '')
+
+DATAMODEL_QUERY_HELP_STR = DATAMODEL_QUERY_TEMPLATE % {
+	'helpstr_query_intro': 'Search values that should be sent to the server as part of the request',
+	'helpstr_query_examples': '-Q PatientID="*" StudyDescription="*Chest*"',
+}
+
+
+def datamodel_query_options(subparser, required=True, help_str=DATAMODEL_QUERY_HELP_STR, **kwargs):
 	'''	Add CLI options for data model query operations: query structure, 
 	'''
-	subparser.add_argument('--query', '-Q', dest='query', nargs='+', type=argparse_keyval, required=True, metavar='KEY=VALUE',
-		help='Search values that should be sent to the server as part of the request. Query values should be '
-			+ 'structured as key=value pairs. Example: -Q PatientID="*" StudyDescription="*Chest*". Partial expressions '
-			+ 'can be matched by including a wildcard in the value. PatientName="Jones*" will match any '
-			+ 'patient name that includes "Jones".')
+	subparser.add_argument('--query', '-Q', dest='query', nargs='+', type=argparse_keyval, required=required, metavar='KEY=VALUE',
+		help=help_str, **kwargs)
 
 
 def datamodel_pagination_options(subparser, limit_default=1000):
