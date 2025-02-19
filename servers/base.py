@@ -70,9 +70,14 @@ class OrthancServerBase(SonadorBaseObject):
 	'''
 	details_exclude = ('token',)
 	tools_find_endpoint = 'tools/find'
+	resource_cache_class = dict
 
 	def __init__(self, *args, resource_cache=None, **kwargs):
-		self.resource_cache = resource_cache or {}
+		self.resource_cache_class = kwargs.pop(
+			'resource_cache_class', self.resource_cache_class)
+
+		# Initialize resource cache for the server
+		self.resource_cache = resource_cache or self.resource_cache_class()
 		super().__init__(*args, **kwargs)
 
 	@abc.abstractmethod
