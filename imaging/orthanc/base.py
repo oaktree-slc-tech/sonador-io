@@ -85,19 +85,25 @@ def parse_image_orientation(coords):
 
 	return coords
 
-
 class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 	'''	Mixin class with convenience properties for accessing common Orthanc data fields.
 	'''
 	def fetch_meta(self, *args, headers=None, **kwargs):
 		'''	Retrieved the Orthanc metadata properties for the resource
 		'''
-		return server_controloperation_json_response(self.pacs._request_get(
-			self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'metadata'), query_params={ 'expand': True, }),
-			lambda r: request_client_error(
-				'Unable to retrieve metadata for %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code), 
-				r),
-			headers=self.pacs.orthanc_request_headers(headers=headers)))
+		return server_controloperation_json_response(
+			self.pacs._request_get(
+				self.pacs.orthanc_apiurl(
+					posixpath.join(self.resource_url, 'metadata'),
+					query_params=json.dumps({ 'expand': True, })
+				),
+				lambda r: request_client_error(
+					'Unable to retrieve metadata for %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
+					r
+				),
+				headers=self.pacs.orthanc_request_headers(headers=headers)
+			)
+		)
 
 	@property
 	def meta(self):
@@ -110,14 +116,60 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 	def lastupdate(self):
 		'''	Timestamp of last resource update
 		'''
-		if getattr(self, '_lastupdate', None) is None and self.meta.get(IMAGING_SERVER_LAST_UPDATE):
-			setattr(self, '_lastupdate', json_str2datetime(self.meta.get(IMAGING_SERVER_LAST_UPDATE)))
+		if getattr(self, '_lastupdate', None) is None:
+			r = self.pacs._request_get(
+				self.pacs.orthanc_apiurl(
+					posixpath.join(self.resource_url, 'metadata', IMAGING_SERVER_LAST_UPDATE),
+					query_params = json.dumps({'expand': True, })
+				),
+				lambda r: request_client_error(
+					'Unable to retrieve metadata for %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
+					r
+				),
+				headers=self.pacs.orthanc_request_headers(headers=None)
+			).text
+			setattr(self, '_lastupdate', json_str2datetime(r))
 
 		return getattr(self, '_lastupdate', None)
 
 	@property
+	def modified_from(self):
+		if getattr(self, '_modified_from', None) is None:
+			try:
+				r =  self.pacs._request_get(
+					self.pacs.orthanc_apiurl(
+						posixpath.join(self.resource_url, 'metadata', 'ModifiedFrom'),
+						query_params = json.dumps({'expand': True, })
+					),
+					lambda r: request_client_error(
+						'Unable to retrieve metadata for %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
+						r
+					),
+					headers=self.pacs.orthanc_request_headers(headers=None)
+				).text
+			except Exception as e:
+				logger.warning('Imaging resource for %s is not modified from another resource' % self.pk)
+				r = None
+			setattr(self, '_modified_from', r)
+		return getattr(self, '_modified_from', None)
+
+	@property
 	def tags_signature(self):
-		return self.meta.get(IMAGING_SERVER_DICOMTAGS_SIGNATURE)
+		if getattr(self, '_tags_signature', None) is None:
+			r = self.pacs._request_get(
+				self.pacs.orthanc_apiurl(
+					posixpath.join(self.resource_url, 'metadata', IMAGING_SERVER_DICOMTAGS_SIGNATURE),
+					query_params = json.dumps({'expand': True, })
+				),
+				lambda r: request_client_error(
+					'Unable to retrieve metadata for %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
+					r
+				),
+				headers=self.pacs.orthanc_request_headers(headers=None)
+			).text
+			setattr(self, '_tags_signature', json_str2datetime(r))
+
+		return getattr(self, '_tags_signature', None)
 
 	@property
 	def stable(self):
