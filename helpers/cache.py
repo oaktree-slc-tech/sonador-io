@@ -40,12 +40,6 @@ class SonadorFileDict(UserDict):
             if os.path.exists(_fpath):
                 os.remove(_fpath)
         
-        # return super().__delitem__(key)
-    
-#     def __del__(self):
-#         self.cleanup()
-#         super().__del__()
-        
     def get(self, key, default=None):
         try: return self.__getitem__(key)
         except KeyError as err:
@@ -55,5 +49,3 @@ class SonadorFileDict(UserDict):
         ''' Remove all temporary files and clear UIDs from dict.
         '''
         self.tmp.cleanup()
-        # for k in self.keys():
-        #     super().__delitem__(k)
