@@ -9,7 +9,7 @@ class SonadorFileDict(UserDict):
         pickle.dump. Data is pickled using the class variable
         pickle_protocol.
 
-        Stored files can be manually removed by calling SonadorDict.cleanup().
+        To retire the dict, call SonadorFileDict.cleanup().
     '''
     pickle_protocol = pickle.HIGHEST_PROTOCOL
 
