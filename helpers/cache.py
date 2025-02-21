@@ -2,14 +2,13 @@ import os, uuid, tempfile, pickle
 from collections import UserDict
 from client.utils.microservices import MicroserviceOrderedJsonResponseObject, MicroserviceJsonResponseObject
 
-class SonadorDict(UserDict):
+class SonadorFileDict(UserDict):
     ''' Dictionary instance that can be used for caching data
         in a temp folder on disk instead of in memory. Data is saved
         to the temp folder as a pickled binary string using 
         pickle.dump. Data is pickled using the class variable
         pickle_protocol.
 
-        Data is removed when the dict instance is garbage collected.
         Stored files can be manually removed by calling SonadorDict.cleanup().
     '''
     pickle_protocol = pickle.HIGHEST_PROTOCOL
@@ -41,11 +40,11 @@ class SonadorDict(UserDict):
             if os.path.exists(_fpath):
                 os.remove(_fpath)
         
-        return super().__delitem__(key)
+        # return super().__delitem__(key)
     
-    def __del__(self):
-        self.cleanup()
-        super().__del__()
+#     def __del__(self):
+#         self.cleanup()
+#         super().__del__()
         
     def get(self, key, default=None):
         try: return self.__getitem__(key)
@@ -56,5 +55,5 @@ class SonadorDict(UserDict):
         ''' Remove all temporary files and clear UIDs from dict.
         '''
         self.tmp.cleanup()
-        for k in self.keys():
-            super().__delitem__(k)
+        # for k in self.keys():
+        #     super().__delitem__(k)
