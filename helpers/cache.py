@@ -27,14 +27,15 @@ class SonadorFileDict(UserDict):
             return pickle.load(f)
 
     def __setitem__(self, key, val):
-        uid = super().get(key) or str(uuid.uuid4()) 
+        try: uid = super().__getitem__(key)
+        except KeyError as err: uid = str(uuid.uuid4())
         with open(os.path.join(self.tmp.name, uid), "wb") as f:
             pickle.dump(val, f, protocol=self.pickle_protocol)
             
         super().__setitem__(key, uid)
     
     def __delitem__(self, key):
-        uid = super().get(key)
+        uid = super().__getitem__(key)
         if uid:
             _fpath = os.path.join(self.tmp.name, uid)
             if os.path.exists(_fpath):
