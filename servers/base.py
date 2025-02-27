@@ -603,7 +603,11 @@ class OrthancServerBase(SonadorBaseObject):
 			headers=self.orthanc_request_headers(**kwargs), **kwargs)
 
 		return server_controloperation_json_response(r)		
-
+	
+	def update_cache_resource(self, resource):
+		''' Update resource data in Sonador resource cache
+		'''
+		self.resource_cache[resource.pk] = resource
 
 
 # Orthanc DICOM Server Base Objects
