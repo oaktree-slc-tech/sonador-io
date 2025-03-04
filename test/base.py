@@ -107,7 +107,7 @@ class SonadorBaseTestCase(unittest.TestCase):
 						try: r.parent.delete()
 						except Exception as err:
 							logger.info('Unable to remove parent study "%s" for series "%s". Error:\n%s' 
-								% (r.parent.pk, r.pk, err))
+								% (getattr(getattr(r, 'parent', None), 'pk', None), r.pk, err))
 
 					# Remove the 
 					try: r.delete()
