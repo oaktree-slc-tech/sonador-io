@@ -1,5 +1,6 @@
-import os, uuid, tempfile, pickle
+import os, uuid, tempfile
 from collections import UserDict
+import dill as pickle
 from client.utils.microservices import MicroserviceOrderedJsonResponseObject, MicroserviceJsonResponseObject
 
 class SonadorFileDict(UserDict):

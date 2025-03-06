@@ -553,6 +553,10 @@ class SonadorImagingServer(OrthancServerAuthDataCollectionMixin, OrthancServerBa
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
 		self.init_auth_collection_mixin(*args, **kwargs)
+        
+	def __reduce__(self, *args, **kwargs):
+		_pickle = super().__reduce__(*args, **kwargs)
+		return _pickle
 
 	def _request_get(self, resource_endpoint, error_msg=None, headers=None, **kwargs):
 		''' Send a GET request to the imaging server. Raises an exception with the provided error message

@@ -304,7 +304,13 @@ class OrthancServerBase(SonadorBaseObject):
 		'''
 		# Return resource instance from local cache
 		if cache and rid in self.resource_cache:
-			return self.resource_cache[rid]
+			r = self.resource_cache[rid]
+			
+			# Add PACS reference
+			if not getattr(r, 'pacs', None):
+				setattr(r, 'pacs', self)
+			
+			return r
 
 		r = self._request_get(
 			self.orthanc_apiurl(posixpath.join(resource_type.fetch_endpoint, str(rid))), 
@@ -607,6 +613,10 @@ class OrthancServerBase(SonadorBaseObject):
 	def update_cache_resource(self, resource):
 		''' Update resource data in Sonador resource cache
 		'''
+		from ..imaging.orthanc.base import ImagingServerChildBaseObject
+		if not isinstance(resource, ImagingServerChildBaseObject):
+			raise TypeError('Unsupported type "%s", resources must be inherited from "%s"' % (
+				type(resource).__name__, ImagingServerChildBaseObject.__name__))
 		self.resource_cache[resource.pk] = resource
 
 
@@ -626,6 +636,13 @@ class ImagingServerChildBaseObject(SonadorBaseObject):
 		# is not always passed to the child instance correctly.
 		if self.pacs is None and isinstance(self.server, OrthancServerBase):
 			self.pacs = self.server
+            
+	def __reduce__(self, *args, **kwargs):
+		_pickle = super().__reduce__(*args, **kwargs)
+		_state = _pickle[2]
+		
+		# Filter PACS to prevent nested serialization
+		return _pickle[0], _pickle[1], omit(_pickle[2], ('pacs',))
 
 
 class ImagingServerChildCollectionFetchMixin:
