@@ -75,6 +75,7 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 		self.series = sonador_series
 		self.ref_series = sonador_ref_series
 		self._evidence = dcm_evidence
+		self.record_instances = kwargs.get('record_instances', True)
 		
 		# DICOM-SR templates (report and document)
 		self.dcmsr_report_template = kwargs.get('dcmsr_report_template', self.dcmsr_report_template)
@@ -379,12 +380,18 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 		if getattr(self, '_evidence', None) is None and self.ref_series:
 
 			# Reference series is a single instance
-			if isinstance(self.ref_series, ImagingSeries):				
-				self._evidence = [dcm for dcm in self.ref_series.instances_collection.dcmfiles]
+			if isinstance(self.ref_series, ImagingSeries):
+				if self.record_instances:
+					self._evidence = [dcm for dcm in self.ref_series.instances_collection.dcmfiles]
+				else:
+					self._evidence = [self.ref_series.dcm0.dcmfile(cache=True)]
 
 			# Reference series is an iterable (list, tuple, or collection)
 			elif isinstance(self.ref_series, (list, tuple, ImagingResourceBaseCollection)):
-				self._evidence = list(itertools.chain(*tuple(tuple(dcm for dcm in sx.instances_collection.dcmfiles) for sx in self.ref_series)))
+				if self.record_instances:
+					self._evidence = list(itertools.chain(*tuple(tuple(dcm for dcm in sx.instances_collection.dcmfiles) for sx in self.ref_series)))
+				else:
+					self._evidence = list(itertools.chain(*tuple(tuple(sx.dcm0.dcmfile(cache=True)) for sx in self.ref_series)))
 
 			# Unsupported reference series type
 			else:
@@ -394,7 +401,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 	def create_sr(self, dcmsr_series_uid=None, dcmsr_instance_uid=None,
 			dcmsr_series_number=1, dcmsr_instance_number=1, ts=None, is_complete=True,
-			is_final=False, is_verified=False, series_headers_kwargs=None, **kwargs):
+			is_final=False, is_verified=False, series_headers_kwargs=None, record_instances=None, **kwargs):
 		'''	Create DICOM-SR document from model data
 		'''
 		if not getattr(self, '_evidence', None) and not self.ref_series:
@@ -403,6 +410,9 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 		ts = ts or datetime.datetime.utcnow()
 
+		if record_instances is None:
+			record_instances = self.record_instances
+
 		# Initialize SR document instance
 		_srdoc = self.dcmsr_document_template(
 			evidence=self.evidence,
@@ -410,7 +420,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			series_instance_uid=dcmsr_series_uid or generate_uid(), sop_instance_uid=dcmsr_instance_uid or generate_uid(),
 			series_number=dcmsr_series_number, instance_number=dcmsr_instance_number, 
 			manufacturer=self.dcmsr_document_manufacturer, is_complete=is_complete, is_final=is_final, is_verified=is_verified,
-			**omit(kwargs, tuple(k for k in kwargs.keys() if not 'report' in k)))
+			record_instances=record_instances, **omit(kwargs, tuple(k for k in kwargs.keys() if not 'report' in k)))
 
 		# Apply series headers to report instance
 		self.dcmsr_series_headers(_srdoc, ts, **(series_headers_kwargs or {}))
