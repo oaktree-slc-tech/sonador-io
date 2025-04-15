@@ -391,7 +391,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 				if self.record_instances:
 					self._evidence = list(itertools.chain(*tuple(tuple(dcm for dcm in sx.instances_collection.dcmfiles) for sx in self.ref_series)))
 				else:
-					self._evidence = list(itertools.chain(*tuple(tuple(sx.dcm0.dcmfile(cache=True)) for sx in self.ref_series)))
+					self._evidence = tuple(sx.dcm0.dcmfile(cache=True) for sx in self.ref_series)
 
 			# Unsupported reference series type
 			else:
