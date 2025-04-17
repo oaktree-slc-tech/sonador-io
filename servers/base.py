@@ -120,7 +120,7 @@ class OrthancServerBase(SonadorBaseObject):
 			query_params=query_params, query_lowercase=query_lowercase)
 
 	@abc.abstractmethod
-	def orthanc_request_headers(self, headers=None):
+	def orthanc_request_headers(self, headers=None, **kwargs):
 		'''	Add headers required by Orthanc API
 		'''
 
@@ -633,10 +633,6 @@ class ImagingServerChildCollectionFetchMixin:
 		if not data_collection_endpoint:
 			raise ValueError('Invalid fetch endpoint: %s' % data_collection_endpoint)
 
-		verify = kwargs.pop('verify', None)
-		if verify is None:
-			verify = pacs.server.verify
-
 		if not error_msg:
 			error_msg = lambda r: request_client_error(
 				'Unable to retrieve model %s from PACS server %s (url="%s"). Status code: %s.' % (
@@ -646,11 +642,10 @@ class ImagingServerChildCollectionFetchMixin:
 		# Retrieve server data
 		r = pacs._request_get(
 			pacs.orthanc_apiurl(data_collection_endpoint), error_msg,
-			headers=pacs.orthanc_request_headers(headers=kwargs.get('headers')),
-			verify=verify, **rkwargs)
+			headers=pacs.orthanc_request_headers(**kwargs), verify=pacs.verify_ssl(**kwargs), **rkwargs)
 
 		# Parse response and return collection
-		return pacs._init_dataclass(cls, r, **kwargs)
+		return pacs._init_dataclass(cls, r, **omit(kwargs, ('headers',)))
 
 	@classmethod
 	def fetch_modelinstance(cls, pacs, objectid, error_msg=None,

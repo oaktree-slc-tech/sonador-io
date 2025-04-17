@@ -117,7 +117,7 @@ class DicomMeta:
 
 # DICOM Header Definition
 class DicomHeaderData:
-	'''	Helper data class for working with DICOM tad definitions.
+	'''	Helper data class for working with DICOM tag definitions.
 	'''
 	def __init__(self, header, dcm_hexcode, dcm_int, dtype, private=False, private_creator=None):
 		self.header = header
@@ -1665,3 +1665,10 @@ DICOM_VR_DESCRIPTION = OrderedDict((
 IMG_FORMAT_JPEG = 'jpeg'
 IMG_FORMAT_TIFF = 'tiff'
 IMG_FORMAT_PNG = 'png'
+
+
+# DICOMweb
+DICOMWEB_TAG_ATTR = 'Name'
+DICOMWEB_VALUE_ATTR = 'Value'
+DICOMWEB_VALUE_REP = 'vr'
+DICOMWEB_VR_PN_ALPHABETIC = 'Alphabetic'

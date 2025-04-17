@@ -69,12 +69,13 @@ class DcmExtBaseCollection(ImagingServerChildCollectionFetchMixin, SonadorObject
 	'''	Collection of base extension models
 	'''
 	model = DcmExtBaseModel
+	parent_required = True
 
 	def __init__(self, server, *args, parent=None, **kwargs):
 		self.parent = parent
 		super().__init__(server, *args, **kwargs)
 
-		if not self.parent:
+		if self.parent_required and not self.parent:
 			raise ValueError('Unable to initialize collection, invalid parent')
 
 	def _init_collection_models(self, **kwargs):

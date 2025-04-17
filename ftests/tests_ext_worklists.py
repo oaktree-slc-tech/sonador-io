@@ -9,8 +9,8 @@ from client.errors import ClientOperationError
 
 from ..apisettings import SONADOR_IMAGING_SERVER, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
 	DCMHEADER_SERIES_INSTANCE_UID
-from ..apisettings.worklists import SONADOR_WORKLIST_STATUS_UNREAD, SONADOR_WORKLIST_STATUS_APPROVED, \
-	SONADOR_WORKLIST_STATUS_REJECTED, SONADOR_WORKLIST_STATUS_REVIEWED
+from ..apisettings.worklists import SONADOR_WORKLIST_STATUS_SCHEDULED, SONADOR_WORKLIST_STATUS_INPROGRESS, \
+	SONADOR_WORKLIST_STATUS_COMPLETED, SONADOR_WORKLIST_STATUS_CANCELLED
 from ..helpers import response2filearchive
 from ..servers import sonador_apitoken_fetch
 from ..errors import soandor_clientexception_server_errors
@@ -78,7 +78,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			# Attempt to create reviewer worklist item for a group not associated with the server.
 			# Request should fail with a 400 error.
 			try:
-				test_s.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_UNREAD)
+				test_s.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_SCHEDULED)
 				self.fail('Able to create a worklist item for a group and user not associated with the study')
 
 			except Exception as err:
@@ -95,10 +95,10 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 						+ 'and received a valid group response.')
 
 			# Create ACL policy which associates the group with the server
-			testacl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'duration': 1 })
+			testacl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'worklist': True, 'duration': 1 })
 
 			# Create reviewer worklist
-			w01 = test_s.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_UNREAD)
+			w01 = test_s.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_SCHEDULED)
 			self.assertTrue(any(w01.pk == _w.pk for _w in test_s.fetch_reviewer_worklist()),
 				msg='Worklist UID returned by request does not match UID of group instances retrieved by fetch method')
 
@@ -113,10 +113,10 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 				msg='Worklist payload does not reference the correct group')
 
 			# Update worklist instance and ensure that the state was changed
-			w01.update({ 'State': SONADOR_WORKLIST_STATUS_APPROVED })
+			w01.update({ 'State': SONADOR_WORKLIST_STATUS_COMPLETED })
 			w01 = test_s.get_reviewer_worklist_item(w01.pk)
-			self.assertEqual(w01.state, SONADOR_WORKLIST_STATUS_APPROVED,
-				msg='Worklist has incorrect state. Expected: %s. Actual: %s' % (SONADOR_WORKLIST_STATUS_APPROVED, w01.state))
+			self.assertEqual(w01.state, SONADOR_WORKLIST_STATUS_COMPLETED,
+				msg='Worklist has incorrect state. Expected: %s. Actual: %s' % (SONADOR_WORKLIST_STATUS_COMPLETED, w01.state))
 
 			# Remove worklist item and verify that it is no longer on the server
 			w01.delete()
@@ -144,7 +144,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			# Attempt to create reviewer worklist item for a group not associated with the server.
 			# Request should fail with a 400 error.
 			try:
-				test_s.create_reviewer_worklist_item(testgroup02, testuser01, SONADOR_WORKLIST_STATUS_UNREAD)
+				test_s.create_reviewer_worklist_item(testgroup02, testuser01, SONADOR_WORKLIST_STATUS_SCHEDULED)
 				self.fail('Able to create a worklist item for a group and user not associated with the study')
 
 			except Exception as err:
@@ -181,9 +181,9 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			test_s = iserver.get_study(test_sx.parent.pk)
 
 			# Create ACL policy which associates the group with the server
-			testacl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'duration': 1 })
+			testacl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'worklist': True, 'duration': 1 })
 			try:
-				test_s.create_reviewer_worklist_item(testgroup01, testuser02, SONADOR_WORKLIST_STATUS_UNREAD)
+				test_s.create_reviewer_worklist_item(testgroup01, testuser02, SONADOR_WORKLIST_STATUS_SCHEDULED)
 				self.fail('Able to create a worklist item for a user not associated with the study')
 
 			except Exception as err:
@@ -223,11 +223,11 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			test_s = iserver.get_study(test_sx.parent.pk)
 
 			# Create ACL policy which associates the group with the server
-			testacl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'duration': 1 })
-			testacl = iserver.admin_create_acl(testgroup02, { 'resource': '*', 'duration': 1 })
+			testacl01 = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'worklist': True, 'duration': 1 })
+			testacl02 = iserver.admin_create_acl(testgroup02, { 'resource': '*', 'worklist': True, 'duration': 1 })
 
 			# Create reviewer worklist
-			w01 = test_s.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_UNREAD)
+			w01 = test_s.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_SCHEDULED)
 			self.assertTrue(any(w01.pk == _w.pk for _w in test_s.fetch_reviewer_worklist()),
 				msg='Worklist UID returned by request does not match UID of group instances retrieved by fetch method')
 
@@ -283,10 +283,10 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			test_s = iserver.get_study(test_sx.parent.pk)
 
 			# Create ACL policy which associates the group with the server
-			testacl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'duration': 1 })
+			testacl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'worklist': True, 'duration': 1 })
 
 			# Create reviewer worklist
-			w01 = test_s.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_UNREAD, complete=True)
+			w01 = test_s.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_SCHEDULED, complete=True)
 			self.assertTrue(any(w01.pk == _w.pk for _w in test_s.fetch_reviewer_worklist()),
 				msg='Worklist UID returned by request does not match UID of group instances retrieved by fetch method')
 
@@ -303,7 +303,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			# Attempt to update completed worklist
 			# Request should fail with a 400 error.
 			try:
-				w01.update({ 'State': SONADOR_WORKLIST_STATUS_APPROVED })
+				w01.update({ 'State': SONADOR_WORKLIST_STATUS_COMPLETED })
 				self.fail('Able to modify the state of an already completed worklist item.')
 
 			except Exception as err:				
@@ -340,7 +340,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			# Attempt to create reviewer worklist item for a group not associated with the server.
 			# Request should fail with a 400 error.
 			try:
-				test_s.create_reviewer_worklist_item(testgroup02, testuser01, SONADOR_WORKLIST_STATUS_UNREAD, dicomweb_api=True)
+				test_s.create_reviewer_worklist_item(testgroup02, testuser01, SONADOR_WORKLIST_STATUS_SCHEDULED, dicomweb_api=True)
 				self.fail('Able to create a worklist item for a group and user not associated with the study')
 
 			except Exception as err:
@@ -378,9 +378,9 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			test_s = iserver.get_study(test_sx.parent.pk)
 
 			# Create ACL policy which associates the group with the server
-			testacl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'duration': 1 })
+			testacl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'worklist': True, 'duration': 1 })
 			try:
-				test_s.create_reviewer_worklist_item(testgroup01, testuser02, SONADOR_WORKLIST_STATUS_UNREAD, dicomweb_api=True)
+				test_s.create_reviewer_worklist_item(testgroup01, testuser02, SONADOR_WORKLIST_STATUS_SCHEDULED, dicomweb_api=True)
 				self.fail('Able to create a worklist item for a user not associated with the server.')
 
 			except Exception as err:
@@ -418,11 +418,11 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			test_s = iserver.get_study(test_sx.parent.pk)
 
 			# Create ACL policy which associates the group with the server
-			testacl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'duration': 1 })
-			testacl = iserver.admin_create_acl(testgroup02, { 'resource': '*', 'duration': 1 })
+			testacl01 = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'worklist': True, 'duration': 1 })
+			testacl02 = iserver.admin_create_acl(testgroup02, { 'resource': '*', 'worklist': True, 'duration': 1 })
 
 			# Create reviewer worklist
-			w01 = test_s.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_UNREAD, dicomweb_api=True)
+			w01 = test_s.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_SCHEDULED, dicomweb_api=True)
 			self.assertTrue(any(w01.pk == _w.pk for _w in test_s.fetch_reviewer_worklist()),
 				msg='Worklist UID returned by request does not match UID of group instances retrieved by fetch method')
 
@@ -474,10 +474,10 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			test_s = iserver.get_study(test_sx.parent.pk)
 
 			# Create ACL policy which associates the group with the server
-			testacl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'duration': 1 })
+			testacl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'worklist': True, 'duration': 1 })
 
 			# Create reviewer worklist
-			w01 = test_s.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_UNREAD, complete=True, dicomweb_api=True)
+			w01 = test_s.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_SCHEDULED, complete=True, dicomweb_api=True)
 			self.assertTrue(any(w01.pk == _w.pk for _w in test_s.fetch_reviewer_worklist()),
 				msg='Worklist UID returned by request does not match UID of group instances retrieved by fetch method')
 
@@ -494,7 +494,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			# Attempt to update completed worklist
 			# Request should fail with a 400 error.
 			try:
-				w01.update({ 'State': SONADOR_WORKLIST_STATUS_APPROVED })
+				w01.update({ 'State': SONADOR_WORKLIST_STATUS_COMPLETED })
 				w01 = test_s.get_reviewer_worklist_item(w01.pk, dicomweb_api=True)
 				self.failTest('Able to update group for worklist item.')
 
