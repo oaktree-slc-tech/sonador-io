@@ -1102,7 +1102,7 @@ class SonadorImagingServer(OrthancServerAuthDataCollectionMixin, OrthancServerBa
 
 		return super().orthanc_apiurl(resource_endpoint, query_params=query_params, query_lowercase=query_lowercase)
 
-	def orthanc_request_headers(self, headers=None):
+	def orthanc_request_headers(self, headers=None, **kwargs):
 		'''	Add headers required by Orthanc API
 		'''
 		headers = headers or {}
@@ -1360,6 +1360,27 @@ class SonadorImagingServer(OrthancServerAuthDataCollectionMixin, OrthancServerBa
 		orthanc_group = orthanc_group_datamodel_class(self, group)
 		return orthanc_group.get_tag(uid, 
 			**omit(kwargs, ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')))
+
+	@property
+	def reviewer_worklist_item_class(self):
+		'''	Model collection class to use for worklist items
+		'''
+		from ..imaging.orthanc.worklists import ReviewerStudyWorklistItemCollection
+		return ReviewerStudyWorklistItemCollection
+
+	def fetch_user_dcmweb_worklist(self, worklist_datacollection_class=None, parent_model_class=None, **kwargs):
+		'''	Fetch reviewer study workitems for the user from the PACS via the DICOMweb worklist endpoint.
+			This method populates both worklist items and parent metadata.
+		'''
+		# Worklist item data collection class
+		worklist_datacollection_class = worklist_datacollection_class or self.reviewer_worklist_item_class
+
+		# Parent model class, default to ImagingStudy
+		if not parent_model_class:
+			from ..imaging.orthanc import ImagingStudy
+			parent_model_class = ImagingStudy
+
+		return worklist_datacollection_class.fetch_user_dcmweb_worklist(self, parent_model_class, **kwargs)
 
 	def with_credentials(self, *args, **kwargs):
 		'''	Initialize an instance of the imaging server with the provided credentials

@@ -85,9 +85,12 @@ def parse_image_orientation(coords):
 
 	return coords
 
+
 class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 	'''	Mixin class with convenience properties for accessing common Orthanc data fields.
 	'''
+	main_dcmtags_attr = 'MainDicomTags'
+
 	def fetch_meta(self, *args, headers=None, **kwargs):
 		'''	Retrieved the Orthanc metadata properties for the resource
 		'''
@@ -177,7 +180,7 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 
 	@property
 	def dicomdata(self):
-		return self._objectdata.get('MainDicomTags', {})
+		return self._objectdata.get(self.main_dcmtags_attr, {})
 
 	@property
 	@abstractmethod
@@ -310,10 +313,11 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 	'''	Mixin class with convenience properties for accessing data fields on higher-order resources 
 		such as series, studies, and patients.
 	'''
+	patient_dcmtags_attr = 'PatientMainDicomTags'
 
 	@property
 	def patientdata(self):
-		return self._objectdata.get('PatientMainDicomTags', {})
+		return self._objectdata.get(self.patient_dcmtags_attr, {})
 
 	@property
 	@abstractmethod
@@ -637,7 +641,7 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 
 		setattr(self, '_group_acl', acl_collection)
 
-	def create_group_acl(self, group, policy, **kwargs):
+	def create_group_acl(self, group, policy, fetch_existing=True, update_existing=True, **kwargs):
 		'''	Create policy for the provided group
 		'''
 		if not isinstance(group, SonadorGroup):
@@ -646,7 +650,33 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 			raise ValueError('Invalid group ACL policy')
 
 		policy['Group'] = group.pk
-		return self.group_acl_modelcollection_class.create(self, policy, **kwargs)
+		try:
+			return self.group_acl_modelcollection_class.create(self, policy, **kwargs)
+
+		except ClientOperationError as err:
+			_details = getattr(err, 'details', {})
+
+			# Attempt to retrieve existing instance of the ACL
+			if fetch_existing and only_duplicate_resource_error(err, field_check='Group'):
+
+				# Inspect server response for ID of existing policy
+				if _details.get(gcapicodes.SERVER_RESPONSE):
+					_rdata = json.loads(_details.get(gcapicodes.SERVER_RESPONSE))
+
+					# Retrieve existing model instance
+					if _rdata.get(gcapicodes.OBJECT_DATA) \
+						and _rdata.get(gcapicodes.OBJECT_DATA, {}).get(self.group_acl_modelcollection_class.model.pk_attr):
+						_acl = self.get_group_acl(
+							_rdata.get(gcapicodes.OBJECT_DATA, {}).get(self.group_acl_modelcollection_class.model.pk_attr), **kwargs)
+
+						# Update the existing policy to match the requested policy
+						if update_existing:
+							_acl.update(policy)
+							_acl = self.get_group_acl(_acl.pk, **kwargs)
+
+						return _acl
+
+			raise err
 
 	def get_group_acl(self, cid, *args, **kwargs):
 		'''	Retrieve the specified group ACL policy
@@ -690,6 +720,8 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerChildBaseObject):
 	tabulate_output_columns = IMAGING_PATIENT_OUTPUT_COLUMNS
 	fetch_endpoint = 'patients'
 	cache_queryurl = '/cache/patients'
+
+	resource_level = IMAGING_SERVER_RESOURCE_PATIENT
 
 	@property
 	def resource_url(self):
@@ -895,6 +927,9 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 	tabulate_output_columns = IMAGING_STUDY_OUTPUT_COLUMNS
 	fetch_endpoint = 'studies'
 	cache_queryurl = '/cache/studies'
+
+	parent_class = ImagingPatient
+	resource_level = IMAGING_SERVER_RESOURCE_STUDY
 
 	def __init__(self, *args, **kwargs):
 		self._parent = kwargs.pop('patient', None)
@@ -1879,6 +1914,9 @@ class ImagingSeriesDcm0Mixin:
 class ImagingSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 	'''	Imaging series: set of grouped images
 	'''
+	parent_class = ImagingStudy
+	resource_level = IMAGING_SERVER_RESOURCE_SERIES
+
 	@property
 	def dcminstance_modelcollection_class(self): return DcmInstanceCollection
 
@@ -2282,6 +2320,7 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 class DcmInstance(DcmInstanceCoreResource):
 	'''	DCM instance model used for imaging data
 	'''
+	resource_level = IMAGING_SERVER_RESOURCE_IMAGE
 
 	def imgfile(self, stretch_dynamicrange=True, bitdepth=8, **kwargs):
 		'''	Retrieve image file data from Orthanc

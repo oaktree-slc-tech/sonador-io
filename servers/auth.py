@@ -347,6 +347,18 @@ class SonadorGroupAccessControlListCollection(ImagingServerChildCollection):
 	'''
 	model = SonadorGroupAccessControlList
 
+	def get_group_acl(self, group_pk, *args, **kwargs):
+		'''	Retrieve the ACL instance for the specified group
+
+			@returns ACL policy instance or None if a policy for the provided group UID
+				cannot be located.
+		'''
+		_acl = self.filter(lambda _p: _p.group == group_pk)
+		if len(_acl):
+			return _acl[0]
+
+		return None
+
 
 class SonadorGroupObjectMixin:
 	'''	Mixin class which provides properites for parsing Sonador user attributes

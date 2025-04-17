@@ -1,17 +1,110 @@
 import six, logging
 from collections import OrderedDict
 
+from client.utils.object import pick, omit
+
 from ..apisettings import IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
 	DCMHEADER_STUDY_INSTANCE_UID, DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SEQUENCE_NAME, DCMHEADER_MODALITY, \
 	DCMHEADER_SERIES_DESCRIPTION, DCMHEADER_SERIES_NUMBER, DCMHEADER_BODY_PART_EXAMINED, \
 	DCMHEADER_ACCESSION_NUMBER, DCMHEADER_STUDY_DATE, DCMHEADER_STUDY_TIME, DCMHEADER_REFERRING_PHYSICIAN, \
-	DCMHEADER_PATIENT_SEX, DCMHEADER_PATIENT_ID, DCMHEADER_PATIENT_NAME
+	DCMHEADER_PATIENT_SEX, DCMHEADER_PATIENT_ID, DCMHEADER_PATIENT_NAME, DICOM_VR_PN, \
+	DICOMWEB_TAG_ATTR, DICOMWEB_VALUE_ATTR, DICOMWEB_VALUE_REP, DICOMWEB_VR_PN_ALPHABETIC
 from ..remote import SonadorBaseObject, SonadorObjectCollection
+
+from .helpers.conversion import dcmhexcode2tagname
 
 logger = logging.getLogger(__name__)
 
 
-def dicomweb2keyval(dicomweb_raw, odata=None, name_attr='Name', value_attr='Value'):
+def dicomweb_tag_name(dcmweb_code, dcmweb_val, 
+		name_attr=DICOMWEB_TAG_ATTR, value_attr=DICOMWEB_VALUE_ATTR, cache_dcm_tags=None):
+	'''	Translate the provided DICOMweb code to an attribute name.
+
+		@returns human readable attribute (tag) name
+	'''
+	# Attemptt to retrieve header from the provided DICOMweb value array
+	if isinstance(dcmweb_val, dict) and name_attr in dcmweb_val:
+		return dcmweb_val[name_attr]
+
+	# Ensure that the DICOMweb code is a tuple, split string into a tuple for lookup
+	if not isinstance(dcmweb_code, tuple) and isinstance(dcmweb_code, str) and len(dcmweb_code) == 8:
+		dcmweb_code = (dcmweb_code[:4], dcmweb_code[-4:])
+
+	# Invalid DICOMweb attribute code
+	if not isinstance(dcmweb_code, tuple):
+		return None
+
+	# Check cache DICOM tags for code
+	if cache_dcm_tags and cache_dcm_tags.get(dcmweb_code):
+		_,tag = cache_dcm_tags.get(dcmweb_code)
+		return tag.header
+
+	# Check pydicom dictionary for tag
+	return dcmhexcode2tagname(dcmweb_code)
+
+
+def dicomweb_tag_keys(dicomweb_raw, 
+		name_attr=DICOMWEB_TAG_ATTR, value_attr=DICOMWEB_VALUE_ATTR, attrs=None, cache_dcm_tags=None):
+	''' Retrieve the DCM key names from the provided dicomweb_raw data dictionary and translate them
+		to their tag names.
+
+		@returns iterable of DCM tag names present in the response. Example: ["PatientID", "PatientName", ...]
+	'''
+	attrs = attrs or []
+
+	# Iterate through DICOMweb JSON object and convert DICOM hexcodes to tag names
+	for dk, dv in six.iteritems(dicomweb_raw):
+		dcm_attr = dicomweb_tag_name(dk, dv, cache_dcm_tags=cache_dcm_tags, name_attr=name_attr, value_attr=value_attr)
+		if dcm_attr:
+			attrs.append(dcm_attr)
+
+	return attrs
+
+
+def dicomweb_code_keys(dicomweb_raw,
+		name_attr=DICOMWEB_TAG_ATTR, value_attr=DICOMWEB_VALUE_ATTR, attrs=None, cache_dcm_tags=None):
+	'''	Retrieve the DCM code keys from the provided dicomweb_raw data dictionary. The resulting iterable
+		can be used for JSON transforms or data conversions.
+
+		@returns iterable of DCM code keys present in the response. Example: ["00100010", "00080020"]
+	'''
+	attrs = attrs or []
+
+	# Iterate through DICOmweb JSON object and aggregate all DICOM hexcodes present in the response
+	for dk, dv in six.iteritems(dicomweb_raw):
+		dcm_attr = dicomweb_tag_name(dk, dv, cache_dcm_tags=cache_dcm_tags, name_attr=name_attr, value_attr=value_attr)
+		if dcm_attr:
+			attrs.append(dk)
+
+	return attrs
+
+
+def dicomweb_value(dicomweb_val, value_attr=DICOMWEB_VALUE_ATTR, valuerep_attr=DICOMWEB_VALUE_REP):
+	''' Retrieve, flatten, format, and convert the DICOMweb value from the provided dictionary.
+
+		@returns formatted value
+	'''
+	# For DICOMweb encoded values, flatten and transform
+	if isinstance(dicomweb_val, dict) and dicomweb_val.get(value_attr):
+		_val = dicomweb_val.get(value_attr)
+		_vr = dicomweb_val.get(valuerep_attr)
+
+		# Flatten nested values
+		if _val and isinstance(_val, (list, tuple)) and len(_val) == 1:
+			_val = _val[0]
+
+		# Person Name: flatten to string
+		if isinstance(_val, dict) and _val.get(DICOMWEB_VR_PN_ALPHABETIC):
+			_val = _val.get(DICOMWEB_VR_PN_ALPHABETIC)
+
+	else:
+		_val = dicomweb_val
+
+	return _val
+
+
+def dicomweb2keyval(dicomweb_raw, 
+		odata=None, name_attr=DICOMWEB_TAG_ATTR, value_attr=DICOMWEB_VALUE_ATTR, cache_dcm_tags=None):
 	'''	Convert a raw dicomweb data response to a structure mapped to key/value pairs
 	'''
 	odata = odata or {}
@@ -19,21 +112,62 @@ def dicomweb2keyval(dicomweb_raw, odata=None, name_attr='Name', value_attr='Valu
 	# Iterate through all DICOMweb attributes and extract 'Name' and 'Value' elements.
 	# Re-map in a new dictionary
 	for dk, dv in six.iteritems(dicomweb_raw):
-		if name_attr in dv and value_attr in dv:
-			odata[dv.get(name_attr)] = dv.get(value_attr)
+
+		# Retrieve DICOM tag name, add to object data
+		tag_name = dicomweb_tag_name(dk, dv, name_attr=name_attr, value_attr=value_attr, cache_dcm_tags=cache_dcm_tags)
+		if tag_name:
+			odata[tag_name] = dicomweb_value(dv, value_attr=value_attr)
 
 	return odata
 
 
-class RemoteImagingBaseObject(SonadorBaseObject):
+def dcmjson2orthanc(dcm_json, model_class, cache_dcm_tags, odata=None):
+	'''	Translate the provided DICOM JSON structure to the model structure specified by 
+		the Orthanc model class.
+
+		@input dcm_json (JSON object): dictionary of DICOM key/value pairs
+		@input model_class (sonador.imaging.orthanc.base.ImagingResource class): Orthanc
+			object class to which the provided DCM json should be translated.
+	'''
+	odata = odata or {}
+
+	if not hasattr(model_class, 'resource_level'):
+		raise ValueError('Unable to translate DICOM structure. Model "%s" does not have a "resource_level" property'
+			% model_class.__name__)
+
+	if not hasattr(model_class, 'main_dcmtags_attr'):
+		raise ValueError('Unable to translate DICOM structure. Model "%s" does not have a "main_dcmtags_attr" property')
+
+	# Add DICOM tags to MainDicomTags
+	odata[model_class.main_dcmtags_attr] = pick(dcm_json, 
+		[_dcm.header for (_level,_dcm) in cache_dcm_tags.values() if _level == model_class.resource_level])
+
+	# Add PatientMainDicomTags to the object data
+	if hasattr(model_class, 'parent_class') \
+		and getattr(model_class.parent_class, 'resource_level', None) == IMAGING_SERVER_RESOURCE_PATIENT:
+		odata[model_class.parent_class.patient_dcmtags_attr] = pick(dcm_json,
+			[_dcm.header for (_level,_dcm) in cache_dcm_tags.values() if _level == IMAGING_SERVER_RESOURCE_PATIENT])
+	
+	return odata
+
+
+class DcmWebImagingBaseObject(SonadorBaseObject):
+	'''	Data object associated with a response from a DICOMweb API endpoint.
+	'''
+	def __init__(self, server, dicomweb_raw, *args, object_data=None, tags=None, **kwargs):
+		self.dicomweb_raw = dicomweb_raw
+
+		super().__init__(server, dicomweb2keyval(dicomweb_raw, odata=object_data, cache_dcm_tags=tags), *args, **kwargs)
+
+
+class RemoteImagingBaseObject(DcmWebImagingBaseObject):
 	'''	Data object associated with a DICOMCweb remote. Includes a reference to the 
 		DICOMweb server from which the object came.
 	'''
 	def __init__(self, server, dicomweb_raw, *args, **kwargs):
 		self.dicomweb = kwargs.pop('dicomweb', None)
-		self.dicomweb_raw = dicomweb_raw
 
-		super(RemoteImagingBaseObject, self).__init__(server, dicomweb2keyval(dicomweb_raw), *args, **kwargs)
+		super().__init__(server, dicomweb_raw, *args, **kwargs)
 
 
 class RemoteImagingObjectCollection(SonadorObjectCollection):

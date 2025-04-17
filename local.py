@@ -30,7 +30,7 @@ class SonadorCachedObjectCollectionMixin:
 			the lookup is available.
 		'''
 		# Attempting to retrieve the length of the collection will force it to initialize
-		if not self._model_lookup and self._objectdata: len(self)
+		if not self._model_lookup and self._objectdata is not None: len(self)
 
 	def get_modelinstance(self, pk):
 		'''	Retrieve model instance from the collection using the model's unique identifier (primary key).
@@ -55,7 +55,7 @@ class SonadorCachedObjectCollectionMixin:
 
 		return super().extend(other)
 
-	def append(self, value):
+	def append(self, m):
 		'''	Add model instance to the collection, indexes model instances to lookup.
 		'''
 		self._check_modelinit()
@@ -63,7 +63,7 @@ class SonadorCachedObjectCollectionMixin:
 		if not m.pk in self._model_lookup:
 			self._model_lookup[m.pk] = m
 
-		return super().append(value)
+		return super().append(m)
 
 
 class SonadorLocalObject(GuruCoreObject):
