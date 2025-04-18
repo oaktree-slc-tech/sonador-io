@@ -39,6 +39,22 @@ class OrthancResourceAccessControlListBaseModel(DcmExtParentMixin, DcmExtBaseMod
 		self.resource_model = kwargs.pop('resource_model', None)
 		super().__init__(*args, **kwargs)
 
+	@property
+	def view_perm(self):
+		return self._objectdata.get('View')
+
+	@property
+	def modify_perm(self):
+		return self._objectdata.get('Modify')
+
+	@property
+	def acl_perm(self):
+		return self._objectdata.get('ACL')
+
+	@property
+	def remove_perm(self):
+		return self._objectdata.get('Remove')
+
 
 class OrthancResourceAccessControlListCollection(DcmExtCollectionParentMixin, DcmExtBaseCollection):
 	'''	Collection of ACL policies
