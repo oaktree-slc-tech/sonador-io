@@ -662,10 +662,15 @@ class ImagingServerChildCollectionFetchMixin:
 					cls.model.__name__, pacs.server_label, r.request.url, r.status_code
 				), r)
 
+		def fetch_modelinstance(resource_endpoint, *_args, **_kwargs):
+			'''	Patch pacs._request_get to include error message callable
+			'''
+			return pacs._request_get(resource_endpoint, error_msg, *_args, **_kwargs)
+
 		return fetch_sonador_dataobject(
 			pacs, cls.model, objectid, verify=verify, 
 			apiurl_callable=apiurl_callable, headers_callable=headers_callable,
-			error_msg=error_msg, fetch_callable=pacs._request_get, **kwargs)
+			error_msg=error_msg, fetch_callable=fetch_modelinstance)
 
 
 class ImagingServerChildCollection(ImagingServerChildCollectionFetchMixin, SonadorObjectCollection):
