@@ -670,7 +670,7 @@ class ImagingServerChildCollectionFetchMixin:
 		return fetch_sonador_dataobject(
 			pacs, cls.model, objectid, verify=verify, 
 			apiurl_callable=apiurl_callable, headers_callable=headers_callable,
-			error_msg=error_msg, fetch_callable=fetch_modelinstance)
+			error_msg=error_msg, fetch_callable=fetch_modelinstance, **kwargs)
 
 
 class ImagingServerChildCollection(ImagingServerChildCollectionFetchMixin, SonadorObjectCollection):
