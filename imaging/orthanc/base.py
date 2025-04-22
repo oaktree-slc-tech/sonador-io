@@ -86,7 +86,50 @@ def parse_image_orientation(coords):
 	return coords
 
 
-class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
+class KafkaMixin:
+	''' Mixin class which provides methods for interfacing with Sonador/Orthanc's Kafka endpoints.
+
+		@attr kafka_url (abstract/required): abstract property which specifies the URL to which
+			Kafka requests should be sent.
+	'''
+	@property
+	@abstractmethod
+	def kafka_url(self):
+		'''	URL which should be used to trigger export of resource data to the Orthanc Kafka topic.
+		'''
+
+	def fetch_kafka_data(self, *args, **kwargs):
+		'''	Retrieve Kafka data payload for the resource. (Used for validating data structure and testing.)
+
+			@returns dict
+		'''
+		r = self.pacs._request_get(
+			self.pacs.orthanc_apiurl(self.kafka_url),
+			lambda r: request_client_error(
+				'Unable to retrieve Kafka data for %s on server %s. Status code: %s.'
+					% (self.kafka_url, self.pacs.server_label, r.status_code),
+				r),
+			headers=self.pacs.orthanc_request_headers(**kwargs), verify=self.pacs.server.verify_ssl(**kwargs))
+
+		return server_controloperation_json_response(r)
+
+	def kafka_export(self, data=None, **kwargs):
+		'''	Trigger export of the resource data to Kafka
+
+			@returns dict
+		'''
+		r = self.pacs._request_post(
+			self.pacs.orthanc_apiurl(self.kafka_url),
+			lambda r: request_client_error(
+				'Unable to trigger export of Kafka data for %s on server %s. Status code: %s.'
+				% (self.kafka_url, self.pacs.server_label, r.status_code),
+				r),
+			json=data or {}, headers=self.pacs.orthanc_request_headers(**kwargs), verify=self.server.verify_ssl(**kwargs))
+
+		return server_controloperation_json_response(r)
+
+
+class ImagingResourceCoreMixin(KafkaMixin, metaclass=ABCMeta):
 	'''	Mixin class with convenience properties for accessing common Orthanc data fields.
 	'''
 	main_dcmtags_attr = 'MainDicomTags'
@@ -104,9 +147,7 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 					'Unable to retrieve metadata for %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
 					r
 				),
-				headers=self.pacs.orthanc_request_headers(headers=headers)
-			)
-		)
+				headers=self.pacs.orthanc_request_headers(headers=headers)))
 
 	@property
 	def meta(self):
@@ -191,42 +232,6 @@ class ImagingResourceCoreMixin(object, metaclass=ABCMeta):
 	@property
 	def url(self):
 		return self.resource_url
-
-	@property
-	@abstractmethod
-	def kafka_url(self):
-		'''	URL which should be used to trigger export of resource data to the Orthanc Kafka topic
-		'''
-
-	def fetch_kafka_data(self, *args, **kwargs):
-		'''	Retrieve Kafka data payload for the resource. (Used for validating data structure and testing.)
-
-			@returns dict
-		'''
-		r = self.pacs._request_get(
-			self.pacs.orthanc_apiurl(self.kafka_url),
-			lambda r: request_client_error(
-				'Unable to retrieve Kafka data for %s on server %s. Status code: %s.'
-					% (self.kafka_url, self.pacs.server_label, r.status_code),
-				r),
-			headers=self.pacs.orthanc_request_headers(**kwargs), verify=self.pacs.server.verify_ssl(**kwargs))
-
-		return server_controloperation_json_response(r)
-
-	def kafka_export(self, data=None, **kwargs):
-		'''	Trigger export of the resource data to Kafka
-
-			@returns dict
-		'''
-		r = self.pacs._request_post(
-			self.pacs.orthanc_apiurl(self.kafka_url),
-			lambda r: request_client_error(
-				'Unable to trigger export of Kafka data for %s on server %s. Status code: %s.'
-				% (self.kafka_url, self.pacs.server_label, r.status_code),
-				r),
-			json=data or {}, headers=self.pacs.orthanc_request_headers(**kwargs), verify=self.pacs.server.verify_ssl(**kwargs))
-
-		return server_controloperation_json_response(r)
 
 	def modify(self, replace=None, remove=None, keep=None, keep_source=None,
 			remove_private_tags=False, force=False, transcode=None, private_creator=None,

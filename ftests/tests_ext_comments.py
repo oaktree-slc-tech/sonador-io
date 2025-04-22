@@ -2,8 +2,10 @@ import os, posixpath, unittest, requests, logging, json, tempfile, zipfile, cont
 from io import BytesIO
 from time import sleep
 
+from client import apisettings as gcapi
 from client.utils.general import first
 from client.utils.object import each
+from client.utils.general import create_token
 
 from ..helpers import initenv_sonador_server
 from ..servers import sonador_apitoken_fetch
@@ -116,6 +118,40 @@ class SonadorResourceCommentTests(SonadorSeriesBaseTestCase):
 			r_del = c2.delete()
 			self.assertTrue(len(series.fetch_comments(dicomweb_api=True)) == 0 and iserver.dicomweb_root in r_del.url,
 				msg='Comment should have been removed from the series, but was not.')
+
+	def test_resource_comment_kafka(self, *args, **kwargs):
+		'''	Ensure that the test runner is able to connect to Sonador, upload an imaging
+			series, create comments, update a comment, and remove the comment.
+		'''
+		# Retrieve imaging server to be used by the test
+		iserver = self.getImageServer(*args, **kwargs)
+
+		# Retrieve and upload CT data
+		ctr = requests.get('https://www.oak-tree.tech/documents/331/nih-cxr.patient-30775.zip')
+		if not ctr.ok:
+			raise ValueError('Unable to retrieve test data due to an error. Status code: %s.' % ctr.status_code)
+
+		# Temporarily stage data to Sonador to fun the test
+		with self.stageImageArchiveSeries(iserver, zipfile.ZipFile(BytesIO(ctr.content))) as (series, hcache):
+
+			# Create token to uniquely identify the test comment
+			_token = create_token()
+
+			# Create comment instance
+			ctxt = 'Test comment: CT lung scan series downloaded by functional test runner. Token: %s' % _token
+			c = series.create_comment(ctxt)
+			self.assertTrue(any(ctxt == c.text for c in series.fetch_comments()), 
+				msg='Series comment did not persist to Orthanc')
+
+			# Retrieve Kafka export from Orthanc
+			_kafka = c.fetch_kafka_data()
+			self.assertTrue(_token in _kafka.get('Text'),
+				msg='Test comment exported by Kafka endpoint did not match the comment created during the test.')
+
+			# Trigger manual export of Kafka data
+			_kafka = c.kafka_export()
+			self.assertEqual(_kafka.get(gcapi.STATUS), gcapi.SUCCESS, msg='Unable to export data to Kafka topic.')
+
 
 class SonadorStudyResourceCommentTests(SonadorStudyBaseTestCase):
 	'''	Ensure that study comments function as expected

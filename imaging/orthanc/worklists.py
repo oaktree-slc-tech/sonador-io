@@ -15,7 +15,9 @@ from ...servers.auth import SonadorUserObjectMixin, SonadorGroupObjectMixin
 from ..dicomweb import dicomweb_tag_name, dicomweb_tag_keys, dicomweb_code_keys, \
 	dicomweb_value, dicomweb2keyval, dcmjson2orthanc
 from .ext import DcmExtBaseModel, DcmExtBaseCollection, DcmExtParentMixin, DcmExtCollectionParentMixin
+from .base import KafkaMixin
 
+from client.utils.microservices import server_controloperation_json_response
 
 WORKLIST_OUTPUT_COLUMNS = OrderedDict((
 	('pk', 'Worklist Item ID'),
@@ -26,7 +28,7 @@ WORKLIST_OUTPUT_COLUMNS = OrderedDict((
 ))
 
 
-class ReviewerStudyWorklistItem(SonadorGroupObjectMixin, SonadorUserObjectMixin, DcmExtParentMixin, DcmExtBaseModel):
+class ReviewerStudyWorklistItem(KafkaMixin, SonadorGroupObjectMixin, SonadorUserObjectMixin, DcmExtParentMixin, DcmExtBaseModel):
 	'''	Worklist item associated with a study
 	'''
 	pk_attr = 'ID'
@@ -49,6 +51,10 @@ class ReviewerStudyWorklistItem(SonadorGroupObjectMixin, SonadorUserObjectMixin,
 	@property
 	def state(self):
 		return self._objectdata.get('State')
+	
+	@property
+	def kafka_url(self):
+		return posixpath.join(self.parent.worklist_reviewer_url, self.pk, 'kafka')
 
 
 class ReviewerStudyWorklistItemCollection(DcmExtCollectionParentMixin, DcmExtBaseCollection):

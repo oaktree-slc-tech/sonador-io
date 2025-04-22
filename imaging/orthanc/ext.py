@@ -15,6 +15,8 @@ from client.utils.object import pick, omit
 from ...remote import sonador_dataobject_create, sonador_dataobject_update, SonadorObjectCollection
 from ...servers.base import ImagingServerChildCollectionFetchMixin
 
+from .base import KafkaMixin
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +35,10 @@ class DcmExtBaseModel(GuruBaseObject):
 	def resource_url(self):
 		'''	API URL associated with the model instance
 		'''
+
+	@property
+	def pacs(self):
+		return self.parent.pacs
 
 	@property
 	def url(self):
@@ -143,7 +149,7 @@ class DcmExtParentMixin:
 		return self.parent.pk
 
 
-class ResourceComment(DcmExtParentMixin, DcmExtBaseModel):
+class ResourceComment(KafkaMixin, DcmExtParentMixin, DcmExtBaseModel):
 	'''	Comment associated with a resource	
 	'''
 	pk_attr = 'ID'
@@ -165,6 +171,10 @@ class ResourceComment(DcmExtParentMixin, DcmExtBaseModel):
 	@property
 	def meta(self):
 		return self._objectdata.get('Meta') or {}
+
+	@property
+	def kafka_url(self):
+		return posixpath.join(self.parent.comments_url, self.pk, 'kafka')
 
 
 class DcmExtCollectionParentMixin:
