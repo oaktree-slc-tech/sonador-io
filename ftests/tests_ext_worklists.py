@@ -702,9 +702,6 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			assigned a worklist from a group they are not a part of.
 		'''
 		# Setup test group and user for worklist
-		iserver, testgroup01, testuser01 = self.setupTestAuth(
-			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
-		
 		iserver02, testgroup02, testuser02 = self.setupTestAuth(
 			testuser_config=TESTUSER02, testgroup_name=TESTGROUP02, **kwargs)
 
@@ -714,24 +711,20 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
 
 		# Stage test files to imaging server
-		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+		with self.stageImageArchiveSeries(iserver02, response2filearchive(r_cx)) as (test_sx, test_hache):
 			
-			# Reference to parent instance
-			test_s = iserver.get_study(test_sx.parent.pk)
-
-			# # Create ACL policy 
-			# testacl01 = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'worklist': True, 'duration': 5})
-
-			testacl02 = iserver.admin_create_acl(testgroup02, { 
-				'resource': '*', 'query': False, 'view': False, 'modify': False, 'remove': False, 'acl': False, 'worklist': True, 'duration': 5
-				})
+			# Reference to parent instance and create ACL
+			test_s = iserver02.get_study(test_sx.parent.pk)
+			testacl02 = iserver02.admin_create_acl(testgroup02, { 
+				'resource': '*', 'worklist': True, 'duration': 5
+			})
 
 			# Create local study policy for test study 1, retrieve reference
 			testacl02_study_local = test_s.create_group_acl(testgroup02, {
 				'View': True, 'Modify': True, 'Remove': False, 'ACL': False,
 			})
 			
-			with self.getLimitedImageServer(iserver, testuser02, object_data={'description': 'ACL integration testing' }) as iserver_ltd:
+			with self.getLimitedImageServer(iserver02, testuser02, object_data={'description': 'ACL integration testing' }) as iserver_ltd:
 				test_s_ltd = iserver_ltd.get_study(test_s.pk)
 
 				w01 = test_s_ltd.create_reviewer_worklist_item(testgroup02, testuser02, SONADOR_WORKLIST_STATUS_SCHEDULED)
@@ -739,3 +732,45 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 
 				self.assertTrue(w01.user is not None and w01.user.pk == testuser02.pk,
 					msg='Worklist payload does not reference the correct user, user from other group was able to be added to worklist')
+
+	def test_worklist_kafka_push(self, *args, **kwargs):
+		'''	Test Kafka push endpoint for worklist
+		'''
+		# Setup test group and user for worklist
+		iserver02, testgroup02, testuser02 = self.setupTestAuth(
+			testuser_config=TESTUSER02, testgroup_name=TESTGROUP02, **kwargs)
+
+		# Download test series
+		r_cx = requests.get(self.nih_cxr_testdcm)
+		if not r_cx.ok:
+			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+
+		# Stage test files to imaging server
+		with self.stageImageArchiveSeries(iserver02, response2filearchive(r_cx)) as (test_sx, test_hache):
+			
+			# Retrieve parent study and create ACL policy
+			test_s = iserver02.get_study(test_sx.parent.pk)
+			testacl02 = iserver02.admin_create_acl(testgroup02, { 
+				'resource': '*', 'worklist': True, 'duration': 5
+			})
+
+			# Create local study policy for test study 1, retrieve reference
+			testacl02_study_local = test_s.create_group_acl(testgroup02, {
+				'View': True, 'Modify': True, 'Remove': False, 'ACL': False,
+			})
+			
+			with self.getLimitedImageServer(iserver02, testuser02, object_data={'description': 'ACL integration testing' }) as iserver_ltd:
+				test_s_ltd = iserver_ltd.get_study(test_s.pk)
+
+				w01_ltd = test_s_ltd.create_reviewer_worklist_item(testgroup02, testuser02, SONADOR_WORKLIST_STATUS_SCHEDULED)
+				w01_ltd = test_s_ltd.get_reviewer_worklist_item(w01_ltd.pk)
+				w01 = test_s.get_reviewer_worklist_item(w01_ltd.pk, dicomweb_api=True)
+
+				self.assertTrue(w01_ltd.user is not None and w01_ltd.user.pk == testuser02.pk,
+					msg='Worklist payload does not reference the correct user, user from other group was able to be added to worklist')
+
+				# Retrieve Kafka export
+				_kafka = w01.fetch_kafka_data()
+				self.assertEqual(_kafka.get('ID'), w01.pk, msg='Kafka export for worklist has wrong ID')
+				self.assertEqual(_kafka.get('State'), w01.state, msg='Kafka export for worklist has wrong state')
+				w01.kafka_export()
