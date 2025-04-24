@@ -822,6 +822,16 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerChildBaseObject):
 
 		return self._studies
 
+	@studies_collection.setter
+	def studies_collection(self, studies_collection):
+		''' Study instances associated with the patient
+        '''
+        if not isinstance(studies_collection, ImagingStudyCollection):
+            raise ValueError("Study must be an instance of the Studies Collection")
+
+        setattr(self, '_studies', studies_collection)
+
+
 	def fetch_series(self, **kwargs):
 		'''	Retrieve details of the series associated with the patient
 
@@ -888,7 +898,7 @@ class ImagingPatientCollection(ImagingResourceBaseCollection):
 
 				# Study
 				if bdata_study:
-					p.studies_from_json([bdata_study.get_modelinstance(sid)._objectdata for sid in p.studies if bdata_study.get_modelinstance(sid)])
+					p.studies_collection = p.studies_from_json([bdata_study.get_modelinstance(sid)._objectdata for sid in p.studies if bdata_study.get_modelinstance(sid)])
 
 		if child_series:
 			series_uids = []
