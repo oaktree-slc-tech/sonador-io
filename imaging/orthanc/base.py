@@ -481,16 +481,16 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 			 http://dicom.nema.org/medical/dicom/current/output/chtml/part15/chapter_E.html#table_E.1-1.)
 
 			 @input replace (dict, default=None): dict of DICOM tags to replace on the resource.
-			 	Example: { 'PatientName': 'Example Patient', '0010-1011': 'Example Tag Value'}.
-			 	Replacements are applied after all the tags to anonymize have been removed. replace
-			 	may be used to add new tags to the resource.
+				Example: { 'PatientName': 'Example Patient', '0010-1011': 'Example Tag Value'}.
+				Replacements are applied after all the tags to anonymize have been removed. replace
+				may be used to add new tags to the resource.
 			 @input keep (iterable, default=None): iterable of tags to be preserved from full anonymization.
 			 @input keep_private_tags (bool, default=True): preserves private (manufacturer-specific) tag
-			 	values. The default behavior of the server is to remove the tags.
+				values. The default behavior of the server is to remove the tags.
 			 @input dicom_version (str, default='2021b'): version of the DICOM standard to be used
-			 	for anonymization.
+				for anonymization.
 			 @input remove (iterable, default=None): iterable ot tags to be removed outside of those
-			 	specified in the standard.
+				specified in the standard.
 
 			 @returns request.Response
 		'''
@@ -825,11 +825,11 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerChildBaseObject):
 	@studies_collection.setter
 	def studies_collection(self, studies_collection):
 		''' Study instances associated with the patient
-        '''
-        if not isinstance(studies_collection, ImagingStudyCollection):
-            raise ValueError("Study must be an instance of the Studies Collection")
+		'''
+		if not isinstance(studies_collection, ImagingStudyCollection):
+			raise ValueError("Study must be an instance of the Studies Collection")
 
-        setattr(self, '_studies', studies_collection)
+		setattr(self, '_studies', studies_collection)
 
 
 	def fetch_series(self, **kwargs):
@@ -1456,19 +1456,19 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 			(Refer to https://book.orthanc-server.com/users/anonymization.html#split-merge-of-dicom-studies)
 
 			 @input resources (list): The UIDS of DICOM resources (studies, series, and/or instances) 
-			 	to be merged into the study of interest.
+				to be merged into the study of interest.
 			 @input asynchronous (boolean, default=False): If true, run the job in asynchronous mode.
-			 	When run asynchronously, the REST API call will immediately return, reporting the identifier 
-			 	of a job. The job instance can be used to retrieve the status of the job.
+				When run asynchronously, the REST API call will immediately return, reporting the identifier 
+				of a job. The job instance can be used to retrieve the status of the job.
 			 @input keep_source (bool, default=False): If set to true, instructs Orthanc to keep 
-			 	a copy of the original series in the source study. By default, the original 
-			 	resources are deleted from Orthanc.
+				a copy of the original series in the source study. By default, the original 
+				resources are deleted from Orthanc.
 			 @input permissive (permissive, default=False): If true, ignore errors during the individual 
-			 	steps of the job.
+				steps of the job.
 			 @input priority (int, default=0): The priority of the job. The lower the number, 
-			 	the higher the priority.
+				the higher the priority.
 			 @input merge (iterable, default=None): iterable ot tags to be removed outside of those
-			 	specified in the standard.
+				specified in the standard.
 
 			 @returns requests.Response
 		'''
@@ -1493,21 +1493,21 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 			(Refer to https://book.orthanc-server.com/users/anonymization.html#split-merge-of-dicom-studies.)
 
 			 @input resources (list): the list of series UIDs to be split from the current study. (Must
-			 	be part of the current study.)
+				be part of the current study.)
 			 @input asynchronous (boolean, default=False): If true, run the job in asynchronous mode. When asynchronously,
-			 	REST API call will immediately return, reporting the identifier of a job. The job instance can be used
-			 	to retrieve the status of the job.
+				REST API call will immediately return, reporting the identifier of a job. The job instance can be used
+				to retrieve the status of the job.
 			 @input keep_source (bool, default=False): If set to true, instructs Orthanc to keep a copy of 
-			 	the original resources in their source study. By default, the original resources are deleted from Orthanc.
+				the original resources in their source study. By default, the original resources are deleted from Orthanc.
 			 @input permissive (permissive, default=False): If true, ignore errors during the individual steps of the job.
 			 @input priority (iterable, default=None): In asynchronous mode, the priority of the job. 
-			 	The lower the value, the higher the priority.
+				The lower the value, the higher the priority.
 			 @input remove (list, default=None): List of tags that must be removed in the new study 
-			 	(from the same modules as in the Replace option).
+				(from the same modules as in the Replace option).
 			 @input replace (dict, default=None): Associative array to change the value of some 
-			 	DICOM tags in the new study. The tags must be part of the "Patient Module Attributes" 
-			 	or the "General Study Module Attributes",  as specified by the DICOM 2011 standard in Tables 
-			 	C.7-1 and C.7-3.
+				DICOM tags in the new study. The tags must be part of the "Patient Module Attributes" 
+				or the "General Study Module Attributes",  as specified by the DICOM 2011 standard in Tables 
+				C.7-1 and C.7-3.
 
 			 @returns requests.Response
 		'''
