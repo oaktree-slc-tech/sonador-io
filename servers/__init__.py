@@ -26,7 +26,8 @@ from client.remote import RemoteServer, request_client_error
 from ..apisettings import  DicomMetaKey, DicomHeaderData, \
 	IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, \
 	IMAGING_SERVER_RESOURCE_SERIES, IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_RESOURCE_SUPPORTED, \
-	DCMHEADER_MODALITY, DCM_MODALITY_SR, DCM_MODALITY_SEG, DCM_VERSION_2021b, DICOM_VR_DESCRIPTION
+	DCMHEADER_MODALITY, DCM_MODALITY_SR, DCM_MODALITY_SEG, DCM_VERSION_2021b, DICOM_VR_DESCRIPTION, \
+	IMAGING_SERVER_INCLUDE_INSTANCES
 from ..serialization import json_datetime_parser
 from ..helpers import request_client_error, fetch_sonador_session_token, API_ACCESS_TOKEN, OAUTH_TOKEN_RESPONSE_TYPE, \
 	OAUTH_TOKEN_IDTOKEN_RESPONSE_TYPE, OAUTH_ACCESS_TOKEN, OAUTH_TOKEN_TYPE, OAUTH_TOKEN_TYPE_BEARER, OAUTH_EXPIRATION
@@ -912,8 +913,8 @@ class SonadorImagingServer(OrthancServerAuthDataCollectionMixin, OrthancServerBa
 		return farchive
 	
 	def fetch_bulk_content(self, uids: list, full: bool=False, metadata: str=True, resource=None,
-			short: bool=False, headers: dict=None, verify=None, bulk_content_dict: dict=None, cache=False, 
-			bulk_endpoint=None, rapid_lookup: bool=True, **kwargs) -> dict:
+			include_instances: bool=False, short: bool=False, headers: dict=None, verify=None, 
+			bulk_content_dict: dict=None, cache=False, bulk_endpoint=None, rapid_lookup: bool=True, **kwargs) -> dict:
 		''' Get the content all the DICOM patients, studies, series or instances whose identifiers are provided in 
 			the Resources field, in one single call.
 
@@ -940,6 +941,9 @@ class SonadorImagingServer(OrthancServerAuthDataCollectionMixin, OrthancServerBa
 			'Short': short,
 			'RapidLookup': rapid_lookup,
 		})
+
+		if include_instances:
+			bulk_content_dict[IMAGING_SERVER_INCLUDE_INSTANCES] = include_instances
 
 		if resource:
 			bulk_content_dict['Level'] = resource

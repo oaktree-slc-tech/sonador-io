@@ -26,7 +26,9 @@ from client.utils.colors import RGB
 from ...apisettings import ImageCoord, ImageSpacing, ImageOrientation, ImageStackShape, \
 	RGBColor, LABColor, XYZColor, EUCLID_COORD_ORIGIN, DicomDatetimePairKey, DicomDatetimePair, DicomMetaKey, DicomMeta, \
 	IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
-	IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_LAST_UPDATE, IMAGING_SERVER_DICOMTAGS_SIGNATURE, \
+	IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_LAST_UPDATE, IMAGING_SERVER_RECEPTION_DATE, IMAGING_SERVER_DICOMTAGS_SIGNATURE, \
+	IMAGING_SERVER_SERIES_INDEX, IMAGING_SERVER_FILE_SIZE, IMAGING_SERVER_FILE_UUID, \
+	IMAGING_SERVER_PARENT_PATIENT, IMAGING_SERVER_PARENT_STUDY, IMAGING_SERVER_PARENT_SERIES, \
 	DCMHEADER_PATIENT_ID, DCMHEADER_PATIENT_NAME, \
 	DCMHEADER_PATIENT_SEX, DCMHEADER_PATIENT_BIRTHDATE, \
 	DCMHEADER_IMAGE_POSITION_PATIENT, DCMHEADER_IMAGE_ORIENTATION_PATIENT, DCM_DATE_STRFORMAT, DCM_TIME_STRFORMAT, \
@@ -162,16 +164,11 @@ class ImagingResourceCoreMixin(KafkaMixin, metaclass=ABCMeta):
 		'''
 		if getattr(self, '_lastupdate', None) is None:
 			r = self.pacs._request_get(
-				self.pacs.orthanc_apiurl(
-					posixpath.join(self.resource_url, 'metadata', IMAGING_SERVER_LAST_UPDATE),
-					query_params = json.dumps({'expand': True, })
-				),
+				self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'metadata', IMAGING_SERVER_LAST_UPDATE), query_params={'expand': True }),
 				lambda r: request_client_error(
 					'Unable to retrieve metadata for %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
 					r
-				),
-				headers=self.pacs.orthanc_request_headers(headers=None)
-			).text
+				), headers=self.pacs.orthanc_request_headers(headers=None)).text
 			setattr(self, '_lastupdate', json_str2datetime(r))
 
 		return getattr(self, '_lastupdate', None)
@@ -314,95 +311,15 @@ class ImagingResourceParentMixin(object, metaclass=ABCMeta):
 		'''
 
 
-class ImagingResourceMixin(ImagingResourceCoreMixin):
-	'''	Mixin class with convenience properties for accessing data fields on higher-order resources 
-		such as series, studies, and patients.
+class SonadorResourceCacheMixin:
+	'''	Mixin class which provides methods for working with the Sonador resource including
+		the interface for indexing and reconstructing resources.
 	'''
-	patient_dcmtags_attr = 'PatientMainDicomTags'
-
-	@property
-	def patientdata(self):
-		return self._objectdata.get(self.patient_dcmtags_attr, {})
-
-	@property
-	@abstractmethod
-	def filearchive_url(self):
-		''' File archive URL for the imaging resource
-		'''
-
-	@property
-	@abstractmethod
-	def dicomdir_url(self):
-		''' DICOMDIR archive URL for the resource
-		'''
-
 	@property
 	@abstractmethod
 	def cache_indexurl(self):
 		'''	Sonador cache URL used to index the resource
 		'''
-
-	@property
-	def user_acl_url(self):
-		'''	URL for user authorization policies associated with the resource
-		'''
-		return posixpath.join(self.resource_url, 'acl/user')
-
-	@property
-	def dicomweb_user_acl_url(self):
-		'''	DICOMweb URL for user ACL policies
-		'''
-		return posixpath.join(self.dicomweb_resource_url, 'acl/user')
-
-	@property
-	def group_acl_url(self):
-		'''	URL for group authorization policies associated with the resource
-		'''
-		return posixpath.join(self.resource_url, 'acl/group')
-
-	@property
-	def dicomweb_group_acl_url(self):
-		'''	DICOMweb URL for group ACL policies
-		'''
-		return posixpath.join(self.dicomweb_resource_url, 'acl/group')
-
-	@property
-	def type(self):
-		return self._objectdata.get('Type')
-
-	def filearchive(self, cache=False, filearchive_type=FILEARCHIVE_TYPE_ZIPARCHIVE, verify=None):
-		'''	Retrieve a ZIP archive of all data associated with the resource.
-
-			@input cache (bool, default=False): Cache the data locally to speed up access.
-
-			@returns zipfile.ZipFile
-		'''
-		# Retrieve cached copy of the file (if available)
-		if getattr(self, '_filearchive', None):
-			return self._filearchive
-
-		# Determine URL from which to retrieve the data
-		if FILEARCHIVE_TYPE_DICOMDIR == FILEARCHIVE_TYPE_ZIPARCHIVE:
-			filearchive_url = self.filearchive_url
-		elif FILEARCHIVE_TYPE_DICOMDIR == FILEARCHIVE_TYPE_DICOMDIR:
-			filearchive_url = self.dicomdir_url
-		else:
-			raise TypeError('Unable to download archive of image data, invalid archive type: %s' % filearchive_type)
-
-		# Retrieve file data from Orthanc
-		r = self.pacs._request_get(
-			self.pacs.orthanc_apiurl(filearchive_url), 
-			lambda r: request_client_error(
-				'Unable to retrieve DICOM resource file data for %s on server % s. Status code: %s.' % (self.filearchive_url, self.pacs.server_label, r.status_code),
-				r),
-			headers=self.pacs.orthanc_request_headers(), verify=verify)
-
-		# Initialize file archive from request data, cache (if indicated)
-		farchive = response2filearchive(r)
-		if cache:
-			setattr(self, '_filearchive', farchive)
-
-		return farchive
 
 	def index(self, link=True, headers=None, rdata=None, **kwargs):
 		''' Add the resouce to the Sonador resource cache.
@@ -473,6 +390,91 @@ class ImagingResourceMixin(ImagingResourceCoreMixin):
 
 		logger.debug('Response from PACS imaging server:\n%s' % r.content)
 		return r
+
+
+class ImagingResourceMixin(SonadorResourceCacheMixin, ImagingResourceCoreMixin):
+	'''	Mixin class with convenience properties for accessing data fields on higher-order resources 
+		such as series, studies, and patients.
+	'''
+	patient_dcmtags_attr = 'PatientMainDicomTags'
+
+	@property
+	def patientdata(self):
+		return self._objectdata.get(self.patient_dcmtags_attr, {})
+
+	@property
+	@abstractmethod
+	def filearchive_url(self):
+		''' File archive URL for the imaging resource
+		'''
+
+	@property
+	@abstractmethod
+	def dicomdir_url(self):
+		''' DICOMDIR archive URL for the resource
+		'''
+
+	@property
+	def user_acl_url(self):
+		'''	URL for user authorization policies associated with the resource
+		'''
+		return posixpath.join(self.resource_url, 'acl/user')
+
+	@property
+	def dicomweb_user_acl_url(self):
+		'''	DICOMweb URL for user ACL policies
+		'''
+		return posixpath.join(self.dicomweb_resource_url, 'acl/user')
+
+	@property
+	def group_acl_url(self):
+		'''	URL for group authorization policies associated with the resource
+		'''
+		return posixpath.join(self.resource_url, 'acl/group')
+
+	@property
+	def dicomweb_group_acl_url(self):
+		'''	DICOMweb URL for group ACL policies
+		'''
+		return posixpath.join(self.dicomweb_resource_url, 'acl/group')
+
+	@property
+	def type(self):
+		return self._objectdata.get('Type')
+
+	def filearchive(self, cache=False, filearchive_type=FILEARCHIVE_TYPE_ZIPARCHIVE, verify=None):
+		'''	Retrieve a ZIP archive of all data associated with the resource.
+
+			@input cache (bool, default=False): Cache the data locally to speed up access.
+
+			@returns zipfile.ZipFile
+		'''
+		# Retrieve cached copy of the file (if available)
+		if getattr(self, '_filearchive', None):
+			return self._filearchive
+
+		# Determine URL from which to retrieve the data
+		if FILEARCHIVE_TYPE_DICOMDIR == FILEARCHIVE_TYPE_ZIPARCHIVE:
+			filearchive_url = self.filearchive_url
+		elif FILEARCHIVE_TYPE_DICOMDIR == FILEARCHIVE_TYPE_DICOMDIR:
+			filearchive_url = self.dicomdir_url
+		else:
+			raise TypeError('Unable to download archive of image data, invalid archive type: %s' % filearchive_type)
+
+		# Retrieve file data from Orthanc
+		r = self.pacs._request_get(
+			self.pacs.orthanc_apiurl(filearchive_url), 
+			lambda r: request_client_error(
+				'Unable to retrieve DICOM resource file data for %s on server % s. Status code: %s.' % (self.filearchive_url, self.pacs.server_label, r.status_code),
+				r),
+			headers=self.pacs.orthanc_request_headers(), verify=verify)
+
+		# Initialize file archive from request data, cache (if indicated)
+		farchive = response2filearchive(r)
+		if cache:
+			setattr(self, '_filearchive', farchive)
+
+		return farchive
 
 	def anonymize(self, replace=None, keep=None, remove=None, keep_private_tags=True, 
 			dicom_version=DCM_VERSION_2021b, anonymize=None, headers=None, verify=None):
@@ -873,7 +875,7 @@ class ImagingPatientCollection(ImagingResourceBaseCollection):
 	'''
 	model = ImagingPatient
 
-	def bulkpopulate_related(self, *args, child_studies=True, child_series=True, **kwargs):
+	def bulkpopulate_related(self, *args, child_studies=True, child_series=True, child_instances=False, **kwargs):
 		'''	Populate models related to collection instances in the most efficient manner possible.
 
 			@input child_studies (bool, default=True): bulk populate "studies_collection" of collection instances.
@@ -898,7 +900,8 @@ class ImagingPatientCollection(ImagingResourceBaseCollection):
 
 				# Study
 				if bdata_study:
-					p.studies_collection = p.studies_from_json([bdata_study.get_modelinstance(sid)._objectdata for sid in p.studies if bdata_study.get_modelinstance(sid)])
+					p.studies_collection = p.studies_from_json(
+						[bdata_study.get_modelinstance(sid)._objectdata for sid in p.studies if bdata_study.get_modelinstance(sid)])
 
 		if child_series:
 			series_uids = []
@@ -909,18 +912,29 @@ class ImagingPatientCollection(ImagingResourceBaseCollection):
 					series_uids.extend(s.series)
 
 			# Retrieve child series and unpack
-			bdata = self.pacs.fetch_bulk_content(series_uids, *args, **kwargs)
+			bdata = self.pacs.fetch_bulk_content(series_uids, *args, include_instances=child_instances, **kwargs)
 			bdata_series = bdata.get(IMAGING_SERVER_RESOURCE_SERIES)
+			bdata_instances = bdata.get(IMAGING_SERVER_RESOURCE_IMAGE)
 
 			# Unpack data
 			for p in self:
 				for s in p.studies_collection:
 
-					# Child series
+					# Series (grandchildren) of child study
 					if bdata_series:
+
 						s.series_collection = s.series_from_json(
 							[bdata_series.get_modelinstance(sid)._objectdata for sid in s.series if bdata_series.get_modelinstance(sid)])
-						s._populate_subcollections()
+
+						# Instances (great-grandchildren) of grandchild series
+						if bdata_instances:
+							for sx in s.series_collection:
+
+								sx.instances_collection = sx.dcminstances_from_json(
+									[bdata_instances.get_modelinstance(dcm_id)._objectdata for dcm_id in sx.instances if bdata_instances.get_modelinstance(dcm_id)])
+
+						# Populate study subcollections: DICOM-SR, DICOM-SEG
+						s._populate_subcollections(populate_dcm_instances=child_instances and bdata_instances)
 
 
 IMAGING_STUDY_OUTPUT_COLUMNS = OrderedDict((
@@ -1005,7 +1019,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 	@property
 	def patient(self):
-		return self._objectdata.get('ParentPatient')
+		return self._objectdata.get(IMAGING_SERVER_PARENT_PATIENT)
 
 	@property
 	def parent(self):
@@ -1280,7 +1294,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		if not isinstance(doc_collection, DcmEncapsulatedDocumentSeriesCollection):
 			raise ValueError('Input must be an instance of DcmEncapsulatedDocumentSeriesCollection')
 
-		setattr(self, '_doc', DcmEncapsulatedDocumentSeriesCollection)
+		setattr(self, '_doc', doc_collection)
 
 	@property
 	def reviewer_worklist_item_class(self):
@@ -1426,24 +1440,52 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		return self.comments_modelcollection_class.fetch_modelinstance(self, cid, *args, **kwargs)
 
 	def _populate_subcollections(self, 
-			populate_sr=True, populate_seg=True, populate_m3d=True, populate_doc=True):
+			populate_sr=True, populate_seg=True, populate_m3d=True, populate_doc=True, populate_dcm_instances=False):
 		'''	Populate study SR and SEG collections from the series collection
 		'''
+		def populate_dcm_instances(sx_):
+			'''	Populate the DICOM instance data of the provided specialized model series model from the general
+				series model of the study.
+
+				@input sx_ (series subclass): specialized model instance for which the DICOM instances
+					should be populated.
+			'''
+			_sx = self.series_collection.get_modelinstance(sx_.pk)
+			if _sx:
+				sx_.instances_collection = sx_.dcminstances_from_json(
+					[_sx.instances_collection.get_modelinstance(dcm.pk)._objectdata for dcm in _sx.instances_collection])
+
 		if populate_sr:
 			self.sr_collection = self.sr_from_json(
 				[sx._objectdata for sx in self.series_collection if sx.modality == DCM_MODALITY_SR])
+
+			if populate_dcm_instances:
+				for sx_sr in self.sr_collection:
+					populate_dcm_instances(sx_sr)
 
 		if populate_seg:
 			self.seg_collection = self.seg_from_json(
 				[sx._objectdata for sx in self.series_collection if sx.modality == DCM_MODALITY_SEG])
 
+			if populate_dcm_instances:
+				for sx_seg in self.seg_collection:
+					populate_dcm_instances(sx_seg)
+
 		if populate_m3d:
 			self.m3d_collection = self.m3d_from_json(
 				[sx._objectdata for sx in self.series_collection if sx.modality == DCMEDIA_M3D_MODALITY])
 
+			if populate_dcm_instances:
+				for sx_m3d in self.m3d_collection:
+					populate_dcm_instances(sx_m3d)
+
 		if populate_doc:
 			self.doc_collection = self.doc_from_json(
 				[sx._objectdata for sx in self.series_collection if sx.modality == DCM_MODALITY_DOC])
+
+			if populate_dcm_instances:
+				for sx_doc in self.doc_collection:
+					populate_dcm_instances(sx_doc)
 	
 	def merge_resources(self, resources: list, asynchronous=False, keep_source=False, permissive=False, 
 			priority=0, merge=None, verify=None, headers=None):
@@ -1589,7 +1631,7 @@ class ImagingStudyCollection(ImagingResourceBaseCollection):
 
 		return super()._init_collection_models(**kwargs)
 
-	def bulkpopulate_related(self, *args, parent_patient=True, child_series=True, **kwargs):
+	def bulkpopulate_related(self, *args, parent_patient=True, child_series=True, child_instances=False, **kwargs):
 		'''	Populate models related to collection instances in the most efficient manner possible.
 
 			@input parent_patient (bool, default=True): bulk populate "parent" attribute of collection instances.
@@ -1608,9 +1650,10 @@ class ImagingStudyCollection(ImagingResourceBaseCollection):
 				if child_series: child_uids.extend(s.series)
 
 			# Retrieve bulk resources and unpack
-			bdata = self.pacs.fetch_bulk_content(patient_uids+child_uids, *args, **kwargs)
+			bdata = self.pacs.fetch_bulk_content(patient_uids+child_uids, *args, include_instances=child_instances, **kwargs)
 			bdata_patient = bdata.get(IMAGING_SERVER_RESOURCE_PATIENT)
 			bdata_series = bdata.get(IMAGING_SERVER_RESOURCE_SERIES)
+			bdata_instances = bdata.get(IMAGING_SERVER_RESOURCE_IMAGE)
 
 			# Unpack data
 			for s in self:
@@ -1620,11 +1663,20 @@ class ImagingStudyCollection(ImagingResourceBaseCollection):
 					s.parent = s.parent_from_json(
 						bdata_patient.get_modelinstance(s.patient)._objectdata)
 
-				# Sibling series, DICOM-SR, and DICOM-SEG attributes
+				# Sibling series
 				if bdata_series:
 					s.series_collection = s.series_from_json(
 						[bdata_series.get_modelinstance(sid)._objectdata for sid in s.series if bdata_series.get_modelinstance(sid)])
-					s._populate_subcollections()
+
+					# Populate DICOM children of siblings
+					if bdata_instances:
+						for sx in s.series_collection:
+
+							sx.instances_collection = sx.dcminstances_from_json(
+								[bdata_instances.get_modelinstance(dcm_id)._objectdata for dcm_id in sx.instances if bdata_instances.get_modelinstance(dcm_id)])
+
+					# Populate study subcollections: DICOM-SR, DICOM-SEG, ...
+					s._populate_subcollections(populate_dcm_instances=child_instances and bdata_instances)
 
 
 IMAGING_SERIES_OUTPUT_COLUMNS = OrderedDict((
@@ -1711,7 +1763,7 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 	
 	@property
 	def study(self):
-		return self._objectdata.get('ParentStudy')
+		return self._objectdata.get(IMAGING_SERVER_PARENT_STUDY)
 
 	@property
 	def parent(self):
@@ -2037,8 +2089,11 @@ class ImagingSeriesBulkPopulateMixin:
 	'''	Mixin class which adds methods to enable efficient population of related models 
 		(parent study and patient) on instances within series collections.
 	'''
-	def bulkpopulate_related(self, *args, parent_study=True, parent_patient=True, sibling_series=True, **kwargs):
-		'''	Populate models related to collection instances in the most efficient manner possible.
+	def bulkpopulate_related(self, *args, parent_study=True, parent_patient=True, sibling_series=True, child_instances=False, **kwargs):
+		'''	Populate models related to collection instances in the most efficient manner possible. The method
+			makes two requests.
+			1. Populate parent study and child instances
+			2. Populate study patient and sibling studies (on the parent references)
 
 			@input parent_study (bool, default=True): bulk populate the "parent" attribute of 
 				collection instances.
@@ -2054,14 +2109,26 @@ class ImagingSeriesBulkPopulateMixin:
 		# Retrieve paarent study data. Study instances are required to populate the patient and 
 		# sibling series properties, and must be retreived first.
 		if parent_study:
-			bdata = self.pacs.fetch_bulk_content([sx.study for sx in self], *args, **kwargs)
+
+			# Retrieve self-references if also need child instances
+			if child_instances: series_uids = [sx.pk for sx in self]
+			else: series_uids = []
+
+			bdata = self.pacs.fetch_bulk_content([sx.study for sx in self]+series_uids, *args, include_instances=child_instances, **kwargs)
 			bdata_study = bdata.get(IMAGING_SERVER_RESOURCE_STUDY)
+			bdata_instances = bdata.get(IMAGING_SERVER_RESOURCE_IMAGE)
 			
 			# Unpack study data and add to series
 			if bdata_study:
 				for sx in self:
+
 					s = bdata_study.get_modelinstance(sx.study)
 					if s: sx.parent = sx.parent_from_json(s._objectdata)
+
+					# Add DCM instance data to series references
+					if bdata_instances:
+						sx.instances_collection = sx.dcminstances_from_json(
+								[bdata_instances.get_modelinstance(dcm_id)._objectdata for dcm_id in sx.instances if bdata_instances.get_modelinstance(dcm_id)])
 
 		# Retrieve patient and sibling series data. Both types of resources can be retrieved
 		# in a single request.
@@ -2076,9 +2143,10 @@ class ImagingSeriesBulkPopulateMixin:
 				if sibling_series: sibling_uids.extend(sx.parent.series)
 
 			# Retrieve bulk resources and unpack
-			bdata = self.pacs.fetch_bulk_content(patient_uids+sibling_uids, *args, **kwargs)
+			bdata = self.pacs.fetch_bulk_content(patient_uids+sibling_uids, *args, include_instances=child_instances, **kwargs)
 			bdata_patient = bdata.get(IMAGING_SERVER_RESOURCE_PATIENT)
 			bdata_series = bdata.get(IMAGING_SERVER_RESOURCE_SERIES)
+			bdata_instances = bdata.get(IMAGING_SERVER_RESOURCE_IMAGE)
 
 			# Unpack data
 			for sx in self:
@@ -2088,11 +2156,20 @@ class ImagingSeriesBulkPopulateMixin:
 					sx.parent.parent = sx.parent.parent_from_json(
 						bdata_patient.get_modelinstance(sx.parent.patient)._objectdata)
 
-				# Sibling series, DICOM-SR, and DICOM-SEG attributes
+				# Sibling series and their child DICOM instances
 				if bdata_series:
 					sx.parent.series_collection = sx.parent.series_from_json(
 						[bdata_series.get_modelinstance(sid)._objectdata for sid in sx.parent.series if bdata_series.get_modelinstance(sid)])
-					sx.parent._populate_subcollections()
+
+					# Instances
+					if bdata_instances:
+						for _sx in sx.parent.series_collection:
+
+							_sx.instances_collection = _sx.dcminstances_from_json(
+								[bdata_instances.get_modelinstance(dcm_id)._objectdata for dcm_id in _sx.instances if bdata_instances.get_modelinstance(dcm_id)])
+					
+					# Populate specialized subcollections: DICOM-SR, DICOM-SEG, ...
+					sx.parent._populate_subcollections(populate_dcm_instances=child_instances and bdata_instances)
 
 
 class ImagingSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingResourceBaseCollection):
@@ -2158,11 +2235,11 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 
 	@property
 	def series(self):
-		return self._objectdata.get('ParentSeries')
+		return self._objectdata.get(IMAGING_SERVER_PARENT_SERIES)
 
 	@property
 	def series_index(self):
-		return self._objectdata.get('IndexInSeries')
+		return self._objectdata.get(IMAGING_SERVER_SERIES_INDEX)
 
 	@property
 	def sop_class_uid(self):
@@ -2332,10 +2409,15 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 		return dfile
 
 
-class DcmInstance(DcmInstanceCoreResource):
+class DcmInstance(SonadorResourceCacheMixin, DcmInstanceCoreResource):
 	'''	DCM instance model used for imaging data
 	'''
 	resource_level = IMAGING_SERVER_RESOURCE_IMAGE
+	cache_baseurl = '/cache/instances/'
+
+	@property
+	def cache_indexurl(self):
+		return posixpath.join(self.cache_baseurl, self.pk, 'index')
 
 	def imgfile(self, stretch_dynamicrange=True, bitdepth=8, **kwargs):
 		'''	Retrieve image file data from Orthanc
@@ -2490,6 +2572,34 @@ class DcmInstance(DcmInstanceCoreResource):
 	def plane_type(self):
 		return int(self.tags.get('PlaneType')) if self.tags.get('PlaneType') \
 			else self.tags.get('PlaneType')
+
+	@property
+	def file_uid(self):
+		'''	File UID for the instance
+		'''
+		return self._objectdata.get(IMAGING_SERVER_FILE_UUID)
+
+	@property
+	def file_size(self):
+		'''	File size of the instance
+		'''
+		return int(self._objectdata.get(IMAGING_SERVER_FILE_SIZE)) if self._objectdata.get(IMAGING_SERVER_FILE_SIZE) \
+			else None
+
+	@property
+	def lastupdate(self):
+		'''	Timestamp of last resource update
+		'''
+		if getattr(self, '_lastupdate', None) is None:
+			r = self.pacs._request_get(
+				self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'metadata', IMAGING_SERVER_RECEPTION_DATE), query_params={'expand': True }),
+				lambda r: request_client_error(
+					'Unable to retrieve metadata for %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
+					r
+				), headers=self.pacs.orthanc_request_headers(headers=None)).text
+			setattr(self, '_lastupdate', json_str2datetime(r))
+
+		return getattr(self, '_lastupdate', None)
 
 
 class DcmInstanceCoreCollection(ImagingServerChildCollection):
