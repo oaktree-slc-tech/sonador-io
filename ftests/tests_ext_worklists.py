@@ -27,34 +27,10 @@ logger = logging.getLogger(__name__)
 class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 	'''	Test create, read, update, and delete permissions for Sonador/Orthanc worklists
 	'''
-	testgroup01 = TESTGROUP01
-	testgroup02 = TESTGROUP02
-	testgroup03 = TESTGROUP03
-
-	testuser = TESTUSER01_USERNAME
-	testuser_attrs = TESTUSER01_ATTRS
-
-	testuser02 = TESTUSER02_USERNAME
-	testuser02_attrs = TESTUSER02_ATTRS
-
-	testuser03 = TESTUSER03_USERNAME
-	testuser03_attrs = TESTUSER03_ATTRS
-
-	nih_cxr_testdcm = 'https://www.oak-tree.tech/documents/331/nih-cxr.patient-30775.zip'
-
 	def tearDown(self):
 		'''	Remove server policies associated with test data
 		'''
-		iserver = self.getImageServer()
-
-		# Remove all policies associated with test user or groups
-		testgroup01 = iserver.server.admin_create_group(self.testgroup01)
-		testgroup02 = iserver.server.admin_create_group(self.testgroup02)
-		_group_ids = set((testgroup01.pk, testgroup02.pk))
-
-		for _acl_policy in iserver.fetch_acl():
-			if _acl_policy.group in _group_ids:
-				_acl_policy.delete()
+		self.tearDownAcl()
 
 	def test_resource_worklist_valid(self, *args, **kwargs):
 		'''	Ensure that the test runner is able to upload a series to Sonador, create a worklist item,

@@ -117,14 +117,14 @@ def argparse_datetime_type(arg_datestr, datetime_format='%Y-%m-%d %H:%M:%S'):
 
 # Remote data helper methods
 
-def response2filearchive(r):
+def response2filearchive(r, **kwargs):
 	''' Initialize a ZipFile instance from the provided reponse. The response stream used to buffer the data
 		is provided as a property via the `raw` pproperty.
 
 		@returns zipfile.ZipFile
 	'''
 	# Initialize file archive from request data, attach the raw the content of the request
-	zbuffer = BytesIO(r.content)
+	zbuffer = BytesIO(bytes(r.content) if not isinstance(r.content, bytes) else r.content)
 	farchive = zipfile.ZipFile(zbuffer, mode='r')
 	setattr(farchive, 'raw', zbuffer)
 

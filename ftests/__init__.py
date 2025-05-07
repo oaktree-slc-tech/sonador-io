@@ -18,3 +18,4 @@ from .tests_sonadorauth_acl import *
 from .tests_ext_data import *
 from .tests_ext_tags import *
 from .tests_bulk import *
+from .tests_download import *

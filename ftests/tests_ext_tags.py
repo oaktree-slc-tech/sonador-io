@@ -23,12 +23,6 @@ class SonadorTagsApiTests(AclBaseTestCase):
 
 		1. Group tag management: create, review, update, and delete
 	'''
-	testgroup01 = TESTGROUP01
-	testgroup02 = TESTGROUP02
-
-	testuser = TESTUSER01_USERNAME
-	testuser_attrs = TESTUSER01_ATTRS
-
 	def tearDown(self):
 		'''	Remove server policies associated with test data
 		'''
