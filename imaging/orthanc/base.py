@@ -342,13 +342,13 @@ class SonadorResourceCacheMixin:
 		logger.debug('Response from PACS imaging server:\n%s' % r.content)
 		return r
 
-	def _clear_index(self, headers=None, rdata=None, **kwargs):
+	def _clear_index(self, headers=None, rdata=None, rkwargs=None, **kwargs):
 		'''	Remove the resource entry from the Sonador resource cache
 
 			@returns requests.Response
 		'''
 		# Request keyword arguments
-		rkwargs = {}
+		rkwargs = rkwargs or {}
 
 		if rdata:
 			rkwargs['json'] = rdata or {}
@@ -359,7 +359,7 @@ class SonadorResourceCacheMixin:
 				'Unable to remove DICOM resource %s from server %s Sonador resoruce cache. Status code: %s.'
 					% (self.cache_indexurl, self.pacs.server_label, r.status_code),
 				r),
-			headers=self.pacs.orthanc_request_headers(headers=headers), **kwargs)
+			headers=self.pacs.orthanc_request_headers(headers=headers), **rkwargs)
 
 		logger.warning('Response from PACS imaging server:\n%s' % r.content)
 		return r
@@ -442,7 +442,7 @@ class ImagingResourceMixin(SonadorResourceCacheMixin, ImagingResourceCoreMixin):
 	def type(self):
 		return self._objectdata.get('Type')
 
-	def filearchive(self, cache=False, filearchive_type=FILEARCHIVE_TYPE_ZIPARCHIVE, verify=None):
+	def filearchive(self, cache=False, filearchive_type=FILEARCHIVE_TYPE_DICOMDIR, verify=None, **kwargs):
 		'''	Retrieve a ZIP archive of all data associated with the resource.
 
 			@input cache (bool, default=False): Cache the data locally to speed up access.
@@ -454,9 +454,9 @@ class ImagingResourceMixin(SonadorResourceCacheMixin, ImagingResourceCoreMixin):
 			return self._filearchive
 
 		# Determine URL from which to retrieve the data
-		if FILEARCHIVE_TYPE_DICOMDIR == FILEARCHIVE_TYPE_ZIPARCHIVE:
+		if filearchive_type == FILEARCHIVE_TYPE_ZIPARCHIVE:
 			filearchive_url = self.filearchive_url
-		elif FILEARCHIVE_TYPE_DICOMDIR == FILEARCHIVE_TYPE_DICOMDIR:
+		elif filearchive_type == FILEARCHIVE_TYPE_DICOMDIR:
 			filearchive_url = self.dicomdir_url
 		else:
 			raise TypeError('Unable to download archive of image data, invalid archive type: %s' % filearchive_type)
@@ -470,7 +470,7 @@ class ImagingResourceMixin(SonadorResourceCacheMixin, ImagingResourceCoreMixin):
 			headers=self.pacs.orthanc_request_headers(), verify=verify)
 
 		# Initialize file archive from request data, cache (if indicated)
-		farchive = response2filearchive(r)
+		farchive = response2filearchive(r, **kwargs)
 		if cache:
 			setattr(self, '_filearchive', farchive)
 

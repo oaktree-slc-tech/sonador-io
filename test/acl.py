@@ -68,7 +68,6 @@ class AclTestBaseData(abc.ABC):
 	'''
 	series_description_template = TEST_DATA_SERIES_DESCRIPTION_TEMPLATE
 
-
 	@property
 	@abc.abstractmethod
 	def resource_dir(self):
@@ -165,6 +164,21 @@ class AclTestBaseData(abc.ABC):
 class AclBaseTestCase(SonadorSeriesBaseTestCase):
 	'''	Test case class with methods and properties to help facilitate access control (ACL) testing
 	'''
+	testgroup01 = TESTGROUP01
+	testgroup02 = TESTGROUP02
+	testgroup03 = TESTGROUP03
+
+	testuser = TESTUSER01_USERNAME
+	testuser_attrs = TESTUSER01_ATTRS
+
+	testuser02 = TESTUSER02_USERNAME
+	testuser02_attrs = TESTUSER02_ATTRS
+
+	testuser03 = TESTUSER03_USERNAME
+	testuser03_attrs = TESTUSER03_ATTRS
+
+	nih_cxr_testdcm = 'https://www.oak-tree.tech/documents/331/nih-cxr.patient-30775.zip'
+
 	def setupTestAuth(self, testuser_config, testgroup_name, *args, **kwargs):
 		'''	Setup a test authentication structure:
 
@@ -262,3 +276,18 @@ class AclBaseTestCase(SonadorSeriesBaseTestCase):
 		self.assertTrue(
 			all(_s.get(''.join(DCMCODE_PATIENT_ID), {}).get('Value', [])[0] == sx.model_patient.patientid for _s in _dcmweb_results),
 			msg='DICOMweb API returned series instance with the wrong PatientID. Expected: %s.' % sx.model_patient.patientid)
+
+
+	def tearDownAcl(self, *args, **kwargs):
+		''' Remove server policies associated with test user or groups
+		'''	
+		iserver = self.getImageServer()
+
+		# Remove all policies associated with test user or groups
+		testgroup01 = iserver.server.admin_create_group(self.testgroup01)
+		testgroup02 = iserver.server.admin_create_group(self.testgroup02)
+		_group_ids = set((testgroup01.pk, testgroup02.pk))
+
+		for _acl_policy in iserver.fetch_acl():
+			if _acl_policy.group in _group_ids:
+				_acl_policy.delete()
