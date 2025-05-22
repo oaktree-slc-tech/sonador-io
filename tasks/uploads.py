@@ -232,7 +232,7 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 
 def imageserver_upload_archive(iserver, archive, tpool=None, threads=4, verify=False, 
 		dcm_extensions=DCM_EXTENSIONS_DEFAULT, ignore_errors=False, 
-		callback_preupload=None, callback_postupload=None, callback_onerror=None):
+		callback_preupload=None, callback_postupload=None, callback_onerror=None, timeout=None):
 	'''	Scan the provide archive folder and upload DICOM images to the imaging server.
 
 		@input iserver (SonadorImagingServer instance): Imaging server to which the
@@ -285,7 +285,7 @@ def imageserver_upload_archive(iserver, archive, tpool=None, threads=4, verify=F
 					ifile = callback_preupload(iname, ifile, dcmfile)
 				
 				# Uplooad file to Orthanc
-				uresults = iserver.upload_image(ifile)
+				uresults = iserver.upload_image(ifile, timeout=timeout)
 
 				# Invoke postupload hook
 				if callable(callback_postupload):
