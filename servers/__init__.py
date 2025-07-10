@@ -1098,10 +1098,13 @@ class SonadorImagingServer(OrthancServerAuthDataCollectionMixin, OrthancServerBa
 			'%s (%s)' % (self.name, self.pk)
 		return self.pk
 
-	def orthanc_apiurl(self, resource_endpoint, query_params='', query_lowercase=False):
+	def orthanc_apiurl(self, resource_endpoint, query_params='', query_lowercase=False, internal_dns=None):
 		'''	Create URL for Orthanc API call
 		'''
-		if self.server.internal_dns:
+		if internal_dns is None:
+			internal_dns = self.server.internal_dns
+
+		if internal_dns:
 			return build_url(self.internal_scheme, self.internal_netloc, resource_endpoint, query_params=query_params, query_lowercase=query_lowercase)
 
 		return super().orthanc_apiurl(resource_endpoint, query_params=query_params, query_lowercase=query_lowercase)
