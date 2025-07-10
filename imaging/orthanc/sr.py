@@ -1,7 +1,7 @@
 '''	Model classes associated with DICOM-SR documents. Provides tools for querying
 	and inspecting the contents of reports with structured data and image segmentations.
 '''
-import functools, datetime, logging
+import functools, datetime, logging, posixpath
 from abc import ABCMeta, abstractmethod
 
 from pydicom.dataset import Dataset
@@ -36,6 +36,12 @@ class DcmSRSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 			setattr(self, '_instances', self.fetch_dcminstances())
 
 		return self._instances
+
+	@instances_collection.setter
+	def instances_collection(self, val):
+		''' Set instances/images which belong to the series
+		'''
+		self._instances = val
 
 	@property
 	def series_reference_uids(self):

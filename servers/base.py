@@ -259,7 +259,8 @@ class OrthancServerBase(SonadorBaseObject):
 					'Unable to upload image to PACS %s. Status code: %s. Retry transfer: %s/%s' % (
 						self.server_label, getattr(r, 'status_code'), retry_count+1, retry_limit),
 					r),
-				files={ 'file': img }, headers=self.orthanc_request_headers(headers=headers), verify=verify)
+				files={ 'file': img }, headers=self.orthanc_request_headers(headers=headers), verify=verify,
+				**pick(kwargs, ('timeout',)))
 			
 			return r
 
@@ -280,7 +281,8 @@ class OrthancServerBase(SonadorBaseObject):
 					# Reset position of image before attempting upload
 					img.seek(0)
 					r = self.upload_image(
-						img, headers=headers, retry_count=retry_count+1, retry_limit=retry_limit, verify=verify, pause_for_retry=pause_for_retry)
+						img, headers=headers, retry_count=retry_count+1, retry_limit=retry_limit, verify=verify,
+						pause_for_retry=pause_for_retry, **pick(kwargs, ('timeout',)))
 
 				# Retry limit exceeded: notify user of failed transfer
 				else: 
