@@ -472,7 +472,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			try:
 				w01.update({ 'State': SONADOR_WORKLIST_STATUS_COMPLETED })
 				w01 = test_s.get_reviewer_worklist_item(w01.pk, dicomweb_api=True)
-				self.failTest('Able to update group for worklist item.')
+				self.fail('Able to update group for worklist item.')
 
 			except Exception as err:
 
