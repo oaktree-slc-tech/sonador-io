@@ -86,6 +86,7 @@ DCMSR_SR_DCM = Code(DCM_SR_DCM, 'DCM', DCM_SR_DCM_DESCRIPTION)
 
 # Header cache constants and data classes
 DCM_CONTENT_TYPE = 'application/octet-stream'
+DCM_DICOM_CONTENT_TYPE = 'application/dicom'
 DCM_JSON_MIMETYPE = 'application/json'
 
 
