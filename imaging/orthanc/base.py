@@ -137,7 +137,7 @@ class ImagingResourceCoreMixin(KafkaMixin, metaclass=ABCMeta):
 	main_dcmtags_attr = 'MainDicomTags'
 
 	def fetch_meta(self, *args, headers=None, **kwargs):
-		'''	Retrieved the Orthanc metadata properties for the resource
+		'''	Retrieve Orthanc metadata properties for the resource
 		'''
 		return server_controloperation_json_response(
 			self.pacs._request_get(
@@ -157,6 +157,52 @@ class ImagingResourceCoreMixin(KafkaMixin, metaclass=ABCMeta):
 			self._meta = self.fetch_meta()
 
 		return self._meta
+
+	def fetch_attachments(self, *args, **kwargs):
+		'''	Retrieve Orthanc attachment metadata for the resource
+		'''
+		return server_controloperation_json_response(
+			self.pacs._request_get(
+				self.pacs.orthanc_apiurl(
+					posixpath.join(self.resource_url, 'attachments'),
+					query_params=json.dumps({ 'expand': True, })),
+				lambda r: request_client_error(
+					'Unable to retrieve attachments for %s on server %s. Status code: %s.' % (
+						self.pk, self.pacs.server_label, r.status_code
+					), r),
+				headers=self.pacs.orthanc_request_headers(**kwargs)))
+
+	@property
+	def attachments(self):
+		if getattr(self, '_attachments', None) is None:
+			self._attachments = self.fetch_attachments()
+
+		return self._attachments
+
+	def attachment_info(self, attachment_uid, **kwargs):
+		'''	Retrieve information about the specified attachment
+		'''
+		return server_controloperation_json_response(
+			self.pacs._request_get(
+				self.pacs.orthanc_apiurl(
+					posixpath.join(self.resource_url, 'attachments', attachment_uid, 'info'), query_params={ 'expand': True }),
+				lambda r: request_client_error(
+					'Unable to retrieve attachment %s for %s on server %s. Status code: %s.' % (
+						attachment_uid, self.pk, self.pacs.server_label, r.status_code
+					), r),
+				headers=self.pacs.orthanc_request_headers(**kwargs)))
+
+	def attachment_data(self, attachment_uid, **kwargs):
+		'''	Retrieve attachment data (application/octent-stream)
+		'''
+		return self.pacs._request_get(
+			self.pacs.orthanc_apiurl(
+				posixpath.join(self.resource_url, 'attachments', attachment_uid, 'data')),
+			lambda r: request_client_error(
+				'Unable to retrieve attachment %s for %s on server %s. Status code: %s.' % (
+					attachment_uid, self.pk, self.pacs.server_label, r.status_code,
+				), r),
+			headers=self.pacs.orthanc_request_headers(**kwargs))
 
 	@property
 	def lastupdate(self):
