@@ -525,6 +525,12 @@ class OrthancServerBase(SonadorBaseObject):
 		self._check_query_structure(sfilter)
 		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_SERIES, **kwargs)
 
+	def query_instance(self, sfilter, **kwargs):
+		'''	Query instance resources on the imaging server. (Wrapper function for "query".)
+		'''
+		self._check_query_structure(sfilter)
+		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_IMAGE, **kwargs)
+
 	def query_sr(self, sfilter, **kwargs):
 		'''	Query DICOM-SR resources on the imaging server. (Wrapper function for "query".)
 		'''
