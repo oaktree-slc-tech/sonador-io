@@ -164,7 +164,7 @@ def imageserver_upload_folder(iserver, folders, tpool=None, threads=4,
 							# Upload file to Orthanc
 							if not dry_run:
 								r = iserver.upload_image(ifile)
-								op_code = r.ok
+								op_code = False if r is None else r.ok
 								logger.debug('File %s uploaded to server "%s" successfuly' % (ipath, iserver.pk))
 							else:
 								logger.debug('Dry Run: file %s processed successfully' % ipath)
