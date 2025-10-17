@@ -1489,7 +1489,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 			populate_sr=True, populate_seg=True, populate_m3d=True, populate_doc=True, populate_dcm_instances=False):
 		'''	Populate study SR and SEG collections from the series collection
 		'''
-		def populate_dcm_instances(sx_):
+		def _populate_dcm_instances(sx_):
 			'''	Populate the DICOM instance data of the provided specialized model series model from the general
 				series model of the study.
 
@@ -1507,7 +1507,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 			if populate_dcm_instances:
 				for sx_sr in self.sr_collection:
-					populate_dcm_instances(sx_sr)
+					_populate_dcm_instances(sx_sr)
 
 		if populate_seg:
 			self.seg_collection = self.seg_from_json(
@@ -1515,7 +1515,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 			if populate_dcm_instances:
 				for sx_seg in self.seg_collection:
-					populate_dcm_instances(sx_seg)
+					_populate_dcm_instances(sx_seg)
 
 		if populate_m3d:
 			self.m3d_collection = self.m3d_from_json(
@@ -1523,7 +1523,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 			if populate_dcm_instances:
 				for sx_m3d in self.m3d_collection:
-					populate_dcm_instances(sx_m3d)
+					_populate_dcm_instances(sx_m3d)
 
 		if populate_doc:
 			self.doc_collection = self.doc_from_json(
@@ -1531,7 +1531,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 			if populate_dcm_instances:
 				for sx_doc in self.doc_collection:
-					populate_dcm_instances(sx_doc)
+					_populate_dcm_instances(sx_doc)
 	
 	def merge_resources(self, resources: list, asynchronous=False, keep_source=False, permissive=False, 
 			priority=0, merge=None, verify=None, headers=None):
