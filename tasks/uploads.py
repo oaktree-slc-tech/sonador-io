@@ -276,13 +276,14 @@ def imageserver_upload_archive(iserver, archive, tpool=None, threads=4, verify=F
 
 			try: 
 				ifile = BytesIO(afile.read())
-			
-				# Parse image to ensure that the it is well formed prior to upload, upload to server
-				dcmfile = dcmcache_imgmeta(ifile, hcache)
 
 				# Invoke preupload hook
 				if callable(callback_preupload):
+					dcmfile = pydicom.dcmread(ifile)
 					ifile = callback_preupload(iname, ifile, dcmfile)
+
+				# Parse image to ensure that the it is well formed prior to upload, upload to server
+				dcmfile = dcmcache_imgmeta(ifile, hcache)
 				
 				# Uplooad file to Orthanc
 				uresults = iserver.upload_image(ifile, timeout=timeout)
