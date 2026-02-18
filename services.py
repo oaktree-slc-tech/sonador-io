@@ -38,6 +38,37 @@ class DataService(SonadorObjectUpdateMixin, SonadorBaseObject):
     def url_token_validate(self):
         return posixpath.join(self.url, 'introspect')
 
+    @property
+    def url_oidc_authorize(self):
+        ''' Data service OIDC authorization endpoint. Step 1 in OIDC authorization-code workflow.
+        '''
+        return posixpath.join(self.url, 'openid')
+
+    @property
+    def url_oidc_token(self):
+        ''' Data service OIDC toekn endpoint which is used to exchange a code for a Sonador auth token.
+            Final step in OIDC authorization-code workflow.
+        '''
+        return posixpath.join(self.url_oidc_authorize, 'token')
+
+    def oidc_fetch_authtoken(self, openid_auth_code, *args, rdata=None, **kwargs):
+        ''' Exchange the provided OpenID authorization code for a auth token from the data service.
+
+            @input openid_auth_code (str): OpenID authorization code provided by the data
+                service token endpoint.
+        '''
+        # Create request structure
+        rdata = rdata or {}
+        rdata.update({ 'code': openid_auth_code, 'client_id': self.openid_client_id })
+
+        r = requests.post(self.server.sonador_apiurl(self.url_oidc_token), json=rdata,
+            verify=self.server.verify_ssl(**kwargs), headers=self.server.sonador_request_headers())
+
+        if not r.ok:
+            request_client_error('Unable to exchange OpenID auth code for user token due to an error.', r)
+
+        return server_controloperation_json_response(r)
+
     def verify_api_credentials(self, token_key, token_value, **kwargs):
         ''' Send the provided token key and token value to Sonador for verification.
         '''
