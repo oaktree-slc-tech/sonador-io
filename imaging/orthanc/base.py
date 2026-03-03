@@ -137,7 +137,7 @@ class ImagingResourceCoreMixin(KafkaMixin, metaclass=ABCMeta):
 	main_dcmtags_attr = 'MainDicomTags'
 
 	def fetch_meta(self, *args, headers=None, **kwargs):
-		'''	Retrieved the Orthanc metadata properties for the resource
+		'''	Retrieve Orthanc metadata properties for the resource
 		'''
 		return server_controloperation_json_response(
 			self.pacs._request_get(
@@ -157,6 +157,52 @@ class ImagingResourceCoreMixin(KafkaMixin, metaclass=ABCMeta):
 			self._meta = self.fetch_meta()
 
 		return self._meta
+
+	def fetch_attachments(self, *args, **kwargs):
+		'''	Retrieve Orthanc attachment metadata for the resource
+		'''
+		return server_controloperation_json_response(
+			self.pacs._request_get(
+				self.pacs.orthanc_apiurl(
+					posixpath.join(self.resource_url, 'attachments'),
+					query_params=json.dumps({ 'expand': True, })),
+				lambda r: request_client_error(
+					'Unable to retrieve attachments for %s on server %s. Status code: %s.' % (
+						self.pk, self.pacs.server_label, r.status_code
+					), r),
+				headers=self.pacs.orthanc_request_headers(**kwargs)))
+
+	@property
+	def attachments(self):
+		if getattr(self, '_attachments', None) is None:
+			self._attachments = self.fetch_attachments()
+
+		return self._attachments
+
+	def attachment_info(self, attachment_uid, **kwargs):
+		'''	Retrieve information about the specified attachment
+		'''
+		return server_controloperation_json_response(
+			self.pacs._request_get(
+				self.pacs.orthanc_apiurl(
+					posixpath.join(self.resource_url, 'attachments', attachment_uid, 'info'), query_params={ 'expand': True }),
+				lambda r: request_client_error(
+					'Unable to retrieve attachment %s for %s on server %s. Status code: %s.' % (
+						attachment_uid, self.pk, self.pacs.server_label, r.status_code
+					), r),
+				headers=self.pacs.orthanc_request_headers(**kwargs)))
+
+	def attachment_data(self, attachment_uid, **kwargs):
+		'''	Retrieve attachment data (application/octent-stream)
+		'''
+		return self.pacs._request_get(
+			self.pacs.orthanc_apiurl(
+				posixpath.join(self.resource_url, 'attachments', attachment_uid, 'data')),
+			lambda r: request_client_error(
+				'Unable to retrieve attachment %s for %s on server %s. Status code: %s.' % (
+					attachment_uid, self.pk, self.pacs.server_label, r.status_code,
+				), r),
+			headers=self.pacs.orthanc_request_headers(**kwargs))
 
 	@property
 	def lastupdate(self):
@@ -1443,7 +1489,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 			populate_sr=True, populate_seg=True, populate_m3d=True, populate_doc=True, populate_dcm_instances=False):
 		'''	Populate study SR and SEG collections from the series collection
 		'''
-		def populate_dcm_instances(sx_):
+		def _populate_dcm_instances(sx_):
 			'''	Populate the DICOM instance data of the provided specialized model series model from the general
 				series model of the study.
 
@@ -1461,7 +1507,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 			if populate_dcm_instances:
 				for sx_sr in self.sr_collection:
-					populate_dcm_instances(sx_sr)
+					_populate_dcm_instances(sx_sr)
 
 		if populate_seg:
 			self.seg_collection = self.seg_from_json(
@@ -1469,7 +1515,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 			if populate_dcm_instances:
 				for sx_seg in self.seg_collection:
-					populate_dcm_instances(sx_seg)
+					_populate_dcm_instances(sx_seg)
 
 		if populate_m3d:
 			self.m3d_collection = self.m3d_from_json(
@@ -1477,7 +1523,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 			if populate_dcm_instances:
 				for sx_m3d in self.m3d_collection:
-					populate_dcm_instances(sx_m3d)
+					_populate_dcm_instances(sx_m3d)
 
 		if populate_doc:
 			self.doc_collection = self.doc_from_json(
@@ -1485,7 +1531,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 			if populate_dcm_instances:
 				for sx_doc in self.doc_collection:
-					populate_dcm_instances(sx_doc)
+					_populate_dcm_instances(sx_doc)
 	
 	def merge_resources(self, resources: list, asynchronous=False, keep_source=False, permissive=False, 
 			priority=0, merge=None, verify=None, headers=None):

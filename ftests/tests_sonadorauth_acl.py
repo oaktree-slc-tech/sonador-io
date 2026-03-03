@@ -133,7 +133,7 @@ class SonadorAccessControlApiTests(AclBaseTestCase):
 				# an authorization to the server, which should result in a 400 error and a message saying that the
 				# user does not have access to the server.
 				r = iserver.admin_verify_user_credentials(API_ACCESS_TOKEN, _token.token)
-				self.failTest('Able to retrieve profile for a user who does not have access to the server.')
+				self.fail('Able to retrieve profile for a user who does not have access to the server.')
 
 			except Exception as err:
 				_details = getattr(err, 'details', {})
@@ -204,7 +204,7 @@ class SonadorAccessControlApiTests(AclBaseTestCase):
 		# Attempt to lookup invalid user instance
 		try:
 			_users = iserver.user_lookup([-1])
-			self.failTest('Lookup of invalid user was successful, the lookup method should have thrown an exception.')
+			self.fail('Lookup of invalid user was successful, the lookup method should have thrown an exception.')
 		
 		# Ensure that server response includes expected error codes
 		except Exception as err:
@@ -213,7 +213,7 @@ class SonadorAccessControlApiTests(AclBaseTestCase):
 
 			# Ensure that response from server includes an error list
 			if not isinstance(_details, dict) or not _details.get('errors'):
-				self.failTest('Invalid error error resposne from server "%s", expecting a JSON object' % _details)
+				self.fail('Invalid error error resposne from server "%s", expecting a JSON object' % _details)
 
 			# Ensure that the status code is 400
 			self.assertEqual(
@@ -224,7 +224,7 @@ class SonadorAccessControlApiTests(AclBaseTestCase):
 		# Send blank request
 		try:
 			_users = iserver.user_lookup([])
-			self.failTest('Empty lookup request returned successful resposne, the lookup method should have thrown an exception.')
+			self.fail('Empty lookup request returned successful resposne, the lookup method should have thrown an exception.')
 
 		except Exception as err:
 			_details = getattr(err, 'details', {})
@@ -279,7 +279,7 @@ class SonadorAccessControlApiTests(AclBaseTestCase):
 		# Attempt lookup of users after ACL policy removed
 		try:
 			_users = iserver.user_lookup([testuser01.pk, testuser02.pk, testuser03.pk])
-			self.failTest(
+			self.fail(
 				'Lookup of users no longer associated with imaging server returned a successful response. An exception should have been thrown.')
 
 		except Exception as err:
@@ -360,7 +360,7 @@ class SonadorAccessControlApiTests(AclBaseTestCase):
 		# Ensure that lookup fails after removal of ACL policies
 		try:
 			_groups = iserver.group_lookup([testgroup01.pk, testgroup02.pk, testgroup03.pk])
-			self.failTest('Able to execute group lookup even though groups are not associated with imaging server')
+			self.fail('Able to execute group lookup even though groups are not associated with imaging server')
 
 		except Exception as err:
 
@@ -662,7 +662,7 @@ class SonadorAccessControlApiTests(AclBaseTestCase):
 				testacl01_sx_local = test_sx.create_group_acl(testgroup01, {
 					'View': True, 'Modify': False, 'Remove': False, 'CommentEdit': True, 'CommentView': True, 'ACL': False
 				})
-				self.failTest('Able to create group access control policy for a group not associated with the server')
+				self.fail('Able to create group access control policy for a group not associated with the server')
 
 			except ClientOperationError as err:
 				_details = getattr(err, 'details', None) or {}

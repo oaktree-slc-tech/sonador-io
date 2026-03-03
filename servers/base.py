@@ -329,11 +329,23 @@ class OrthancServerBase(SonadorBaseObject):
 		from ..imaging.orthanc import ImagingPatient
 		return self.get_imaging_resource(pid, ImagingPatient, headers=headers, cache=cache, **kwargs)
 
+	def patient_from_json(self, jdata, **kwargs):
+		'''	Initialize patient instance from the provided JSON data
+		'''
+		from ..imaging.orthanc import ImagingPatient
+		return self.server._init_dataclass_from_json(ImagingPatient, jdata, pacs=self, **kwargs)
+
 	def get_study(self, sid, headers=None, cache=False, **kwargs):
 		'''	Retrieve a study instance
 		'''
 		from ..imaging.orthanc import ImagingStudy
 		return self.get_imaging_resource(sid, ImagingStudy, headers=headers, cache=cache, **kwargs)
+
+	def study_from_json(self, jdata, **kwargs):
+		'''	Initialize study instance from the provided JSON data
+		'''
+		from ..imaging.orthanc import ImagingStudy
+		return self.server._init_dataclass_from_json(ImagingStudy, jdata, pacs=self, **kwargs)
 
 	def get_series(self, rid, headers=None, cache=False, **kwargs):
 		'''	Retrieve a series instance 
@@ -345,6 +357,12 @@ class OrthancServerBase(SonadorBaseObject):
 		'''
 		from ..imaging.orthanc import ImagingSeries
 		return self.get_imaging_resource(rid, ImagingSeries, headers=headers, cache=cache, **kwargs)
+
+	def series_from_json(self, jdata, **kwargs):
+		'''	Initialize series instance from the provided JSON data
+		'''
+		from ..imaging.orthanc import ImagingSeries
+		return self.server._init_dataclass_from_json(ImagingSeries, jdata, pacs=self, **kwargs)
 
 	def get_dcm_instance(self, rid, headers=None, cache=False, **kwargs):
 		'''	Retrieve a DCM instance
@@ -506,6 +524,12 @@ class OrthancServerBase(SonadorBaseObject):
 		'''
 		self._check_query_structure(sfilter)
 		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_SERIES, **kwargs)
+
+	def query_instance(self, sfilter, **kwargs):
+		'''	Query instance resources on the imaging server. (Wrapper function for "query".)
+		'''
+		self._check_query_structure(sfilter)
+		return self.query(sfilter, resource=IMAGING_SERVER_RESOURCE_IMAGE, **kwargs)
 
 	def query_sr(self, sfilter, **kwargs):
 		'''	Query DICOM-SR resources on the imaging server. (Wrapper function for "query".)
