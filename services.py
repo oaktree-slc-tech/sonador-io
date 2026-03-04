@@ -80,4 +80,15 @@ class DataService(SonadorObjectUpdateMixin, SonadorBaseObject):
             request_client_error('Unable to retrieve API credentials from Sonador due to an error.', r)
 
         return server_controloperation_json_response(r)
-    
+
+    @property
+    def groups_collection(self):
+        ''' Parse the groups attribute to a model collection
+        '''
+        from .servers.auth import SonadorGroupCollection
+
+        if getattr(self, '_groups', None) is None:
+            self._groups = self.server._init_dataclass_from_json(
+                SonadorGroupCollection, self._objectdata.get('groups', []))
+
+        return self._groups

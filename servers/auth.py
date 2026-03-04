@@ -59,6 +59,16 @@ class SonadorUser(SonadorObjectUpdateMixin, SonadorBaseObject):
 	def url(self):
 		return posixpath.join(self.fetch_endpoint, str(self.pk))
 
+	@property
+	def groups_collection(self):
+		'''	Parse the groups attribute of the Sonador user to a collection
+		'''
+		if getattr(self, '_groups', None) is None:
+			self._groups = self.server._init_dataclass_from_json(
+				SonadorGroupCollection, self._objectdata.get('groups', []))
+		
+		return self._groups
+
 
 class SonadorUserCollection(SonadorObjectCollection):
 	'''	Collection of Sonador user instances
@@ -212,12 +222,12 @@ class SonadorApiToken(SonadorUserObjectMixin, SonadorObjectUpdateMixin, SonadorB
 		* GET: fetch the set of API tokens associated with the user account.
 		* POST: create a new API token. Once a token has been generated, its value cannot be changed.
 		* PUT: update properties for a specific token
-		 	- 	`token` (required): token string, may be a masked value. The API will 
-		  		attempt to retrieve the token instance based on the value provided. Example: `Bnyv...Ju73`.
-		  		The token string may be split with either an ellipsis (`...`) or a dash (`-`). If the API
-		  		is unable to match the requsted token, it will return a 404.
-		  	- 	`description`: description
-		  	-	...
+			- 	`token` (required): token string, may be a masked value. The API will 
+				attempt to retrieve the token instance based on the value provided. Example: `Bnyv...Ju73`.
+				The token string may be split with either an ellipsis (`...`) or a dash (`-`). If the API
+				is unable to match the requsted token, it will return a 404.
+			- 	`description`: description
+			-	...
 		* DELETE: remove the instance from the server
 	'''
 	tabulate_output_columns = AUTHTOKEN_OUTPUT_COLUMNS
