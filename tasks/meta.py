@@ -86,7 +86,15 @@ def dcm_findfiles(filelist, dcmfiles=None, dcm_extensions=DCM_EXTENSIONS_DEFAULT
 		dcmfiles = []
 
 	for ext in dcm_extensions:
-		dcmfiles.extend(fnmatch.filter(filelist, ext))
+		for iname in fnmatch.filter(filelist, ext):
+
+			if posixpath.basename(iname).upper() == "DICOMDIR":
+				continue
+		
+			if iname.endswith("/"):
+				continue
+
+			dcmfiles.append(iname)
 
 	return dcmfiles
 
