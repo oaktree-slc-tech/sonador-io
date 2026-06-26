@@ -27,6 +27,8 @@ AclTestUser = namedtuple('AclTestUser', ('username', 'attrs'))
 TESTGROUP01 = 'testgroup-acl01'
 TESTGROUP02 = 'testgroup-acl02'
 TESTGROUP03 = 'testgroup-acl03'
+TESTGROUP04 = 'testgroup-acl04'
+TESTGROUP05 = 'testgroup-acl05'
 
 TESTUSER01_USERNAME = 'testuser-acl01'
 TESTUSER01_ATTRS = {
@@ -48,6 +50,20 @@ TESTUSER03_ATTRS = {
 	'is_supersuer': False, 'is_staff': False,
 }
 TESTUSER03 = AclTestUser(TESTUSER03_USERNAME, TESTUSER03_ATTRS)
+
+TESTUSER04_USERNAME = 'testuser-acl04'
+TESTUSER04_ATTRS = {
+	'email': '%s@example.com' % TESTUSER04_USERNAME, 'first_name': 'ACL Test 04', 'last_name': 'User',
+	'is_supersuer': False, 'is_staff': False,
+}
+TESTUSER04 = AclTestUser(TESTUSER04_USERNAME, TESTUSER04_ATTRS)
+
+TESTUSER05_USERNAME = 'testuser-acl05'
+TESTUSER05_ATTRS = {
+	'email': '%s@example.com' % TESTUSER05_USERNAME, 'first_name': 'ACL Test 05', 'last_name': 'User',
+	'is_supersuer': False, 'is_staff': False,
+}
+TESTUSER05 = AclTestUser(TESTUSER05_USERNAME, TESTUSER05_ATTRS)
 
 
 
@@ -176,6 +192,12 @@ class AclBaseTestCase(SonadorSeriesBaseTestCase):
 
 	testuser03 = TESTUSER03_USERNAME
 	testuser03_attrs = TESTUSER03_ATTRS
+
+	testuser04 = TESTUSER04_USERNAME
+	testuser04_attrs = TESTUSER04_ATTRS
+
+	testuser05 = TESTUSER05_USERNAME
+	testuser05_attrsa = TESTUSER05_ATTRS
 
 	nih_cxr_testdcm = 'https://www.oak-tree.tech/documents/331/nih-cxr.patient-30775.zip'
 
