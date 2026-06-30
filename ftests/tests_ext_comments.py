@@ -33,10 +33,7 @@ class SonadorResourceCommentTests(SonadorSeriesBaseTestCase):
 		iserver = self.getImageServer(*args, **kwargs)
 
 		# Retrieve and upload CT data
-		ctr = requests.get(
-    		'https://oak-tree.tech/documents/156/example.lung-ct.volume-3d.zip')
-		if not ctr.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s.' % ctr.status_code)
+		ctr = self.fetchTestResource('https://oak-tree.tech/documents/156/example.lung-ct.volume-3d.zip')
 
 		# Temporarily stage data to Sonador to fun the test
 		with self.stageImageArchiveSeries(iserver, zipfile.ZipFile(BytesIO(ctr.content))) as (series, hcache):
@@ -70,9 +67,7 @@ class SonadorResourceCommentTests(SonadorSeriesBaseTestCase):
 		iserver = self.getImageServer(*args, **kwargs)
 
 		# Retrieve and upload MRI data
-		ctr = requests.get('https://www.oak-tree.tech/documents/331/nih-cxr.patient-30775.zip')
-		if not ctr.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s.' % r.status_code)
+		ctr = self.fetchTestResource('https://www.oak-tree.tech/documents/331/nih-cxr.patient-30775.zip')
 
 		# Temporarily stage data to Sonador to run the test
 		with self.stageImageArchiveSeries(iserver, zipfile.ZipFile(BytesIO(ctr.content)), rapid_lookup=False) as (series, hcache):
@@ -131,9 +126,7 @@ class SonadorResourceCommentTests(SonadorSeriesBaseTestCase):
 		iserver = self.getImageServer(*args, **kwargs)
 
 		# Retrieve and upload CT data
-		ctr = requests.get('https://www.oak-tree.tech/documents/331/nih-cxr.patient-30775.zip')
-		if not ctr.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s.' % ctr.status_code)
+		ctr = self.fetchTestResource('https://www.oak-tree.tech/documents/331/nih-cxr.patient-30775.zip')
 
 		# Temporarily stage data to Sonador to fun the test
 		with self.stageImageArchiveSeries(iserver, zipfile.ZipFile(BytesIO(ctr.content))) as (series, hcache):
@@ -168,10 +161,7 @@ class SonadorStudyResourceCommentTests(SonadorStudyBaseTestCase):
 		iserver = self.getImageServer(*args, **kwargs)
 
 		# Retrieve and upload CT data
-		ctr = requests.get(
-    		'https://oak-tree.tech/documents/156/example.lung-ct.volume-3d.zip')
-		if not ctr.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s.' % ctr.status_code)
+		ctr = self.fetchTestResource('https://oak-tree.tech/documents/156/example.lung-ct.volume-3d.zip')
 
 		# Temporarily stage data to Sonador to fun the test
 		with self.stageImageArchiveStudy(iserver, zipfile.ZipFile(BytesIO(ctr.content))) as (study, hcache):
@@ -205,9 +195,7 @@ class SonadorStudyResourceCommentTests(SonadorStudyBaseTestCase):
 		iserver = self.getImageServer(*args, **kwargs)
 
 		# Retrieve and upload MRI data
-		ctr = requests.get('https://www.oak-tree.tech/documents/331/nih-cxr.patient-30775.zip')
-		if not ctr.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s.' % ctr.status_code)
+		ctr = self.fetchTestResource('https://www.oak-tree.tech/documents/331/nih-cxr.patient-30775.zip')
 
 		# Temporarily stage data to Sonador to run the test
 		with self.stageImageArchiveStudy(iserver, zipfile.ZipFile(BytesIO(ctr.content)), rapid_lookup=False) as (study, hcache):
@@ -291,9 +279,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -357,9 +343,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 			testuser_config=TESTUSER02, testgroup_name=TESTGROUP02, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -396,9 +380,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 			testuser_config=TESTUSER03, testgroup_name=TESTGROUP03, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -470,9 +452,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 			testuser_config=TESTUSER02, testgroup_name=TESTGROUP02, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -529,9 +509,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -580,9 +558,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 			testuser_config=TESTUSER04, testgroup_name=TESTGROUP04, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -636,9 +612,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 			testuser_config=TESTUSER05, testgroup_name=TESTGROUP05, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -711,9 +685,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -772,9 +744,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 		iserver, testgroup01, testuser01 = self.setupTestAuth(
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
 
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
 
@@ -805,9 +775,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 		iserver, testgroup01, testuser01 = self.setupTestAuth(
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
 
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
 
@@ -845,9 +813,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 		iserver, testgroup03, testuser03 = self.setupTestAuth(
 			testuser_config=TESTUSER03, testgroup_name=TESTGROUP03, **kwargs)
 
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
 
@@ -879,9 +845,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 		iserver, testgroup03, testuser03 = self.setupTestAuth(
 			testuser_config=TESTUSER03, testgroup_name=TESTGROUP03, **kwargs)
 
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
 
@@ -912,9 +876,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 		iserver, testgroup05, testuser05 = self.setupTestAuth(
 			testuser_config=TESTUSER05, testgroup_name=TESTGROUP05, **kwargs)
 
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
 
@@ -945,9 +907,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 		iserver, testgroup05, testuser05 = self.setupTestAuth(
 			testuser_config=TESTUSER05, testgroup_name=TESTGROUP05, **kwargs)
 
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
 
@@ -977,9 +937,7 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 		iserver, testgroup04, testuser04 = self.setupTestAuth(
 			testuser_config=TESTUSER04, testgroup_name=TESTGROUP04, **kwargs)
 
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
 

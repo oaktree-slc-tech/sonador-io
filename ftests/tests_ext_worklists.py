@@ -41,9 +41,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -107,9 +105,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP02, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -146,9 +142,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			testuser_config=TESTUSER02, testgroup_name=TESTGROUP02, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -188,9 +182,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 		self.assertNotEqual(testgroup01.pk, testgroup02.pk, msg='Test group 1 and 2 have the same primary key.')
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -248,9 +240,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -303,9 +293,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP02, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -343,9 +331,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			testuser_config=TESTUSER02, testgroup_name=TESTGROUP02, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -383,9 +369,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			testuser_config=TESTUSER02, testgroup_name=TESTGROUP02, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -439,9 +423,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -493,9 +475,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 		iserver, testgroup01, testuser01 = self.setupTestAuth(
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -544,9 +524,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			testuser_config=TESTUSER02, testgroup_name=TESTGROUP02, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -597,9 +575,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
 		
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -636,9 +612,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			testuser_config=TESTUSER02, testgroup_name=TESTGROUP02, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -682,9 +656,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			testuser_config=TESTUSER02, testgroup_name=TESTGROUP02, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver02, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -717,9 +689,7 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 			testuser_config=TESTUSER02, testgroup_name=TESTGROUP02, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver02, response2filearchive(r_cx)) as (test_sx, test_hache):

@@ -396,7 +396,7 @@ class SonadorAccessControlApiTests(AclBaseTestCase):
 				# Execute test search
 				r_auth_search = requests.post(
 					iserver_test.server.sonador_apiurl(posixpath.join(iserver_test.fetch_endpoint, iserver_test.pk, 'auth/search')),
-					json={ 'term': testgroup01.name }, headers=iserver_test.server.request_headers())
+					json={ 'term': testgroup01.name }, headers=iserver_test.server.request_headers(), timeout=10)
 
 				if not r_auth_search.ok:
 					request_client_error('Unable to execute unified auth model search due to an error.', r_auth_search)
@@ -437,9 +437,7 @@ class SonadorAccessControlApiTests(AclBaseTestCase):
 		with self.getLimitedImageServer(iserver, testuser01, object_data={ 'description': 'User ACL API testing'}) as iserver_test:
 
 			# Download test series
-			r_cx = requests.get(self.nih_cxr_testdcm)
-			if not r_cx.ok:
-				raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+			r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 			# Stage test files to imaging server
 			with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -538,9 +536,7 @@ class SonadorAccessControlApiTests(AclBaseTestCase):
 		with self.getLimitedImageServer(iserver, testuser01, object_data={ 'description': 'Group ACL API testing'}) as iserver_test:
 
 			# Download test series
-			r_cx = requests.get(self.nih_cxr_testdcm)
-			if not r_cx.ok:
-				raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+			r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 			# Stage test files to imaging server
 			with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -644,9 +640,7 @@ class SonadorAccessControlApiTests(AclBaseTestCase):
 		server_acl.delete()
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):

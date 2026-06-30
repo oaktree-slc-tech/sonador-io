@@ -67,9 +67,7 @@ class SonadorDcmDownloadEndpointTestCase(AclBaseTestCase):
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -79,8 +77,8 @@ class SonadorDcmDownloadEndpointTestCase(AclBaseTestCase):
 			url = posixpath.join(iserver.dicomweb_root, 'studies', test_sx.parent.study_uid, "archive")
 
 			# Retrieve archive via DICOMweb endpoint
-			r = requests.get(iserver.orthanc_apiurl(url), 
-				headers=iserver.orthanc_request_headers(), verify=iserver.verify_ssl())
+			r = requests.get(iserver.orthanc_apiurl(url),
+				headers=iserver.orthanc_request_headers(), verify=iserver.verify_ssl(), timeout=30)
 			if not r.ok:
 				raise Exception('Unable to retrieve zip archive from Orthanc via study endpoint, server returned non-200 response.')
 
@@ -102,9 +100,7 @@ class SonadorDcmDownloadEndpointTestCase(AclBaseTestCase):
 		with self.getLimitedImageServer(iserver, testuser01, object_data={'description': 'ACL integration testing'}) as iserver_test:
 
 			# Download test series
-			r_cx = requests.get(self.nih_cxr_testdcm)
-			if not r_cx.ok:
-				raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+			r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 			# Stage test files to imaging server
 			with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -121,8 +117,8 @@ class SonadorDcmDownloadEndpointTestCase(AclBaseTestCase):
 				url = posixpath.join(iserver.dicomweb_root, 'studies', test_sx.parent.study_uid, "archive")
 
 				# Retrieve archive via DICOMweb endpoint
-				r = requests.get(iserver_test.orthanc_apiurl(url), 
-					headers=iserver_test.orthanc_request_headers(), verify=iserver_test.verify_ssl())
+				r = requests.get(iserver_test.orthanc_apiurl(url),
+					headers=iserver_test.orthanc_request_headers(), verify=iserver_test.verify_ssl(), timeout=30)
 				if not r.ok:
 					raise Exception(
 						'Unable to retrieve zip archive from Orthanc via study endpoint, server returned non-200 response. Status-code: %s' % r.status_code)
@@ -140,9 +136,7 @@ class SonadorDcmDownloadEndpointTestCase(AclBaseTestCase):
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
@@ -152,7 +146,7 @@ class SonadorDcmDownloadEndpointTestCase(AclBaseTestCase):
 
 			# Retrieve archive via DICOMweb endpoint
 			r = requests.get(iserver.orthanc_apiurl(url),
-				headers=iserver.orthanc_request_headers(), verify=iserver.verify_ssl())
+				headers=iserver.orthanc_request_headers(), verify=iserver.verify_ssl(), timeout=30)
 			if not r.ok:
 				raise Exception('Unable to retrieve zip archive from Orthanc via series endpoint, server returned non-200 response.')
 
@@ -171,9 +165,7 @@ class SonadorDcmDownloadEndpointTestCase(AclBaseTestCase):
 		server_acl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'duration': 1 })
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		with self.getLimitedImageServer(iserver, testuser01, object_data={'description': 'ACL integration testing'}) as iserver_test:
 
@@ -192,7 +184,7 @@ class SonadorDcmDownloadEndpointTestCase(AclBaseTestCase):
 
 				# Retrieve archive via DICOMweb endpoint
 				r = requests.get(iserver_test.orthanc_apiurl(url),
-					headers=iserver_test.orthanc_request_headers(), verify=iserver_test.verify_ssl())
+					headers=iserver_test.orthanc_request_headers(), verify=iserver_test.verify_ssl(), timeout=30)
 				if not r.ok:
 					raise Exception(
 						'Unable to retrieve zip archive from Orthanc via series endpoint, server returned non-200 response. Status-code: %s' % r.status_code)

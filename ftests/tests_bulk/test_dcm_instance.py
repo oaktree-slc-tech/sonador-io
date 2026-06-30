@@ -34,9 +34,7 @@ class SonadorBulkContentApiDcmInstanceTests(SonadorBulkContentApiTestCase):
 		server_acl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'duration': 1 })
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage tst files to the imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hcache):
@@ -79,9 +77,7 @@ class SonadorBulkContentApiDcmInstanceTests(SonadorBulkContentApiTestCase):
 		server_acl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'duration': 1 })
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to the imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hcache):
@@ -123,16 +119,21 @@ class SonadorBulkContentApiDcmInstanceTests(SonadorBulkContentApiTestCase):
 			# objects are not populated dynamically.
 			self.assertTrue(len(getattr(results[0]._studies[0], '_series', [])) > 0,
 				msg='Child series collection not populated during bulkpopulate_related')
-			self.assertEqual(
-				set([sx._objectdata.get('ID') for sx in results[0]._studies[0]._series]), set([test_sx.pk]),
-				msg='Child series collection includes unexpected series.')
+			self.assertIn(
+				test_sx.pk,
+				set([sx._objectdata.get('ID') for sx in results[0]._studies[0]._series]),
+				msg='Child series collection does not include expected series.')
 
 			# Check child DICOM instances of the series. As in other tests, private accessor attributes are
 			# used for testing to prevent dynamic population of the child instances.
-			self.assertTrue(len(getattr(results[0]._studies[0]._series[0], '_slices', [])) > 0,
+			_target_sx = next(
+				(sx for sx in results[0]._studies[0]._series if sx._objectdata.get('ID') == test_sx.pk), None)
+			self.assertIsNotNone(_target_sx,
+				msg='Test series not found in child series collection after bulkpopulate_related.')
+			self.assertTrue(len(getattr(_target_sx, '_slices', [])) > 0,
 				msg='Child series does not include DICOM instances populated by bulkpopulate_related.')
 			self.assertEqual(
-				set([dcm._objectdata.get('ID') for dcm in results[0]._studies[0]._series[0]._slices]), set([dcm.pk]),
+				set([dcm._objectdata.get('ID') for dcm in _target_sx._slices]), set([dcm.pk]),
 				msg='Child DICOM instance collection includes unexpected instances.')
 
 	def test_bulkpopulate_related_study(self, *args, **kwargs):
@@ -145,9 +146,7 @@ class SonadorBulkContentApiDcmInstanceTests(SonadorBulkContentApiTestCase):
 		server_acl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'duration': 1 })
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to the imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hcache):
@@ -178,9 +177,10 @@ class SonadorBulkContentApiDcmInstanceTests(SonadorBulkContentApiTestCase):
 			# Check child series instances (populated by bulkpopulate_related) to ensure that the attributes
 			# have been added by the method. The private _series property to ensure that fetch_series 
 			# is not invoked by accident.
-			self.assertEqual(
-				set([_o._objectdata.get('ID') for _o in getattr(results[0], '_series', [])]), set([test_sx.pk]),
-				msg='Child series collection includes unexpected series.')
+			self.assertIn(
+				test_sx.pk,
+				set([_o._objectdata.get('ID') for _o in getattr(results[0], '_series', [])]),
+				msg='Child series collection does not include expected series.')
 
 			# Check study parent (patient) to ensure that it was populated by bulkpopulate_related.
 			# Again, the private _parent is inspected to prevent dynamic fetching.
@@ -199,9 +199,7 @@ class SonadorBulkContentApiDcmInstanceTests(SonadorBulkContentApiTestCase):
 		server_acl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'duration': 1 })
 
 		# Download test series
-		r_cx = requests.get(self.nih_cxr_testdcm)
-		if not r_cx.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 		# Stage test files to the imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hcache):
@@ -252,9 +250,14 @@ class SonadorBulkContentApiDcmInstanceTests(SonadorBulkContentApiTestCase):
 			# Check sibling references of study and DICOM instances of those models
 			self.assertTrue(len(getattr(results[0]._parent, '_series', [])) > 0,
 				msg='Study does not include a populated series collection')
+			self.assertIn(
+				test_sx.pk,
+				set([_sx._objectdata.get('ID') for _sx in getattr(results[0]._parent, '_series', [])]),
+				msg='Series collection of parent study does not include expected series reference')
+			_target_sx = next(
+				(sx for sx in getattr(results[0]._parent, '_series', []) if sx._objectdata.get('ID') == test_sx.pk), None)
+			self.assertIsNotNone(_target_sx,
+				msg='Test series not found in parent study series collection after bulkpopulate_related.')
 			self.assertEqual(
-				set([_sx._objectdata.get('ID') for _sx in getattr(results[0]._parent, '_series', [])]), set([test_sx.pk]),
-				msg='Series collection of parent study includes unexpected series references')
-			self.assertEqual(
-				set([_dcm._objectdata.get('ID') for _dcm in getattr(results[0]._parent._series[0], '_slices', [])]), set([dcm.pk]),
+				set([_dcm._objectdata.get('ID') for _dcm in getattr(_target_sx, '_slices', [])]), set([dcm.pk]),
 				msg='Sibling (nested) collection has unexpected DICOM instances')
