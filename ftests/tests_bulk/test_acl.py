@@ -56,9 +56,7 @@ class SonadorBulkContentApiTests(SonadorBulkContentApiTestCase):
 		with self.getLimitedImageServer(iserver, testuser01, object_data={ 'description': 'ACL API testing' }) as iserver_test:
 
 			# Download test series
-			r_cx = requests.get(self.nih_cxr_testdcm)
-			if not r_cx.ok:
-				raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+			r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 			# Stage tst files to the imaging server
 			with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hcache):
@@ -142,9 +140,7 @@ class SonadorBulkContentApiTests(SonadorBulkContentApiTestCase):
 		with self.getLimitedImageServer(iserver, testuser01, object_data={ 'description': 'ACL API testing' }) as iserver_test:
 
 			# Download test series
-			r_cx = requests.get(self.nih_cxr_testdcm)
-			if not r_cx.ok:
-				raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+			r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
 
 			# Stage test files to imaging server
 			with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hcache):

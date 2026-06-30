@@ -77,7 +77,29 @@ class SonadorBaseTestCase(unittest.TestCase):
 		'''
 		logger.error('%s Error: "%s"\n%s\n%s' % (msg, err, getattr(err, 'details', None), traceback.format_exc()))
 		raise err
-	
+
+	def fetchTestResource(self, url, timeout=3):
+		'''	Fetch a remote test resource with a hard timeout.
+
+			On a network error or timeout, calls self.fail() with a clean one-line
+			message (no stack trace) so that connectivity problems appear as tidy
+			test FAILUREs rather than ERROR tracebacks that would send a developer
+			on a debugging detour.
+		'''
+		import requests as _requests
+		try:
+			r = _requests.get(url, timeout=timeout)
+		except _requests.exceptions.RequestException as err:
+			self.fail(
+				'Could not retrieve test resource (%s): %s. '
+				'Check connectivity — the source may be throttling requests.'
+				% (url, type(err).__name__))
+		if not r.ok:
+			self.fail(
+				'Could not retrieve test resource (%s). HTTP %s.'
+				% (url, r.status_code))
+		return r
+
 	def cleanupImageUpload(self, iserver, hcache, remove_study=False):
 		'''	Iterate through the resources in the provided cache and remove them from the server
 		'''

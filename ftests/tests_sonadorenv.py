@@ -43,10 +43,7 @@ class SonadorEnvironmentTests(SonadorBaseTestCase):
 		iserver = self.getImageServer(*args, **kwargs)
 
 		# Retrieve CT data
-		ctr = requests.get(
-    		'https://oak-tree.tech/documents/156/example.lung-ct.volume-3d.zip')
-		if not ctr.ok:
-			raise ValueError('Unable to retrieve test data due to an error. Status code: %s.' % r.status_code)
+		ctr = self.fetchTestResource('https://oak-tree.tech/documents/156/example.lung-ct.volume-3d.zip')
 
 		# Load file data to an archive and upload to Sonador
 		hcache, _ = imageserver_upload_archive(iserver, response2filearchive(ctr))
