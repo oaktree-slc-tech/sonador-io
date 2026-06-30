@@ -141,6 +141,24 @@ class AclTestBaseData(abc.ABC):
 			return cls._fetch_sx(iserver, test_dcm)
 
 	@classmethod
+	def _uploadAndIndexDcmfile(cls, iserver, test_dcm):
+		'''	Upload the provided DICOM test file and index the resulting series into the
+			Sonador resource cache so it is immediately queryable via rapid_lookup.
+
+			Calls _upload_dcmfile, waits briefly for the upload to settle, then indexes
+			patient → study → series in that order (the sequence required by Sonador's
+			top-down cache model).
+
+			@returns series reference of uploaded file
+		'''
+		sx = cls._upload_dcmfile(iserver, test_dcm, fetch_sx=True)
+		sleep(0.15)
+		sx.model_patient.index()
+		sx.parent.index()
+		sx.index()
+		return sx
+
+	@classmethod
 	def _fetch_sx(cls, iserver, test_dcm):
 		'''	Retrieve the series reference for the provided series
 		'''
