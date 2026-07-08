@@ -601,13 +601,19 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 					msg='it is possible to create worklist for group with worklist: False, Server sent incorrect response. Expected bad request and invalid create: %s. Expected: 400.'% _details.get(gapi.STATUS_CODE))
 
 	def test_worklist_limited_acl_invalid(self, *args, **kwargs):
-		'''	Ensure that the test runner is able to prevent a user from being
-			assigned a worklist from a group they are not a part of.
+		'''	Ensure that a user without local View permission on the study cannot create a
+			worklist item for it, even with the global `worklist` permission enabled.
+
+			(Local `Modify` is intentionally NOT part of this scenario: worklist creation/update
+			no longer requires it -- see test_worklist_view_only_acl_valid. The auth plugin tags
+			the patient-ancestor call of a worklist request with action="worklist", which
+			ResourceAuthorization.resource_perm resolves via a `view`-only check instead of the
+			generic modify-traversal fallback.)
 		'''
 		# Setup test group and user for worklist
 		iserver, testgroup01, testuser01 = self.setupTestAuth(
 			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
-		
+
 		iserver02, testgroup02, testuser02 = self.setupTestAuth(
 			testuser_config=TESTUSER02, testgroup_name=TESTGROUP02, **kwargs)
 
@@ -616,28 +622,32 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 
 		# Stage test files to imaging server
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
-			
+
 			# Reference to parent instance
 			test_s = iserver.get_study(test_sx.parent.pk)
 
-			# # Create ACL policy 
+			# # Create ACL policy
 			# testacl01 = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'worklist': True, 'duration': 5})
 
-			testacl02 = iserver.admin_create_acl(testgroup02, { 
+			testacl02 = iserver.admin_create_acl(testgroup02, {
 				'resource': '*', 'query': False, 'view': False, 'modify': False, 'remove': False, 'acl': False, 'worklist': True, 'duration': 5
 				})
 
-			# Create local study policy for test study 1, retrieve reference
+			# Create local study policy for test study 1 with NO local View, retrieve reference
 			testacl02_study_local = test_s.create_group_acl(testgroup02, {
-				'View': True, 'Modify': False, 'Remove': False, 'ACL': False,
+				'View': False, 'Modify': False, 'Remove': False, 'ACL': False,
 			})
-			
+
 			with self.getLimitedImageServer(iserver, testuser02, object_data={'description': 'ACL integration testing' }) as iserver_ltd:
-				test_s_ltd = iserver_ltd.get_study(test_s.pk)
 				try:
+					# get_study() itself requires local View (it issues a GET against the
+					# study resource), so with View: False it is expected to 403 here, before
+					# worklist creation is ever attempted. Both denial points belong to the
+					# same "no local View" scenario, so both are covered by this one try/except.
+					test_s_ltd = iserver_ltd.get_study(test_s.pk)
 					w01 = test_s_ltd.create_reviewer_worklist_item(testgroup02, testuser02, SONADOR_WORKLIST_STATUS_SCHEDULED)
 
-					self.fail(msg="Able to create worklist without local Modify permission")
+					self.fail(msg="Able to create worklist without local View permission")
 
 				except Exception as err:
 
@@ -645,6 +655,57 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 					_details = getattr(err, 'details', {})
 					_errors = soandor_clientexception_server_errors(err) or {}
 					self.assertEqual(_details.get(gapi.STATUS_CODE), 403, msg='Server sent incorrect status code: %s. Expected: 403.'% _details.get(gapi.STATUS_CODE))
+
+
+	def test_worklist_view_only_acl_valid(self, *args, **kwargs):
+		'''	A user with local View (and NO local Modify) on the study, plus the global `worklist`
+			permission, can create AND update a worklist item.
+
+			Regression test for the fix that removed worklist's dependency on local `Modify`: the
+			patient-ancestor call of a worklist request is now tagged action="worklist" by the auth
+			plugin and resolved via a `view`-only check, rather than falling through to the generic
+			modify-traversal branch. `Modify` grants the (unrelated, and far more powerful) ability
+			to edit DICOM resource data directly, and should not be a prerequisite for reviewing or
+			working a worklist.
+		'''
+		# Setup test group and user for worklist
+		iserver, testgroup01, testuser01 = self.setupTestAuth(
+			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
+
+		# Download test series
+		r_cx = requests.get(self.nih_cxr_testdcm)
+		if not r_cx.ok:
+			raise ValueError('Unable to retrieve test data due to an error. Status code: %s' % r_cx.status_code)
+
+		# Stage test files to imaging server
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			# Reference to parent instance
+			test_s = iserver.get_study(test_sx.parent.pk)
+
+			testacl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'worklist': True, 'duration': 5 })
+
+			# Local study policy: View only, Modify explicitly False
+			testacl_study_local = test_s.create_group_acl(testgroup01, {
+				'View': True, 'Modify': False, 'Remove': False, 'ACL': False,
+			})
+
+			with self.getLimitedImageServer(iserver, testuser01, object_data={'description': 'ACL integration testing' }) as iserver_ltd:
+				test_s_ltd = iserver_ltd.get_study(test_s.pk)
+
+				# Create should succeed without local Modify
+				w01 = test_s_ltd.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_SCHEDULED)
+				w01 = test_s_ltd.get_reviewer_worklist_item(w01.pk)
+
+				self.assertTrue(w01.user is not None and w01.user_id == testuser01.pk,
+					msg='Worklist payload does not reference the correct user')
+
+				# Update (state transition) should also succeed without local Modify
+				w01.update({ 'State': SONADOR_WORKLIST_STATUS_INPROGRESS })
+				w01 = test_s_ltd.get_reviewer_worklist_item(w01.pk)
+
+				self.assertEqual(w01.state, SONADOR_WORKLIST_STATUS_INPROGRESS,
+					msg='Worklist state was not updated by a user with local View but no local Modify')
 
 
 	def test_worklist_limited_acl_valid(self, *args, **kwargs):
