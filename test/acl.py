@@ -6,6 +6,7 @@ from time import sleep
 
 from pydicom.uid import generate_uid
 
+import client.apisettings as gcapi
 from client.errors import ClientOperationError
 from client.utils.general import create_token
 
@@ -141,7 +142,7 @@ class AclTestBaseData(abc.ABC):
 			return cls._fetch_sx(iserver, test_dcm)
 
 	@classmethod
-	def _uploadAndIndexDcmfile(cls, iserver, test_dcm):
+	def uploadAndIndexDcmFile(cls, iserver, test_dcm):
 		'''	Upload the provided DICOM test file and index the resulting series into the
 			Sonador resource cache so it is immediately queryable via rapid_lookup.
 
@@ -331,3 +332,32 @@ class AclBaseTestCase(SonadorSeriesBaseTestCase):
 		for _acl_policy in iserver.fetch_acl():
 			if _acl_policy.group in _group_ids:
 				_acl_policy.delete()
+
+	def _assertClientErrorStatus(self, request_callable, status_code, msg=None):
+		'''	Shared implementation for assertRejected/assertDenied: assert that the provided
+			callable raises a ClientOperationError with the expected HTTP status code.
+		'''
+		try:
+			request_callable()
+			self.fail(msg or 'Request succeeded but should have been rejected by the server')
+
+		except AssertionError:
+			raise
+
+		except ClientOperationError as err:
+			_d = getattr(err, 'details', {})
+			self.assertEqual(_d.get(gcapi.STATUS_CODE), status_code,
+				msg='Server sent incorrect status code: %s. Expected: %s. (%s)'
+					% (_d.get(gcapi.STATUS_CODE), status_code, msg or 'rejected request'))
+
+	def assertRejected(self, request_callable, status_code=400, msg=None):
+		'''	Assert that the provided callable is rejected by the server (e.g. a validation
+			error) with the expected HTTP status code (default: 400).
+		'''
+		self._assertClientErrorStatus(request_callable, status_code, msg=msg)
+
+	def assertDenied(self, request_callable, status_code=403, msg=None):
+		'''	Assert that the provided callable is denied by the server (e.g. an authorization
+			failure) with the expected HTTP status code (default: 403).
+		'''
+		self._assertClientErrorStatus(request_callable, status_code, msg=msg)
