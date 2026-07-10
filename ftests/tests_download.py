@@ -194,3 +194,87 @@ class SonadorDcmDownloadEndpointTestCase(AclBaseTestCase):
 
 				# Ensure that the data in the file archive came from the study
 				self.verifyDcmFiles(test_sx, rarchive)
+
+	def test_dcmweb_download_study_acl_revoked(self, *args, **kwargs):
+		'''	Verify DICOMweb study download endpoint denies access once the local ACL grant enabling it is revoked.
+			Extends test_dcmweb_download_study_acl_ltd (ftests-sonador-ftests#4) which only exercised the grant.
+		'''
+		# Setup test authentication: create user, group, and generate a blank ACL policy to associate the group with the server
+		iserver, testgroup01, testuser01 = self.setupTestAuth(
+			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
+		server_acl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'duration': 1 })
+
+		# Download test series
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.getLimitedImageServer(iserver, testuser01, object_data={'description': 'ACL revoke testing'}) as iserver_test:
+
+			# Stage test files to imaging server
+			with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+				# Create group ACL authorizing access to the download endpoint for the test study.
+				testacl01_sx_local = test_sx.create_group_acl(testgroup01, {
+					'View': True, 'Modify': False, 'Remove': False, 'CommentEdit': True, 'CommentView': True, 'ACL': False,
+				})
+
+				# Create DICOMweb API URL for study: /dicom-web/{ StudyInstanceUID }/archive
+				url = posixpath.join(iserver.dicomweb_root, 'studies', test_sx.parent.study_uid, "archive")
+
+				# Confirm the grant authorizes the download before revoking it
+				r = requests.get(iserver_test.orthanc_apiurl(url),
+					headers=iserver_test.orthanc_request_headers(), verify=iserver_test.verify_ssl(), timeout=30)
+				if not r.ok:
+					raise Exception(
+						'Unable to retrieve zip archive prior to revocation, server returned non-200 response. Status-code: %s' % r.status_code)
+
+				# Revoke the local grant
+				testacl01_sx_local.delete()
+				sleep(0.5)
+
+				# Confirm the download is denied once the grant has been revoked
+				r = requests.get(iserver_test.orthanc_apiurl(url),
+					headers=iserver_test.orthanc_request_headers(), verify=iserver_test.verify_ssl(), timeout=30)
+				self.assertEqual(r.status_code, 403,
+					msg='Expected 403 for DICOMweb study download after local ACL revocation. Got: %s' % r.status_code)
+
+	def test_dcmweb_download_series_acl_revoked(self, *args, **kwargs):
+		'''	Verify DICOMweb series download endpoint denies access once the local ACL grant enabling it is revoked.
+			Extends test_dcmweb_download_series_acl_ltd (ftests-sonador-ftests#4) which only exercised the grant.
+		'''
+		# Setup test authentication: create user, group, and generate a blank ACL policy to associate the group with the server
+		iserver, testgroup01, testuser01 = self.setupTestAuth(
+			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
+		server_acl = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'duration': 1 })
+
+		# Download test series
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.getLimitedImageServer(iserver, testuser01, object_data={'description': 'ACL revoke testing'}) as iserver_test:
+
+			# Stage test files to imaging server
+			with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+				# Create group ACL authorizing access to the download endpoint for the test series.
+				testacl01_sx_local = test_sx.create_group_acl(testgroup01, {
+				 	'View': True, 'Modify': False, 'Remove': False, 'CommentEdit': True, 'CommentView': True, 'ACL': False,
+				})
+
+				# Create DICOMweb API URL for series: /dicom-web/{ SeriesInstanceUID }/archive
+				url = posixpath.join(iserver.dicomweb_root, 'series', test_sx.series_uid, 'archive')
+
+				# Confirm the grant authorizes the download before revoking it
+				r = requests.get(iserver_test.orthanc_apiurl(url),
+					headers=iserver_test.orthanc_request_headers(), verify=iserver_test.verify_ssl(), timeout=30)
+				if not r.ok:
+					raise Exception(
+						'Unable to retrieve zip archive prior to revocation, server returned non-200 response. Status-code: %s' % r.status_code)
+
+				# Revoke the local grant
+				testacl01_sx_local.delete()
+				sleep(0.5)
+
+				# Confirm the download is denied once the grant has been revoked
+				r = requests.get(iserver_test.orthanc_apiurl(url),
+					headers=iserver_test.orthanc_request_headers(), verify=iserver_test.verify_ssl(), timeout=30)
+				self.assertEqual(r.status_code, 403,
+					msg='Expected 403 for DICOMweb series download after local ACL revocation. Got: %s' % r.status_code)

@@ -781,3 +781,80 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 				self.assertEqual(_kafka.get('ID'), w01.pk, msg='Kafka export for worklist has wrong ID')
 				self.assertEqual(_kafka.get('State'), w01.state, msg='Kafka export for worklist has wrong state')
 				w01.kafka_export()
+
+	def test_worklist_browse_dicomweb_reassignment(self, *args, **kwargs):
+		'''	Verify the DICOMweb worklist browse endpoint (/dicom-web/worklist/studies, exposed via
+			ImageServer.fetch_user_dcmweb_worklist) is scoped to the requesting user's own assignments,
+			and that reassigning a worklist item moves it from one user's browse list to another's.
+			Exercises a code path (ftests-sonador-ftests#4) that had a supported client method
+			(fetch_user_dcmweb_worklist) but no test coverage -- every other worklist test exercises the
+			per-item endpoint, not the browse/list endpoint the viewer's worklist page depends on.
+		'''
+		# Setup two test groups/users, both requiring server-level worklist permission
+		iserver, testgroup01, testuser01 = self.setupTestAuth(
+			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
+		iserver, testgroup02, testuser02 = self.setupTestAuth(
+			testuser_config=TESTUSER02, testgroup_name=TESTGROUP02, **kwargs)
+
+		server_acl01 = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'worklist': True, 'duration': 5 })
+		server_acl02 = iserver.admin_create_acl(testgroup02, { 'resource': '*', 'worklist': True, 'duration': 5 })
+
+		# Download test series
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			test_s = iserver.get_study(test_sx.parent.pk)
+
+			# The DICOMweb worklist browse view chains the worklist-group filter with the same
+			# SecureResourceQueryViewMixin ACL filter the plain study search endpoint uses, so seeing
+			# an item in the browse list requires View on the study in addition to being assigned to it.
+			local_acl01 = test_s.create_group_acl(testgroup01, {
+				'View': True, 'Modify': False, 'Remove': False, 'CommentEdit': False, 'CommentView': False, 'ACL': False,
+			})
+
+			# Assign the worklist item to user01 initially
+			w01 = test_s.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_SCHEDULED)
+			sleep(0.15)
+			test_s.index()
+			sleep(1.5)
+
+			with self.getLimitedImageServer(iserver, testuser01, object_data={'description': 'Worklist browse -- user01 before'}) as iserver_test01, \
+					self.getLimitedImageServer(iserver, testuser02, object_data={'description': 'Worklist browse -- user02 before'}) as iserver_test02:
+
+				# user01 (assignee) must see the item in their DICOMweb browse list
+				browse01 = iserver_test01.fetch_user_dcmweb_worklist()
+				self.assertTrue(any(w.pk == w01.pk for w in browse01),
+					msg='Assigned user01 does not see their own worklist item via the DICOMweb browse endpoint')
+
+				# user02 (not assigned) must not see the item
+				browse02 = iserver_test02.fetch_user_dcmweb_worklist()
+				self.assertTrue(all(w.pk != w01.pk for w in browse02),
+					msg='Unassigned user02 sees a worklist item via the DICOMweb browse endpoint that belongs to user01 '
+						'(confirmed cross-group leak in apply_worklist_queryfilter -- see sonador-ftests#4)')
+
+			# Reassign: remove user01's item/View grant, create the equivalent item + grant for user02
+			w01.delete()
+			local_acl01.delete()
+			local_acl02 = test_s.create_group_acl(testgroup02, {
+				'View': True, 'Modify': False, 'Remove': False, 'CommentEdit': False, 'CommentView': False, 'ACL': False,
+			})
+			w02 = test_s.create_reviewer_worklist_item(testgroup02, testuser02, SONADOR_WORKLIST_STATUS_SCHEDULED)
+			sleep(0.15)
+			test_s.index()
+			sleep(1.5)
+
+			with self.getLimitedImageServer(iserver, testuser01, object_data={'description': 'Worklist browse -- user01 after'}) as iserver_test01, \
+					self.getLimitedImageServer(iserver, testuser02, object_data={'description': 'Worklist browse -- user02 after'}) as iserver_test02:
+
+				# user01 must no longer see any worklist item for this study
+				browse01 = iserver_test01.fetch_user_dcmweb_worklist()
+				self.assertTrue(all(w.parent.pk != test_s.pk for w in browse01),
+					msg='Reassigned-away user01 still sees a worklist item for this study via the DICOMweb browse endpoint')
+
+				# user02 (new assignee) must now see the item
+				browse02 = iserver_test02.fetch_user_dcmweb_worklist()
+				self.assertTrue(any(w.pk == w02.pk for w in browse02),
+					msg='Newly-assigned user02 does not see the reassigned worklist item via the DICOMweb browse endpoint')
+
+			w02.delete()
