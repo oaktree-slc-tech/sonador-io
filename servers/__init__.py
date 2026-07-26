@@ -28,6 +28,11 @@ from ..apisettings import  DicomMetaKey, DicomHeaderData, \
 	IMAGING_SERVER_RESOURCE_SERIES, IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_RESOURCE_SUPPORTED, \
 	DCMHEADER_MODALITY, DCM_MODALITY_SR, DCM_MODALITY_SEG, DCM_VERSION_2021b, DICOM_VR_DESCRIPTION, \
 	IMAGING_SERVER_INCLUDE_INSTANCES
+from ..apisettings.userpref import userpref_section_endpoint, USERPREF_UNSET, \
+	SONADOR_USERPREF_VERSION, SONADOR_USERPREF_VERSION_KEY, SONADOR_USERPREF_VALUES_KEY, \
+	SONADOR_USERPREF_FIELD_VIEWER, SONADOR_USERPREF_FIELD_STUDYLIST, \
+	SONADOR_USERPREF_GENERAL, SONADOR_USERPREF_HOTKEYS, SONADOR_USERPREF_WINDOW_LEVEL, \
+	SONADOR_USERPREF_VIEWER_META, SONADOR_USERPREF_STUDYLIST
 from ..serialization import json_datetime_parser
 from ..helpers import request_client_error, fetch_sonador_session_token, API_ACCESS_TOKEN, OAUTH_TOKEN_RESPONSE_TYPE, \
 	OAUTH_TOKEN_IDTOKEN_RESPONSE_TYPE, OAUTH_ACCESS_TOKEN, OAUTH_TOKEN_TYPE, OAUTH_TOKEN_TYPE_BEARER, OAUTH_EXPIRATION
@@ -538,6 +543,254 @@ class SonadorServer(RemoteServer):
 			request_client_error('Unable to verify Sonador API credentials due to an error.', r)
 
 		return server_controloperation_json_response(r)
+
+
+	# User Preferences
+
+	def userpref_apiurl(self, section=None, version=None, method=None):
+		'''	Create the API URL for a user-preference endpoint. Identity is taken from the
+			credentials used by the server instance: the endpoints always read and write the
+			preferences of the requesting user.
+
+			@input section (str, default=None): preference section (one of
+				SONADOR_USERPREF_SECTIONS). When None, the URL of the whole-document
+				endpoint is returned.
+			@input version (str, default=None): release key of the preference document to
+				retrieve. Added to the URL as a query parameter. Only meaningful for GET
+				requests to a section endpoint; a POST carries the version in its body.
+			@input method (str, default=None): HTTP method for which the URL should be signed
+
+			@returns str
+		'''
+		resource_endpoint = userpref_section_endpoint(section)
+		if version is not None:
+			resource_endpoint = '%s?%s' % (resource_endpoint,
+				urlencode({ SONADOR_USERPREF_VERSION_KEY: version }))
+
+		return self.sonador_apiurl(resource_endpoint, method=method)
+
+	def fetch_user_preferences(self, **kwargs):
+		'''	Retrieve the complete preference record for the user: both the `viewer` and the
+			`studylist` documents, with every release key each contains. Retrieving the whole
+			record in a single request is what allows a client to resolve its settings across
+			releases (using the values of an older release when the current one has no entry).
+
+			The whole-document endpoint pre-dates the section endpoints and returns the record
+			directly rather than wrapping it in an operation-results envelope.
+
+			@returns dict: user preference record (`user`, `viewer`, and `studylist` keys)
+		'''
+		r = requests.get(self.userpref_apiurl(),
+			verify=self.verify_ssl(**kwargs), headers=self.sonador_request_headers(**kwargs))
+
+		if not r.ok:
+			request_client_error('Unable to retrieve user preferences from Sonador due to an error.', r)
+
+		return r.json()
+
+	def update_user_preferences(self, viewer=USERPREF_UNSET, studylist=USERPREF_UNSET, **kwargs):
+		'''	Write the preference documents for the user through the whole-document endpoint.
+
+			The whole-document write replaces the entire document(s) it is given, including
+			every release key they contain. Prefer the section methods below for anything
+			other than seeding or clearing a record: they update a single section of a single
+			release and leave the rest of the record intact.
+
+			A document which is not passed is left out of the request and keeps whatever is
+			stored for it. A document passed as None (or as an empty dict) is sent explicitly
+			and clears the stored value. The two cases are distinguished by the USERPREF_UNSET
+			default, so `update_user_preferences(viewer=doc)` cannot silently discard the
+			study-list document.
+
+			The endpoint answers with an operation-results envelope which does not carry the
+			updated record, so read it back with fetch_user_preferences if the stored value
+			is needed.
+
+			@input viewer (dict or None, default=USERPREF_UNSET): complete `viewer` document
+			@input studylist (dict or None, default=USERPREF_UNSET): complete `studylist`
+				document
+
+			@returns response-like object
+		'''
+		object_data = {}
+		if viewer is not USERPREF_UNSET:
+			object_data[SONADOR_USERPREF_FIELD_VIEWER] = viewer
+		if studylist is not USERPREF_UNSET:
+			object_data[SONADOR_USERPREF_FIELD_STUDYLIST] = studylist
+
+		r = requests.post(self.userpref_apiurl(method='POST'), json=object_data,
+			verify=self.verify_ssl(**kwargs), headers=self.sonador_request_headers(**kwargs))
+
+		if not r.ok:
+			request_client_error('Unable to update user preferences due to a server error.', r)
+
+		return server_controloperation_json_response(r)
+
+	def fetch_user_preference_section(self, section, version=None, **kwargs):
+		'''	Retrieve a single preference section for the requested release.
+
+			@input section (str): preference section (one of SONADOR_USERPREF_SECTIONS)
+			@input version (str, default=current release): release key of the document to read
+
+			@returns dict: `{ 'version': <release>, 'values': {...} }`. `values` is empty when
+				nothing is stored for the section at that release.
+		'''
+		r = requests.get(self.userpref_apiurl(section=section, version=version),
+			verify=self.verify_ssl(**kwargs), headers=self.sonador_request_headers(**kwargs))
+
+		if not r.ok:
+			request_client_error('Unable to retrieve the "%s" user-preference section due to an error.'
+				% section, r)
+
+		return server_controloperation_json_response(r).get(gcapicodes.RESULTS, {})
+
+	def update_user_preference_section(self, section, values, version=None, **kwargs):
+		'''	Write a single preference section for the requested release. Other sections and
+			other releases within the document are left untouched.
+
+			Values are validated by the section's own form: a payload which does not match the
+			shape of the section is rejected and nothing is written.
+
+			@input section (str): preference section (one of SONADOR_USERPREF_SECTIONS)
+			@input values (dict): section values to store
+			@input version (str, default=current release): release key to write
+
+			@returns dict: `{ 'version': <release>, 'values': {...} }` as stored
+		'''
+		payload = {
+			SONADOR_USERPREF_VERSION_KEY: version or SONADOR_USERPREF_VERSION,
+			SONADOR_USERPREF_VALUES_KEY: values,
+		}
+
+		r = requests.post(self.userpref_apiurl(section=section, method='POST'), json=payload,
+			verify=self.verify_ssl(**kwargs), headers=self.sonador_request_headers(**kwargs))
+
+		if not r.ok:
+			request_client_error('Unable to update the "%s" user-preference section due to a server error.'
+				% section, r)
+
+		return server_controloperation_json_response(r).get(gcapicodes.RESULTS, {})
+
+	def _userpref_section_values(self, section, version=None, **kwargs):
+		'''	Retrieve the stored values of a preference section, discarding the release key
+			echoed back by the endpoint.
+
+			@returns dict
+		'''
+		return self.fetch_user_preference_section(section, version=version, **kwargs) \
+			.get(SONADOR_USERPREF_VALUES_KEY, {})
+
+	def _userpref_section_update(self, section, values, version=None, **kwargs):
+		'''	Write the values of a preference section and return the values as stored.
+
+			@returns dict
+		'''
+		return self.update_user_preference_section(section, values, version=version, **kwargs) \
+			.get(SONADOR_USERPREF_VALUES_KEY, {})
+
+	def fetch_general_preferences(self, version=None, **kwargs):
+		'''	Retrieve the "General" viewer preferences (`{ language }`).
+
+			@returns dict
+		'''
+		return self._userpref_section_values(SONADOR_USERPREF_GENERAL, version=version, **kwargs)
+
+	def update_general_preferences(self, values, version=None, **kwargs):
+		'''	Write the "General" viewer preferences.
+
+			@input values (dict): `{ language }`
+
+			@returns dict: values as stored
+		'''
+		return self._userpref_section_update(SONADOR_USERPREF_GENERAL, values, version=version, **kwargs)
+
+	def fetch_hotkey_preferences(self, version=None, **kwargs):
+		'''	Retrieve the "Hotkeys" viewer preferences: a map of command name to
+			`{ label, keys }`.
+
+			@returns dict
+		'''
+		return self._userpref_section_values(SONADOR_USERPREF_HOTKEYS, version=version, **kwargs)
+
+	def update_hotkey_preferences(self, values, version=None, **kwargs):
+		'''	Write the "Hotkeys" viewer preferences.
+
+			@input values (dict): map of command name to `{ label, keys }`
+
+			@returns dict: values as stored
+		'''
+		return self._userpref_section_update(SONADOR_USERPREF_HOTKEYS, values, version=version, **kwargs)
+
+	def fetch_windowlevel_preferences(self, version=None, **kwargs):
+		'''	Retrieve the "Window Level" viewer preferences: a map of preset number ("1" through
+			"10") to `{ description, window, level }`.
+
+			@returns dict
+		'''
+		return self._userpref_section_values(SONADOR_USERPREF_WINDOW_LEVEL, version=version, **kwargs)
+
+	def update_windowlevel_preferences(self, values, version=None, **kwargs):
+		'''	Write the "Window Level" viewer preferences.
+
+			@input values (dict): map of preset number to `{ description, window, level }`
+
+			@returns dict: values as stored
+		'''
+		return self._userpref_section_update(SONADOR_USERPREF_WINDOW_LEVEL, values, version=version, **kwargs)
+
+	def fetch_viewermeta_preferences(self, version=None, **kwargs):
+		'''	Retrieve the "Viewer Metadata" preferences: the four-corner overlay configuration,
+			each corner an array of `{ title, value }` entries.
+
+			@returns dict
+		'''
+		return self._userpref_section_values(SONADOR_USERPREF_VIEWER_META, version=version, **kwargs)
+
+	def update_viewermeta_preferences(self, values, version=None, **kwargs):
+		'''	Write the "Viewer Metadata" preferences.
+
+			@input values (dict): map of corner key to an array of `{ title, value }` entries
+
+			@returns dict: values as stored
+		'''
+		return self._userpref_section_update(SONADOR_USERPREF_VIEWER_META, values, version=version, **kwargs)
+
+	def fetch_studylist_preferences(self, version=None, **kwargs):
+		'''	Retrieve the study-list display configuration for the requested release: a map of
+			interface key (one of SONADOR_USERPREF_INTERFACES) to the visible filters, selected
+			columns, and column order of that interface.
+
+			@returns dict
+		'''
+		return self._userpref_section_values(SONADOR_USERPREF_STUDYLIST, version=version, **kwargs)
+
+	def update_studylist_preferences(self, values, version=None, **kwargs):
+		'''	Write the study-list display configuration for one or more interfaces.
+
+			The write merges at the interface level: each interface in `values` replaces the
+			stored configuration for that interface in full, and interfaces which are not
+			named are left as they are. This is what allows each study-list page to persist
+			its own slice without first reading back the configuration of the others.
+
+			@input values (dict): map of interface key to `{ selectedFilters, selectedColumns,
+				columnOrder }`. The upload interface has no filter row and does not accept
+				`selectedFilters`.
+			@input version (str, default=current release): release key to write
+
+			@returns dict: the complete stored configuration for the release, after the merge
+		'''
+		return self._userpref_section_update(SONADOR_USERPREF_STUDYLIST, values, version=version, **kwargs)
+
+	def update_studylist_interface_preferences(self, interface, values, version=None, **kwargs):
+		'''	Write the study-list display configuration of a single interface, leaving the other
+			interfaces untouched.
+
+			@input interface (str): interface key (one of SONADOR_USERPREF_INTERFACES)
+			@input values (dict): `{ selectedFilters, selectedColumns, columnOrder }`
+
+			@returns dict: the complete stored configuration for the release, after the merge
+		'''
+		return self.update_studylist_preferences({ interface: values }, version=version, **kwargs)
 
 
 
