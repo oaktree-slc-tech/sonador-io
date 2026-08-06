@@ -37,6 +37,7 @@ from ...apisettings import ImageCoord, ImageSpacing, ImageOrientation, ImageStac
 	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SERIES_NUMBER, DCMHEADER_OPERATORS_NAME, \
 	DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME, DCMHEADER_SERIES_DESCRIPTION, DCMHEADER_PATIENT_POSITION, \
 	DCMHEADER_SLICE_THICKNESS, DCMHEADER_SLICE_LOCATION, DCMHEADER_PIXEL_SPACING, \
+	DICOMWEB_ENDPOINT_ARCHIVE, DICOMWEB_ENDPOINT_MANAGE, \
 	DCMHEADER_BODY_PART_EXAMINED, DCM_VERSION_2021b, \
 	DCMHEADER_MODALITIES_IN_STUDY, DCM_MODALITY_SR, DCM_MODALITY_SEG, DCM_MODALITY_DOC, \
 	DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_CONTENT_DATE, DCMHEADER_CONTENT_TIME, DCMHEADER_CONTENT_DESCRIPTION, DCMHEADER_INSTANCE_NUMBER, \
@@ -483,6 +484,26 @@ class ImagingResourceMixin(SonadorResourceCacheMixin, ImagingResourceCoreMixin):
 		'''	DICOMweb URL for group ACL policies
 		'''
 		return posixpath.join(self.dicomweb_resource_url, 'acl/group')
+
+	@property
+	def dicomweb_filearchive_url(self):
+		'''	DICOMweb URL for the resource file archive, addressed by DICOM UID rather than
+			by Orthanc ID. (Compare filearchive_url, which addresses the same archive through
+			the resource's Orthanc API URL.)
+		'''
+		return posixpath.join(self.dicomweb_resource_url, DICOMWEB_ENDPOINT_ARCHIVE)
+
+	@property
+	def dicomweb_manage_url(self):
+		'''	DICOMweb URL for resource management operations, addressed by DICOM UID.
+
+			DELETE removes the resource: the endpoint resolves the UID, confirms the resource
+			exists, and answers 307 with a Location addressing the resource's own Orthanc API
+			URL, where the removal is performed. The redirect must be followed with the method
+			preserved. Registered for studies and series only, as are the DICOMweb ACL routes
+			above.
+		'''
+		return posixpath.join(self.dicomweb_resource_url, DICOMWEB_ENDPOINT_MANAGE)
 
 	@property
 	def type(self):
