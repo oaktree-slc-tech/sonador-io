@@ -1,4 +1,4 @@
-import os, imp, glob
+import os, glob
 
 
 mpath, mfilename = os.path.split(__file__)
