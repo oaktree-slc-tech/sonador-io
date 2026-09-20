@@ -1,4 +1,6 @@
 import os, posixpath, unittest, requests, logging, json, tempfile, zipfile, contextlib
+import pydicom
+from pydicom.uid import generate_uid
 from io import BytesIO
 from time import sleep
 
@@ -837,10 +839,10 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 				self.assertEqual(c_verify.text, utxt,
 					msg='Standard API PUT with comment_edit: True did not persist')
 
-	def test_comment_global_authorized_delete_standard(self, *args, **kwargs):
-		'''	Standard API DELETE with comment_edit: True. Admin creates a comment,
-			limited user attempts to delete it via the standard Orthanc endpoint.
-			Isolates DELETE from the POST bug found in create tests.
+	def test_comment_global_comment_edit_cannot_delete_other_user_standard(self, *args, **kwargs):
+		'''	Standard API DELETE with comment_edit: True but remove: False. Admin creates a
+			comment; the limited user, who is not its author, is refused (400, User field) and
+			the comment is left in place. comment_edit covers a user's own comments only.
 		'''
 		iserver, testgroup03, testuser03 = self.setupTestAuth(
 			testuser_config=TESTUSER03, testgroup_name=TESTGROUP03, **kwargs)
@@ -850,22 +852,51 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
 
 			testacl = iserver.admin_create_acl(testgroup03, {
-				'resource': '*', 'view': True, 'comment_view': True, 'comment_edit': True, 'duration': 1
+				'resource': '*', 'view': True, 'comment_view': True, 'comment_edit': True, 'remove': False, 'duration': 1
 			})
 
-			ctxt = 'Test comment: standard API delete grant probe'
+			ctxt = 'Test comment: standard API delete of another user comment without remove'
 			admin_comment = test_sx.create_comment(ctxt)
 
-			with self.getLimitedImageServer(iserver, testuser03, object_data={'description': 'Standard DELETE grant'}) as iserver_test:
+			with self.getLimitedImageServer(iserver, testuser03, object_data={'description': 'Standard DELETE other user, no remove'}) as iserver_test:
 
 				test_sx_ltd = iserver_test.get_series(test_sx.pk)
 				c_ltd = test_sx_ltd.get_comment(admin_comment.pk)
-				c_ltd.delete()
+				self._assertRemovalRefused(c_ltd)
 
-				# Verify comment is gone
+				c_admin = test_sx.get_comment(admin_comment.pk)
+				self.assertEqual(c_admin.text, ctxt,
+					msg='Comment was deleted by a non-author holding only comment_edit')
+
+	def test_comment_global_remove_deletes_other_user_standard(self, *args, **kwargs):
+		'''	Standard API DELETE with remove: True. Admin creates a comment; the limited user, who
+			is not its author, removes it and the response names the comment and the series.
+		'''
+		iserver, testgroup03, testuser03 = self.setupTestAuth(
+			testuser_config=TESTUSER03, testgroup_name=TESTGROUP03, **kwargs)
+
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			testacl = iserver.admin_create_acl(testgroup03, {
+				'resource': '*', 'view': True, 'comment_view': True, 'comment_edit': True, 'remove': True, 'duration': 1
+			})
+
+			ctxt = 'Test comment: standard API delete of another user comment with remove'
+			admin_comment = test_sx.create_comment(ctxt)
+
+			with self.getLimitedImageServer(iserver, testuser03, object_data={'description': 'Standard DELETE other user, remove'}) as iserver_test:
+
+				test_sx_ltd = iserver_test.get_series(test_sx.pk)
+				c_ltd = test_sx_ltd.get_comment(admin_comment.pk)
+				r_del = c_ltd.delete()
+
+				self._assertRemovalResponse(r_del, admin_comment.pk, 'Series', test_sx.pk)
+
 				remaining = test_sx.fetch_comments()
 				self.assertTrue(all(ctxt != _c.text for _c in remaining),
-					msg='Standard API DELETE with comment_edit: True did not remove the comment')
+					msg='Standard API DELETE with remove: True did not remove the comment')
 
 	def test_comment_global_authorized_update_dicomweb(self, *args, **kwargs):
 		'''	DICOMweb PUT with comment_edit: True. Limited user creates a comment
@@ -900,9 +931,10 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 				self.assertEqual(c_verify.text, utxt,
 					msg='DICOMweb PUT with comment_edit: True did not persist')
 
-	def test_comment_global_authorized_delete_dicomweb(self, *args, **kwargs):
-		'''	DICOMweb DELETE with comment_edit: True. Admin creates a comment,
-			limited user deletes it via the DICOMweb endpoint.
+	def test_comment_global_remove_deletes_other_user_dicomweb(self, *args, **kwargs):
+		'''	DICOMweb DELETE with remove: True. Admin creates a comment; the limited user, who is
+			not its author, removes it through the DICOMweb route. The same user is then refused
+			on a second comment once remove is withdrawn.
 		'''
 		iserver, testgroup05, testuser05 = self.setupTestAuth(
 			testuser_config=TESTUSER05, testgroup_name=TESTGROUP05, **kwargs)
@@ -912,21 +944,41 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
 
 			testacl = iserver.admin_create_acl(testgroup05, {
-				'resource': '*', 'view': True, 'comment_view': True, 'comment_edit': True, 'duration': 1
+				'resource': '*', 'view': True, 'comment_view': True, 'comment_edit': True, 'remove': True, 'duration': 1
 			})
 
-			ctxt = 'Test comment: DICOMweb delete grant probe'
+			ctxt = 'Test comment: DICOMweb delete of another user comment with remove'
+			ctxt_kept = 'Test comment: DICOMweb delete of another user comment without remove'
 			admin_comment = test_sx.create_comment(ctxt)
+			admin_comment_kept = test_sx.create_comment(ctxt_kept)
 
-			with self.getLimitedImageServer(iserver, testuser05, object_data={'description': 'DICOMweb DELETE grant'}) as iserver_test:
+			with self.getLimitedImageServer(iserver, testuser05, object_data={'description': 'DICOMweb DELETE other user, remove'}) as iserver_test:
 
 				test_sx_ltd = iserver_test.get_series(test_sx.pk)
 				c_ltd = test_sx_ltd.get_comment(admin_comment.pk, dicomweb_api=True)
-				c_ltd.delete()
+				r_del = c_ltd.delete()
+
+				self._assertRemovalResponse(r_del, admin_comment.pk, 'Series', test_sx.series_uid,
+					dicomweb_root=iserver.dicomweb_root)
 
 				remaining = test_sx.fetch_comments()
 				self.assertTrue(all(ctxt != _c.text for _c in remaining),
-					msg='DICOMweb DELETE with comment_edit: True did not remove the comment')
+					msg='DICOMweb DELETE with remove: True did not remove the comment')
+
+			# Withdraw remove and allow propagation
+			testacl.update({ 'remove': False })
+			testacl = iserver.get_acl(testacl.pk)
+			sleep(1)
+
+			with self.getLimitedImageServer(iserver, testuser05, object_data={'description': 'DICOMweb DELETE other user, no remove'}) as iserver_test2:
+
+				test_sx_ltd2 = iserver_test2.get_series(test_sx.pk)
+				c_kept = test_sx_ltd2.get_comment(admin_comment_kept.pk, dicomweb_api=True)
+				self._assertRemovalRefused(c_kept)
+
+				c_admin = test_sx.get_comment(admin_comment_kept.pk)
+				self.assertEqual(c_admin.text, ctxt_kept,
+					msg='Comment was deleted through DICOMweb by a non-author holding only comment_edit')
 
 	def test_comment_local_acl_authorized_update_delete(self, *args, **kwargs):
 		'''	Local (Orthanc resource-level) ACL with CommentEdit: True. Limited user
@@ -975,3 +1027,572 @@ class SonadorCommentPermissionTests(AclBaseTestCase):
 				remaining = test_sx.fetch_comments()
 				self.assertTrue(all(utxt != _c.text for _c in remaining),
 					msg='Local ACL DELETE with CommentEdit: True did not remove the comment')
+
+	# -----------------------------------------------------------------------
+	# Comment removal (imaging-development-env#99). The server resolves the request user on
+	# DELETE and permits removal to the author or to a holder of comment_edit on the resource;
+	# the response identifies the removed comment and its parent.
+	# -----------------------------------------------------------------------
+
+	def _assertRemovalResponse(self, r_del, comment_pk, parent_key, parent_uid, dicomweb_root=None):
+		'''	Shared assertions for a successful comment DELETE response.
+		'''
+		self.assertEqual(r_del.status_code, 200,
+			msg='Comment DELETE returned status %s. Expected: 200.' % r_del.status_code)
+
+		_json = r_del.json()
+		self.assertEqual(_json.get('ID'), comment_pk,
+			msg='Comment DELETE response does not identify the removed comment: %s' % _json)
+		self.assertEqual(_json.get(gcapi.STATUS), gcapi.SUCCESS,
+			msg='Comment DELETE response does not report success: %s' % _json)
+		self.assertEqual(_json.get(parent_key), parent_uid,
+			msg='Comment DELETE response does not identify the parent resource (%s): %s' % (parent_key, _json))
+
+		if dicomweb_root:
+			self.assertTrue(dicomweb_root in r_del.url,
+				msg='Comment DELETE request not routed through DICOMweb API endpoint')
+
+	def _assertRemovalRefused(self, comment):
+		'''	Shared assertion for a DELETE the server refuses under the removal rule: a 400 with
+			the User field in error.
+		'''
+		try:
+			comment.delete()
+			self.fail('Non-author without remove was able to delete the comment')
+		except ClientOperationError as err:
+			_details = getattr(err, 'details', {})
+			self.assertEqual(_details.get(gcapi.STATUS_CODE), 400,
+				msg='Removal refusal: incorrect status code: %s. Expected: 400.' % _details.get(gcapi.STATUS_CODE))
+
+	def test_comment_global_remove_deletes_other_user_study_standard(self, *args, **kwargs):
+		'''	Standard API DELETE on a study comment with remove: True. Admin creates the comment;
+			the limited user (not the author) removes it and the response names the comment and
+			the study.
+		'''
+		iserver, testgroup03, testuser03 = self.setupTestAuth(
+			testuser_config=TESTUSER03, testgroup_name=TESTGROUP03, **kwargs)
+
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			test_s = iserver.get_study(test_sx.parent.pk)
+
+			testacl = iserver.admin_create_acl(testgroup03, {
+				'resource': '*', 'view': True, 'comment_view': True, 'comment_edit': True, 'remove': True, 'duration': 1
+			})
+
+			ctxt = 'Test comment: study standard API delete by remove holder'
+			admin_comment = test_s.create_comment(ctxt)
+
+			with self.getLimitedImageServer(iserver, testuser03, object_data={'description': 'Study standard DELETE grant'}) as iserver_test:
+
+				test_s_ltd = iserver_test.get_study(test_sx.parent.pk)
+				c_ltd = test_s_ltd.get_comment(admin_comment.pk)
+				r_del = c_ltd.delete()
+
+				self._assertRemovalResponse(r_del, admin_comment.pk, 'Study', test_s.pk)
+
+				remaining = test_s.fetch_comments()
+				self.assertTrue(all(ctxt != _c.text for _c in remaining),
+					msg='Study comment still present after standard API DELETE')
+
+	def test_comment_global_remove_deletes_other_user_study_dicomweb(self, *args, **kwargs):
+		'''	DICOMweb DELETE on a study comment with remove: True. Admin creates the comment; the
+			limited user removes it through the DICOMweb route and the response names the comment
+			and the study's DICOM UID.
+		'''
+		iserver, testgroup05, testuser05 = self.setupTestAuth(
+			testuser_config=TESTUSER05, testgroup_name=TESTGROUP05, **kwargs)
+
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			test_s = iserver.get_study(test_sx.parent.pk)
+
+			testacl = iserver.admin_create_acl(testgroup05, {
+				'resource': '*', 'view': True, 'comment_view': True, 'comment_edit': True, 'remove': True, 'duration': 1
+			})
+
+			ctxt = 'Test comment: study DICOMweb delete by remove holder'
+			admin_comment = test_s.create_comment(ctxt)
+
+			with self.getLimitedImageServer(iserver, testuser05, object_data={'description': 'Study DICOMweb DELETE grant'}) as iserver_test:
+
+				test_s_ltd = iserver_test.get_study(test_sx.parent.pk)
+				c_ltd = test_s_ltd.get_comment(admin_comment.pk, dicomweb_api=True)
+				r_del = c_ltd.delete()
+
+				self._assertRemovalResponse(r_del, admin_comment.pk, 'Study', test_s.study_uid,
+					dicomweb_root=iserver.dicomweb_root)
+
+				remaining = test_s.fetch_comments()
+				self.assertTrue(all(ctxt != _c.text for _c in remaining),
+					msg='Study comment still present after DICOMweb DELETE')
+
+	def test_comment_global_denied_delete_study_standard(self, *args, **kwargs):
+		'''	Standard API DELETE on a study comment with comment_edit: False is refused with a
+			403 and the comment is left in place.
+		'''
+		iserver, testgroup01, testuser01 = self.setupTestAuth(
+			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
+
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			test_s = iserver.get_study(test_sx.parent.pk)
+
+			testacl = iserver.admin_create_acl(testgroup01, {
+				'resource': '*', 'view': True, 'comment_view': True, 'comment_edit': False, 'duration': 1
+			})
+
+			ctxt = 'Test comment: study delete deny probe'
+			admin_comment = test_s.create_comment(ctxt)
+
+			with self.getLimitedImageServer(iserver, testuser01, object_data={'description': 'Study DELETE deny'}) as iserver_test:
+
+				test_s_ltd = iserver_test.get_study(test_sx.parent.pk)
+				c_ltd = test_s_ltd.get_comment(admin_comment.pk)
+
+				try:
+					c_ltd.delete()
+					self.fail('Limited user able to delete study comment without comment_edit')
+				except ClientOperationError as err:
+					_details = getattr(err, 'details', {})
+					self.assertEqual(_details.get(gcapi.STATUS_CODE), 403,
+						msg='Study DELETE deny: incorrect status code: %s. Expected: 403.' % _details.get(gcapi.STATUS_CODE))
+
+				c_admin = test_s.get_comment(admin_comment.pk)
+				self.assertEqual(c_admin.text, ctxt,
+					msg='Study comment was deleted despite permission being denied')
+
+	def test_comment_local_acl_remove_deletes_other_user(self, *args, **kwargs):
+		'''	Local (Orthanc resource-level) ACL with CommentEdit and Remove lets the limited user
+			remove a comment they did not write, on both the standard and the DICOMweb route. The
+			server ACL denies every permission, so the local grant is the only thing authorizing
+			the removal. With Remove withdrawn from the local policy the same user is refused.
+		'''
+		iserver, testgroup04, testuser04 = self.setupTestAuth(
+			testuser_config=TESTUSER04, testgroup_name=TESTGROUP04, **kwargs)
+
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			testacl = iserver.admin_create_acl(testgroup04, {
+				'resource': '*', 'query': False, 'view': False, 'modify': False, 'remove': False,
+				'acl': False, 'comment_view': False, 'comment_edit': False, 'duration': 5
+			})
+
+			testacl_local = test_sx.create_group_acl(testgroup04, {
+				'View': True, 'Modify': False, 'Remove': True,
+				'CommentView': True, 'CommentEdit': True, 'ACL': False
+			})
+
+			ctxt_std = 'Test comment: local ACL removal of another user comment (standard)'
+			ctxt_dcm = 'Test comment: local ACL removal of another user comment (DICOMweb)'
+			ctxt_kept = 'Test comment: local ACL removal of another user comment without Remove'
+			admin_comment_std = test_sx.create_comment(ctxt_std)
+			admin_comment_dcm = test_sx.create_comment(ctxt_dcm)
+			admin_comment_kept = test_sx.create_comment(ctxt_kept)
+
+			with self.getLimitedImageServer(iserver, testuser04, object_data={'description': 'Local ACL DELETE of other user comment'}) as iserver_test:
+
+				test_sx_ltd = iserver_test.get_series(test_sx.pk)
+
+				c_std = test_sx_ltd.get_comment(admin_comment_std.pk)
+				r_del_std = c_std.delete()
+				self._assertRemovalResponse(r_del_std, admin_comment_std.pk, 'Series', test_sx.pk)
+
+				c_dcm = test_sx_ltd.get_comment(admin_comment_dcm.pk, dicomweb_api=True)
+				r_del_dcm = c_dcm.delete()
+				self._assertRemovalResponse(r_del_dcm, admin_comment_dcm.pk, 'Series', test_sx.series_uid,
+					dicomweb_root=iserver.dicomweb_root)
+
+				remaining = [_c.text for _c in test_sx.fetch_comments()]
+				self.assertTrue(ctxt_std not in remaining and ctxt_dcm not in remaining,
+					msg='Comments still present after local-ACL authorized DELETE: %s' % remaining)
+
+			# Withdraw Remove from the local policy; CommentEdit alone must not cover another user's comment
+			testacl_local.update({ 'Remove': False })
+			sleep(1)
+
+			with self.getLimitedImageServer(iserver, testuser04, object_data={'description': 'Local ACL DELETE of other user comment, no Remove'}) as iserver_test2:
+
+				test_sx_ltd2 = iserver_test2.get_series(test_sx.pk)
+				c_kept = test_sx_ltd2.get_comment(admin_comment_kept.pk)
+				self._assertRemovalRefused(c_kept)
+
+				c_admin = test_sx.get_comment(admin_comment_kept.pk)
+				self.assertEqual(c_admin.text, ctxt_kept,
+					msg='Comment was deleted under a local policy granting CommentEdit but not Remove')
+
+	# -----------------------------------------------------------------------
+	# Permission matrix for comment writes (imaging-development-env#99, revised rule):
+	#   comment_edit -> add; edit and remove OWN comments
+	#   remove       -> remove ANY comment; no add, no edit
+	#   modify       -> no comment write at all
+	# -----------------------------------------------------------------------
+
+	def _assertStatus(self, request_callable, status_code, msg):
+		'''	Assert that the callable is refused with the given HTTP status.
+		'''
+		try:
+			request_callable()
+			self.fail(msg)
+		except ClientOperationError as err:
+			_details = getattr(err, 'details', {})
+			self.assertEqual(_details.get(gcapi.STATUS_CODE), status_code,
+				msg='%s: incorrect status code %s. Expected: %s.' % (msg, _details.get(gcapi.STATUS_CODE), status_code))
+
+	def test_comment_remove_only_deletes_any_comment_without_add_or_edit(self, *args, **kwargs):
+		'''	A user holding `remove` but not `comment_edit` may delete any comment on the resource,
+			on the standard and the DICOMweb route, but may neither add a comment nor edit one.
+		'''
+		iserver, testgroup03, testuser03 = self.setupTestAuth(
+			testuser_config=TESTUSER03, testgroup_name=TESTGROUP03, **kwargs)
+
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			testacl = iserver.admin_create_acl(testgroup03, {
+				'resource': '*', 'view': True, 'comment_view': True, 'comment_edit': False, 'remove': True, 'duration': 1
+			})
+
+			ctxt_std = 'Test comment: removed by remove-only user (standard)'
+			ctxt_dcm = 'Test comment: removed by remove-only user (DICOMweb)'
+			ctxt_kept = 'Test comment: remove-only user may not edit this'
+			admin_std = test_sx.create_comment(ctxt_std)
+			admin_dcm = test_sx.create_comment(ctxt_dcm)
+			admin_kept = test_sx.create_comment(ctxt_kept)
+
+			with self.getLimitedImageServer(iserver, testuser03, object_data={'description': 'remove-only comment matrix'}) as iserver_test:
+
+				test_sx_ltd = iserver_test.get_series(test_sx.pk)
+
+				self._assertStatus(lambda: test_sx_ltd.create_comment('remove-only user must not add'), 403,
+					'remove-only user was able to add a comment')
+				self._assertStatus(lambda: test_sx_ltd.get_comment(admin_kept.pk).update({ 'Text': 'edited' }), 403,
+					'remove-only user was able to edit a comment')
+
+				r_del = test_sx_ltd.get_comment(admin_std.pk).delete()
+				self._assertRemovalResponse(r_del, admin_std.pk, 'Series', test_sx.pk)
+
+				r_del_dcm = test_sx_ltd.get_comment(admin_dcm.pk, dicomweb_api=True).delete()
+				self._assertRemovalResponse(r_del_dcm, admin_dcm.pk, 'Series', test_sx.series_uid,
+					dicomweb_root=iserver.dicomweb_root)
+
+			remaining = [_c.text for _c in test_sx.fetch_comments()]
+			self.assertTrue(ctxt_std not in remaining and ctxt_dcm not in remaining and ctxt_kept in remaining,
+				msg='Unexpected comments after remove-only matrix: %s' % remaining)
+
+	def test_comment_modify_only_has_no_comment_write(self, *args, **kwargs):
+		'''	A user holding imaging-resource `modify` but no comment grant and no `remove` can read
+			comments but neither add, edit nor delete them.
+		'''
+		iserver, testgroup01, testuser01 = self.setupTestAuth(
+			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
+
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			testacl = iserver.admin_create_acl(testgroup01, {
+				'resource': '*', 'view': True, 'modify': True, 'remove': False,
+				'comment_view': True, 'comment_edit': False, 'duration': 1
+			})
+
+			ctxt = 'Test comment: modify-only user must not touch this'
+			admin_comment = test_sx.create_comment(ctxt)
+
+			with self.getLimitedImageServer(iserver, testuser01, object_data={'description': 'modify-only comment matrix'}) as iserver_test:
+
+				test_sx_ltd = iserver_test.get_series(test_sx.pk)
+				self.assertTrue(any(ctxt == c.text for c in test_sx_ltd.fetch_comments()),
+					msg='modify-only user with comment_view could not read comments')
+
+				c_ltd = test_sx_ltd.get_comment(admin_comment.pk)
+				self._assertStatus(lambda: test_sx_ltd.create_comment('modify-only user must not add'), 403,
+					'modify-only user was able to add a comment')
+				self._assertStatus(lambda: c_ltd.update({ 'Text': 'edited' }), 403,
+					'modify-only user was able to edit a comment')
+				self._assertStatus(lambda: c_ltd.delete(), 403,
+					'modify-only user was able to delete a comment')
+
+			self.assertEqual(test_sx.get_comment(admin_comment.pk).text, ctxt,
+				msg='Comment changed by a modify-only user')
+
+	def test_comment_edit_cannot_update_other_user_comment(self, *args, **kwargs):
+		'''	Editing stays author-only: a comment manager, even one who also holds `remove`, is
+			refused (400, User field) when changing another user's text, and the text is unchanged.
+		'''
+		iserver, testgroup03, testuser03 = self.setupTestAuth(
+			testuser_config=TESTUSER03, testgroup_name=TESTGROUP03, **kwargs)
+
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			testacl = iserver.admin_create_acl(testgroup03, {
+				'resource': '*', 'view': True, 'comment_view': True, 'comment_edit': True, 'remove': True, 'duration': 1
+			})
+
+			ctxt = 'Test comment: author-only editing'
+			admin_comment = test_sx.create_comment(ctxt)
+
+			with self.getLimitedImageServer(iserver, testuser03, object_data={'description': 'author-only edit'}) as iserver_test:
+
+				test_sx_ltd = iserver_test.get_series(test_sx.pk)
+				self._assertStatus(lambda: test_sx_ltd.get_comment(admin_comment.pk).update({ 'Text': 'edited by another user' }), 400,
+					'Another user was able to edit the comment')
+				self._assertStatus(lambda: test_sx_ltd.get_comment(admin_comment.pk, dicomweb_api=True).update({ 'Text': 'edited via DICOMweb' }), 400,
+					'Another user was able to edit the comment through DICOMweb')
+
+			self.assertEqual(test_sx.get_comment(admin_comment.pk).text, ctxt,
+				msg='Comment text changed by a non-author')
+
+	def test_comment_owner_loses_write_after_comment_edit_revoked(self, *args, **kwargs):
+		'''	Authorship does not survive revocation: once `comment_edit` is withdrawn, the author can
+			no longer edit or remove their own comment (403 from the outer authorization).
+		'''
+		iserver, testgroup05, testuser05 = self.setupTestAuth(
+			testuser_config=TESTUSER05, testgroup_name=TESTGROUP05, **kwargs)
+
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			testacl = iserver.admin_create_acl(testgroup05, {
+				'resource': '*', 'view': True, 'comment_view': True, 'comment_edit': True, 'remove': False, 'duration': 1
+			})
+
+			ctxt = 'Test comment: written before revocation'
+
+			with self.getLimitedImageServer(iserver, testuser05, object_data={'description': 'before revocation'}) as iserver_test:
+				own = iserver_test.get_series(test_sx.pk).create_comment(ctxt)
+
+			testacl.update({ 'comment_edit': False })
+			testacl = iserver.get_acl(testacl.pk)
+			sleep(1)
+
+			with self.getLimitedImageServer(iserver, testuser05, object_data={'description': 'after revocation'}) as iserver_test2:
+				c_own = iserver_test2.get_series(test_sx.pk).get_comment(own.pk)
+				self._assertStatus(lambda: c_own.update({ 'Text': 'edited after revocation' }), 403,
+					'Author edited their comment after comment_edit was revoked')
+				self._assertStatus(lambda: c_own.delete(), 403,
+					'Author removed their comment after comment_edit was revoked')
+
+			self.assertEqual(test_sx.get_comment(own.pk).text, ctxt,
+				msg='Comment changed after revocation')
+
+	def test_comment_wrong_parent_is_not_found(self, *args, **kwargs):
+		'''	A comment addressed through a resource it does not belong to is not found (404), so a
+			grant on one resource cannot reach comments of another. Uses a study comment addressed
+			through the series route.
+		'''
+		iserver, testgroup03, testuser03 = self.setupTestAuth(
+			testuser_config=TESTUSER03, testgroup_name=TESTGROUP03, **kwargs)
+
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			test_s = iserver.get_study(test_sx.parent.pk)
+			testacl = iserver.admin_create_acl(testgroup03, {
+				'resource': '*', 'view': True, 'comment_view': True, 'comment_edit': True, 'remove': True, 'duration': 1
+			})
+
+			ctxt = 'Test comment: study comment addressed through the series route'
+			study_comment = test_s.create_comment(ctxt)
+
+			with self.getLimitedImageServer(iserver, testuser03, object_data={'description': 'wrong parent'}) as iserver_test:
+				test_sx_ltd = iserver_test.get_series(test_sx.pk)
+				wrong_url = iserver_test.orthanc_apiurl(posixpath.join(test_sx_ltd.comments_url, study_comment.pk))
+				headers = iserver_test.orthanc_request_headers()
+
+				self.assertEqual(requests.get(wrong_url, headers=headers).status_code, 404)
+				self.assertEqual(requests.delete(wrong_url, headers=headers).status_code, 404)
+
+			self.assertEqual(test_s.get_comment(study_comment.pk).text, ctxt,
+				msg='Study comment affected through the series route')
+
+	# -----------------------------------------------------------------------
+	# Parent binding, sibling isolation, mixed policies, and update preservation
+	# -----------------------------------------------------------------------
+
+	@contextlib.contextmanager
+	def _siblingSeries(self, iserver, test_sx, r_archive):
+		'''	Stage a second series in the same study as `test_sx`: the archive's first DICOM file,
+			re-identified with a fresh SeriesInstanceUID and SOPInstanceUID under the study's UID.
+			Removes the series on exit.
+		'''
+		with zipfile.ZipFile(BytesIO(r_archive.content)) as zf:
+			name = next(n for n in zf.namelist() if not n.endswith('/'))
+			ds = pydicom.dcmread(BytesIO(zf.read(name)))
+
+		ds.StudyInstanceUID = test_sx.parent.study_uid
+		ds.SeriesInstanceUID = generate_uid()
+		ds.SOPInstanceUID = generate_uid()
+		ds.SeriesDescription = 'Sibling series for isolation test'
+		ds.SeriesNumber = 99
+
+		stream = BytesIO()
+		ds.save_as(stream)
+		stream.seek(0)
+		iserver.upload_image(stream)
+		sleep(0.25)
+
+		results = iserver.query({ DCMHEADER_SERIES_INSTANCE_UID: ds.SeriesInstanceUID }, rapid_lookup=False)
+		self.assertEqual(len(results), 1, msg='Unable to retrieve the staged sibling series')
+		sibling = results[0]
+
+		try:
+			yield sibling
+		finally:
+			try: sibling.delete()
+			except Exception as err:
+				logger.warning('Unable to remove sibling series %s: %s' % (sibling.pk, err))
+
+	def test_comment_series_grant_does_not_reach_sibling_series(self, *args, **kwargs):
+		'''	A local policy on series A (with Remove) lets the user remove A's comments but gives no
+			access to sibling series B in the same study: B's comment is not reachable through B's
+			own route (403), nor through A's route with B's comment id (404, same table), on the
+			standard and DICOMweb routes. B's comment is unchanged.
+		'''
+		iserver, testgroup04, testuser04 = self.setupTestAuth(
+			testuser_config=TESTUSER04, testgroup_name=TESTGROUP04, **kwargs)
+
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (series_a, test_hache):
+			with self._siblingSeries(iserver, series_a, r_cx) as series_b:
+
+				testacl = iserver.admin_create_acl(testgroup04, {
+					'resource': '*', 'query': False, 'view': False, 'modify': False, 'remove': False,
+					'acl': False, 'comment_view': False, 'comment_edit': False, 'duration': 5
+				})
+				testacl_local = series_a.create_group_acl(testgroup04, {
+					'View': True, 'Modify': False, 'Remove': True,
+					'CommentView': True, 'CommentEdit': True, 'ACL': False
+				})
+
+				ctxt_a = 'Test comment: on series A, removable through the local grant'
+				ctxt_b = 'Test comment: on sibling series B, out of reach'
+				comment_a = series_a.create_comment(ctxt_a)
+				comment_b = series_b.create_comment(ctxt_b)
+
+				with self.getLimitedImageServer(iserver, testuser04, object_data={'description': 'sibling isolation'}) as iserver_test:
+
+					headers = iserver_test.orthanc_request_headers()
+					a_ltd = iserver_test.get_series(series_a.pk)
+
+					# A's own comment is reachable and removable
+					self.assertEqual(a_ltd.get_comment(comment_a.pk).text, ctxt_a)
+
+					# B through its own routes: no grant, so the outer authorization refuses
+					b_std = iserver_test.orthanc_apiurl(posixpath.join(series_b.comments_url, comment_b.pk))
+					b_dcm = iserver_test.orthanc_apiurl(posixpath.join(series_b.dicomweb_comments_url, comment_b.pk))
+					for url in (b_std, b_dcm):
+						self.assertEqual(requests.get(url, headers=headers).status_code, 403, msg=url)
+						self.assertEqual(requests.put(url, headers=headers, json={ 'Text': 'x' }).status_code, 403, msg=url)
+						self.assertEqual(requests.delete(url, headers=headers).status_code, 403, msg=url)
+
+					# B's comment id through A's routes: same table, wrong parent, not found
+					a_std = iserver_test.orthanc_apiurl(posixpath.join(series_a.comments_url, comment_b.pk))
+					a_dcm = iserver_test.orthanc_apiurl(posixpath.join(series_a.dicomweb_comments_url, comment_b.pk))
+					for url in (a_std, a_dcm):
+						self.assertEqual(requests.get(url, headers=headers).status_code, 404, msg=url)
+						self.assertEqual(requests.put(url, headers=headers, json={ 'Text': 'x' }).status_code, 404, msg=url)
+						self.assertEqual(requests.delete(url, headers=headers).status_code, 404, msg=url)
+
+					# and A's comment is removable by the local Remove grant
+					r_del = a_ltd.get_comment(comment_a.pk).delete()
+					self._assertRemovalResponse(r_del, comment_a.pk, 'Series', series_a.pk)
+
+				self.assertEqual(series_b.get_comment(comment_b.pk).text, ctxt_b,
+					msg="Sibling series' comment was changed")
+
+	def test_comment_global_remove_survives_local_comment_edit_deny(self, *args, **kwargs):
+		'''	Mixed policy: a global `remove` grant with a local policy that denies CommentEdit on the
+			series. The user still removes another user's comment (the remove arm is evaluated
+			independently) but cannot add or edit (the comment-management arm is denied locally).
+		'''
+		iserver, testgroup01, testuser01 = self.setupTestAuth(
+			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
+
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			testacl = iserver.admin_create_acl(testgroup01, {
+				'resource': '*', 'view': True, 'comment_view': True, 'comment_edit': True, 'remove': True, 'duration': 1
+			})
+			testacl_local = test_sx.create_group_acl(testgroup01, {
+				'View': True, 'Modify': False, 'Remove': False,
+				'CommentView': True, 'CommentEdit': False, 'ACL': False
+			})
+
+			ctxt_std = 'Test comment: removed under global remove despite local CommentEdit deny (standard)'
+			ctxt_dcm = 'Test comment: removed under global remove despite local CommentEdit deny (DICOMweb)'
+			ctxt_kept = 'Test comment: not editable under local CommentEdit deny'
+			admin_std = test_sx.create_comment(ctxt_std)
+			admin_dcm = test_sx.create_comment(ctxt_dcm)
+			admin_kept = test_sx.create_comment(ctxt_kept)
+
+			with self.getLimitedImageServer(iserver, testuser01, object_data={'description': 'mixed policy'}) as iserver_test:
+
+				test_sx_ltd = iserver_test.get_series(test_sx.pk)
+
+				self._assertStatus(lambda: test_sx_ltd.create_comment('must not add under local deny'), 403,
+					'User added a comment despite the local CommentEdit deny')
+				self._assertStatus(lambda: test_sx_ltd.get_comment(admin_kept.pk).update({ 'Text': 'edited' }), 403,
+					'User edited a comment despite the local CommentEdit deny')
+
+				r_del = test_sx_ltd.get_comment(admin_std.pk).delete()
+				self._assertRemovalResponse(r_del, admin_std.pk, 'Series', test_sx.pk)
+
+				r_del_dcm = test_sx_ltd.get_comment(admin_dcm.pk, dicomweb_api=True).delete()
+				self._assertRemovalResponse(r_del_dcm, admin_dcm.pk, 'Series', test_sx.series_uid,
+					dicomweb_root=iserver.dicomweb_root)
+
+			remaining = [_c.text for _c in test_sx.fetch_comments()]
+			self.assertTrue(ctxt_std not in remaining and ctxt_dcm not in remaining and ctxt_kept in remaining,
+				msg='Unexpected comments after mixed-policy removal: %s' % remaining)
+
+	def test_comment_text_only_update_keeps_meta(self, *args, **kwargs):
+		'''	Updating the text leaves the comment's metadata, author and creation time untouched and
+			moves the modification time, on both routes.
+		'''
+		iserver, testgroup03, testuser03 = self.setupTestAuth(
+			testuser_config=TESTUSER03, testgroup_name=TESTGROUP03, **kwargs)
+
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			testacl = iserver.admin_create_acl(testgroup03, {
+				'resource': '*', 'view': True, 'comment_view': True, 'comment_edit': True, 'duration': 1
+			})
+
+			with self.getLimitedImageServer(iserver, testuser03, object_data={'description': 'text-only update'}) as iserver_test:
+
+				test_sx_ltd = iserver_test.get_series(test_sx.pk)
+				meta = { 'Tag': 'qc.accept', 'Score': 3 }
+
+				for dicomweb_api in (False, True):
+					c = test_sx_ltd.create_comment('original text', data={ 'Meta': meta }, dicomweb_api=dicomweb_api)
+					before = test_sx_ltd.get_comment(c.pk, dicomweb_api=dicomweb_api)
+					self.assertEqual(before.meta, meta)
+
+					sleep(1.1)
+					before.update({ 'Text': 'revised text' })
+
+					after = test_sx_ltd.get_comment(c.pk, dicomweb_api=dicomweb_api)
+					self.assertEqual(after.text, 'revised text')
+					self.assertEqual(after.meta, meta, msg='Metadata lost on a text-only update (dicomweb=%s)' % dicomweb_api)
+					self.assertEqual(after._objectdata.get('User', {}).get('id'), before._objectdata.get('User', {}).get('id'))
+					self.assertEqual(after._objectdata.get('Created'), before._objectdata.get('Created'))
+					self.assertNotEqual(after._objectdata.get('LastUpdate'), before._objectdata.get('LastUpdate'))

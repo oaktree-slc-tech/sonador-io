@@ -686,7 +686,7 @@ class ImagingServerChildCollectionFetchMixin:
 		if not error_msg:
 			error_msg = lambda r: request_client_error(
 				'Unable to retrieve %s=%s from PACS server %s (url="%s"). Status code: %s' % (
-					cls.model.__name__, pacs.server_label, r.request.url, r.status_code
+					cls.model.__name__, objectid, pacs.server_label, r.request.url, r.status_code
 				), r)
 
 		def fetch_modelinstance(resource_endpoint, *_args, **_kwargs):
