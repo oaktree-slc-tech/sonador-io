@@ -667,3 +667,51 @@ class SonadorAccessControlApiTests(AclBaseTestCase):
 				self.assertTrue('Group' in _errors, msg='Error response does not contain "Group" entry.')
 				self.assertTrue(any(_e.get(gapi.CODE) == gapi.VALIDATION_APICODE_INVALID for _e in _errors.get('Group', [])),
 					msg='Unable to locate "%s" error for Group, despite using a group for the policy not associated with the server.' % gapi.VALIDATION_APICODE_INVALID)
+
+	def test_group_acl_listing_omits_policies_of_deleted_groups(self, *args, **kwargs):
+		'''	A policy whose group has since been removed from Sonador is not listed with the resource's
+			group policies (and is logged by Orthanc), while the other policies are still listed and
+			described. The stale policy can still be removed by id.
+		'''
+		iserver, testgroup01, testuser01 = self.setupTestAuth(
+			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
+
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			throwaway = iserver.server.admin_create_group('testgroup-acl-deleted-%s' % create_token()[:8])
+			policy = { 'View': True, 'Modify': False, 'Remove': False, 'CommentView': True, 'CommentEdit': False, 'ACL': False }
+
+			# A local policy can only be granted to a group associated with the server
+			iserver.admin_create_acl(testgroup01, { 'resource': '*', 'view': True, 'duration': 1 })
+			iserver.admin_create_acl(throwaway, { 'resource': '*', 'view': True, 'duration': 1 })
+
+			acl_kept = test_sx.create_group_acl(testgroup01, policy)
+			acl_stale = test_sx.create_group_acl(throwaway, policy)
+
+			# Both listing routes must agree: the Orthanc-id route and the DICOMweb route (the one the
+			# viewer's Share Access dialog reads)
+			def listed(**fetch_kwargs):
+				return { p._objectdata.get('Group', {}).get('id'): p for p in test_sx.fetch_group_acl(**fetch_kwargs) }
+
+			for route in ({}, { 'dicomweb_api': True }):
+				before = listed(**route)
+				self.assertIn(testgroup01.pk, before)
+				self.assertIn(throwaway.pk, before)
+				self.assertEqual(before[throwaway.pk]._objectdata['Group'].get('name'), throwaway.name)
+
+			# The group disappears from Sonador; its Orthanc policy row remains
+			throwaway.delete()
+
+			try:
+				for route in ({}, { 'dicomweb_api': True }):
+					after = listed(**route)
+					self.assertNotIn(throwaway.pk, after, msg='Policy for a deleted group was still listed (%s)' % (route or 'orthanc-id route'))
+					self.assertIn(testgroup01.pk, after, msg='Policy for a live group was dropped alongside the stale one (%s)' % (route or 'orthanc-id route'))
+					self.assertEqual(after[testgroup01.pk]._objectdata['Group'].get('name'), testgroup01.name)
+
+			finally:
+				# The stale row is removable by id even though its group cannot be described
+				acl_stale.delete()
+				acl_kept.delete()
