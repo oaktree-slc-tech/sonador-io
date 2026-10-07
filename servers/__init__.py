@@ -1621,6 +1621,62 @@ class SonadorImagingServer(OrthancServerAuthDataCollectionMixin, OrthancServerBa
 		return orthanc_group.get_tag(uid, 
 			**omit(kwargs, ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')))
 
+	def _orthanc_group_for(self, group, **kwargs):
+		'''	Orthanc group proxy for a Sonador group instance
+		'''
+		group_datacollection_class = self._group_datacollection_class(**kwargs)
+		orthanc_group_datamodel_class = self._orthanc_group_datamodel_class(**kwargs)
+
+		if not isinstance(group, group_datacollection_class.model):
+			raise TypeError('Invalid group instance, must be of type %s' % group_datacollection_class.model.__name__)
+
+		return orthanc_group_datamodel_class(self, group)
+
+	def fetch_display_attributes(self, group, **kwargs):
+		'''	Retrieve the display attributes of the provided group
+		'''
+		return self._orthanc_group_for(group, **kwargs).fetch_display_attributes(
+			**omit(kwargs, ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')))
+
+	def create_display_attribute(self, group, code, label=None, **kwargs):
+		'''	Add a display attribute to the provided group
+
+			@input code (str): DICOM tag code; must be indexed by the imaging server
+			@input label (str): optional display label
+		'''
+		return self._orthanc_group_for(group, **kwargs).create_display_attribute(code, label=label,
+			**omit(kwargs, ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')))
+
+	def get_display_attribute(self, group, uid, *args, **kwargs):
+		'''	Retrieve one display attribute of the provided group
+		'''
+		return self._orthanc_group_for(group, **kwargs).get_display_attribute(uid, *args,
+			**omit(kwargs, ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')))
+
+	def update_display_attribute(self, group, uid, label, **kwargs):
+		'''	Change the display name of a display attribute
+		'''
+		return self.get_display_attribute(group, uid, **kwargs).relabel(label)
+
+	def delete_display_attribute(self, group, uid, **kwargs):
+		'''	Remove a display attribute from the provided group
+		'''
+		return self.get_display_attribute(group, uid, **kwargs).delete()
+
+	def fetch_display_attributes_aggregate(self, **kwargs):
+		'''	Retrieve the groups whose display attributes the current user may use and the de-duplicated
+			union of their definitions: `{ 'groups': [{ id, name, manage }], 'tags': [...] }`
+		'''
+		r = self._request_get(
+			self.orthanc_apiurl('/display-attributes'),
+			lambda r: request_client_error('Unable to retrieve display attributes for server %s. Status code: %s.' % (
+					self.server_label, r.status_code
+				), r),
+			headers=self.orthanc_request_headers(**kwargs), **omit(kwargs, ('headers',)))
+
+		rdata = r.json()
+		return { 'groups': rdata.get('groups', []), 'tags': rdata.get('tags', []) }
+
 	@property
 	def reviewer_worklist_item_class(self):
 		'''	Model collection class to use for worklist items

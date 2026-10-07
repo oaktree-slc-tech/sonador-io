@@ -42,9 +42,20 @@ class OrthancGroup:
 		return posixpath.join(self.resource_url, 'tags')
 
 	@property
+	def display_attributes_url(self):
+		'''	URL for the display attributes curated by the group
+		'''
+		return posixpath.join(self.resource_url, 'display-attributes')
+
+	@property
 	def tags_modelcollection_class(self):
 		from .tags import TagCollection
 		return TagCollection
+
+	@property
+	def display_attributes_modelcollection_class(self):
+		from .displayattrs import DisplayAttributeCollection
+		return DisplayAttributeCollection
 
 	def fetch_tags(self, **kwargs):
 		'''	Retrieve tags for the group
@@ -76,3 +87,25 @@ class OrthancGroup:
 			@returns tag instance
 		'''
 		return self.tags_modelcollection_class.fetch_modelinstance(self, uid, *args, **kwargs)
+
+	def fetch_display_attributes(self, **kwargs):
+		'''	Retrieve the display attributes of the group
+		'''
+		return self.display_attributes_modelcollection_class.fetch(parent=self, **kwargs)
+
+	def create_display_attribute(self, code, label=None, **kwargs):
+		'''	Add a display attribute to the group
+
+			@input code (str): DICOM tag code, e.g. `0018,1030`, `(0018,1030)` or `00181030`
+			@input label (str): optional display label
+		'''
+		_data = { 'Code': code }
+		if label:
+			_data['Label'] = label
+
+		return self.display_attributes_modelcollection_class.create(self, _data, **kwargs)
+
+	def get_display_attribute(self, uid, *args, **kwargs):
+		'''	Retrieve one display attribute of the group by its ID
+		'''
+		return self.display_attributes_modelcollection_class.fetch_modelinstance(self, uid, *args, **kwargs)

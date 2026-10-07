@@ -66,6 +66,13 @@ TESTUSER05_ATTRS = {
 }
 TESTUSER05 = AclTestUser(TESTUSER05_USERNAME, TESTUSER05_ATTRS)
 
+TESTUSER_STAFF_USERNAME = 'testuser-acl-staff'
+TESTUSER_STAFF_ATTRS = {
+	'email': '%s@example.com' % TESTUSER_STAFF_USERNAME, 'first_name': 'ACL Staff', 'last_name': 'User',
+	'is_superuser': False, 'is_staff': True,
+}
+TESTUSER_STAFF = AclTestUser(TESTUSER_STAFF_USERNAME, TESTUSER_STAFF_ATTRS)
+
 
 
 TEST_DATA_SERIES_DESCRIPTION_TEMPLATE = 'ACL Test Data / Study%d / Series%d'
