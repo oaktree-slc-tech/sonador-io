@@ -28,24 +28,27 @@ class SonadorTagsApiTests(AclBaseTestCase):
 		'''
 		iserver = self.getImageServer()
 
-		# Remove all policies associated with test user or groups
+		# Remove tags created by test methods, then the policies. A group's tags are reachable
+		# only while the group has a policy on the server, and a removal requires Series Tags to be
+		# enabled on that policy, even for the administrator.
 		testgroup01 = iserver.server.admin_create_group(self.testgroup01)
 		testgroup02 = iserver.server.admin_create_group(self.testgroup02)
 		_group_ids = set((testgroup01.pk, testgroup02.pk))
 
 		for _acl_policy in iserver.fetch_acl():
-			if _acl_policy.group in _group_ids:
-				_acl_policy.delete()
+			if _acl_policy.group not in _group_ids:
+				continue
 
-		# Remove tags created by test methods
-		for g in (testgroup01, testgroup02):
-
-			try: 
-				for _t in iserver.fetch_tags(g):
+			try:
+				_acl_policy.update({ 'tag': True })
+				for _t in iserver.fetch_tags(testgroup01 if _acl_policy.group == testgroup01.pk else testgroup02):
 					_t.delete()
-			
+
 			except Exception as err:
-				logger.warning('Unable to remove tags for group=%s due to an error. Error:\n%s' % (g.pk, err))
+				logger.warning('Unable to remove tags for group=%s due to an error. Error:\n%s' % (_acl_policy.group, err))
+
+			finally:
+				_acl_policy.delete()
 
 	def test_tag_management(self, *args, **kwargs):
 		'''	Ensure that it is possible to create and manage DICOM tags
@@ -59,8 +62,9 @@ class SonadorTagsApiTests(AclBaseTestCase):
 		iserver, testgroup, testuser = self.setupTestAuth(
 			testuser_config=TESTUSER01, testgroup_name=self.testgroup01, **kwargs)
 
-		# Create server policy to associate the group with the image server
-		testacl = iserver.admin_create_acl(testgroup, { 'resource': '*', 'duration': 1 })
+		# Create server policy to associate the group with the image server; Series Tags must be
+		# enabled on it before anyone, the administrator included, may create or remove tags
+		testacl = iserver.admin_create_acl(testgroup, { 'resource': '*', 'duration': 1, 'tag': True, 'tag_modify': True })
 
 		# Create tag via API
 		try: tag0 = iserver.create_tag(testgroup, TEST_IMG_ACCEPT)
