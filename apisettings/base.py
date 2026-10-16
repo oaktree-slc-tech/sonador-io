@@ -655,12 +655,23 @@ DCMSR_GEOMETRIC_SUPPORTED_MEANING = OrderedDict((
 ))
 
 
-DCMSR_UNITS_MM = dcmcodes.UCUM.mm
+# pydicom 3 keys the UCUM dictionary by keyword ("Millimeter"); the code value is still "mm"
+DCMSR_UNITS_MM = dcmcodes.UCUM.Millimeter
 DCMSR_UNITS_ANGLE_DEGREE = dcmcodes.UCUM.Degree
 DCMSR_UNITS_ANGLE_RADIAN = dcmcodes.UCUM.Radian
 
 DCMHEADER_SR_CONTENT_SEQUENCE = 'ContentSequence'
 DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE = 'PertinentOtherEvidenceSequence'
+DCMHEADER_SR_CURRENT_REQUESTED_PROCEDURE_EVIDENCE_SEQUENCE = 'CurrentRequestedProcedureEvidenceSequence'
+
+# Sequences in which a DICOM-SR document records its evidence. highdicom >= 0.23 files evidence
+# from the report's own study in the Current Requested Procedure Evidence Sequence and evidence
+# from other studies in the Pertinent Other Evidence Sequence; reports written with older
+# releases hold all evidence in the latter. Readers must consult both.
+DCMHEADER_SR_EVIDENCE_SEQUENCES = (
+	DCMHEADER_SR_CURRENT_REQUESTED_PROCEDURE_EVIDENCE_SEQUENCE,
+	DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE,
+)
 DCMHEADER_SR_REF_SERIES_SEQ = 'ReferencedSeriesSequence'
 DCMHEADER_SR_REF_INSTANCE_SEQ = 'ReferencedInstanceSequence'
 DCMHEADER_SR_REF_IMAGES_SEQ = 'ReferencedImageSequence'

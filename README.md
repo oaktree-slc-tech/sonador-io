@@ -7,7 +7,7 @@ Dependencies:
 
 * [Guru Client Library](https://code.oak-tree.tech/guru-labs/guru-client): provides [client models](https://code.oak-tree.tech/django-apps/guru/-/wikis/dev.client-tools) for interacting with Sonador/Orthanc APIs using [REST-like patterns](https://code.oak-tree.tech/django-apps/guru/-/wikis/dev.data-models).
 * [`pydicom`](https://pydicom.github.io/): tools for parsing DICOM (Digital Imagingin Medicine) data and interfacing with pixel/payload data via [`numpy`](https://numpy.org/).
-* [`highdicom`](https://github.com/ImagingDataCommons/highdicom): high-level DICOM abstractions for the Python programming language. Provides tools for parsing segmentation (`SEG`) and structured reporting (`SR`) documents so that thtey can be consumed from `numpy`.
+* [`highdicom`](https://github.com/ImagingDataCommons/highdicom): high-level DICOM abstractions for the Python programming language. Provides tools for parsing segmentation (`SEG`) and structured reporting (`SR`) documents so that they can be consumed from `numpy`. **The client requires the [Oak-Tree fork of highdicom](https://code.oak-tree.tech/oak-tree/medical-imaging/highdicom)** (published to the Sonador package repository as `highdicom==<upstream version>.postN`), which adds the `record_instances` option used when writing DICOM-SR documents. Importing the SR helpers with a stock highdicom raises an `ImportError` explaining how to install the fork (see `dcmcompat.py`).
 
 
 
@@ -18,7 +18,9 @@ Pre-built binaries of the client library are available from the [Sonador Python 
 pip install sonador --extra-index-url https://code.oak-tree.tech/api/v4/projects/335/packages/pypi/simple
 ```
 
-To install from source, clone this repository and install the dependencies.
+To install from source, clone this repository and install the dependencies (`pip install -r requirements.txt`). The `--extra-index-url` in `requirements.txt` points at the Sonador package repository, which provides the Oak-Tree highdicom fork and the Guru client.
+
+Version 0.5 requires Python 3.10+ and pydicom 3 (`pydicom>=3.0.1`, `highdicom==0.28.2.post1`; the fork build is pinned exactly because a compatible-release specifier would also admit stock 0.28.x releases). The 0.4 line remains the pydicom 2 release series.
 
 
 

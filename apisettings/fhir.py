@@ -1,7 +1,7 @@
 '''	FHIR constants, data structures, and encoding primitives for Sonador.
 '''
 
-import functools, usaddress
+import functools
 from collections import OrderedDict
 from client.utils.object import pick, omit
 
@@ -254,6 +254,9 @@ class SonadorFhirAddress:
 
 		# Parse to address components		
 		components = components or OrderedDict()
+		# Imported lazily: usaddress pulls in the compiled python-crfsuite package, which is only
+		# needed when free-text addresses are parsed (not by the DICOM/imaging code paths).
+		import usaddress
 		addr_tags, addr_type = usaddress.tag(text)
 		
 		for t,v in addr_tags.items():

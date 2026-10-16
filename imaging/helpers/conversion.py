@@ -14,6 +14,7 @@ from pydicom.uid import generate_uid, RLELossless
 
 from client.utils.object import gextend, pick
 
+from ...dcmcompat import dcm_transfer_syntax, dcm_set_original_encoding, dcm_encoding_from_transfer_syntax
 from ...apisettings import DCM_PREAMBLE, DCMHEADER_SOP_CLASS_UID, DCMHEADER_MEDIA_STORAGE_SOP_CLASS_UID, \
 	DCMHEADER_IMPLEMENTATION_CLASS_UID, DCMHEADER_TRANSFER_SYNTAX_UID, DCM_MEDIA_STORAGE_SECONDARY_CAPTURE, \
 	DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_MEDIA_STORAGE_SOP_INSTANCE_UID, DCM_DATE_STRFORMAT, DCM_TIME_STRFORMAT, \
@@ -176,16 +177,27 @@ def dcm_encode_filedata(dcm_attrs: dict, dcm_file=None, dcmfile_meta=None, dcm_p
 		@input dcm_little_endian (bool, default=True): indicates whether the dataset is using a Little Endian
 			VR transfer syntax which is an uncompressed (native) transfer syntax. When in use Little Endian Impmlicit
 			VR implies that there is not compression of the Pixel Data.
+		@input dcm_implicit_vr (bool, default=True): indicates whether value representations are implicit.
+			Together with `dcm_little_endian` this selects the Transfer Syntax UID recorded in the file meta
+			when `dcmfile_meta` does not already provide one.
 
 		@returns pydicom.FileDataset
 	'''
 	# Create DICOM file metadata
 	dcmfile_meta, sopclass_uid, sop_instance_uid = dcm_encode_filemeta(dcm_attrs, dcmfile_meta=dcmfile_meta, **kwargs)
 
-	# Create file dataset from meta
+	# Record the transfer syntax. pydicom 3 derives the encoding used by `save_as` from the
+	# Transfer Syntax UID in the file meta (the `is_little_endian`/`is_implicit_VR` flags are
+	# deprecated and no longer consulted when writing).
+	if not getattr(dcmfile_meta, DCMHEADER_TRANSFER_SYNTAX_UID, None):
+		setattr(dcmfile_meta, DCMHEADER_TRANSFER_SYNTAX_UID,
+			dcm_transfer_syntax(little_endian=dcm_little_endian, implicit_vr=dcm_implicit_vr))
+
+	# Create file dataset from meta. `save_as` refuses to convert between byte orders, so the
+	# dataset's original encoding is aligned with the (possibly caller-provided) transfer syntax;
+	# otherwise a big endian request could not be written.
 	ds = FileDataset(dcm_file or BytesIO(), {}, file_meta=dcmfile_meta, preamble=dcm_preamble)
-	ds.is_little_endian = dcm_little_endian
-	ds.is_implicit_VR = dcm_implicit_vr
+	dcm_set_original_encoding(ds)
 
 	# Content timestamp
 	ts = dcm_ts or datetime.datetime.now()
@@ -283,11 +295,15 @@ def array2dcmimg(arr: np.ndarray, photometric_interpretation=DCM_PHOTOMETRIC_INT
 		if not dcm_compression in DCM_COMPRESSION_SUPPORTED:
 			raise ValueError('Unsupported compression type: %s' % str(dcm_compression))
 
-		# Apply compression
+		# Apply compression. Encapsulated transfer syntaxes are explicit VR little endian; realign
+		# the dataset encoding with the transfer syntax selected by the compressor.
 		ds.compress(dcm_compression, arr)
+		dcm_set_original_encoding(ds)
 
-	# Save uncompressed image
+	# Save uncompressed image. Native pixel data is encoded in the byte order of the transfer syntax.
 	else:
-		setattr(ds, DCMHEADER_IMG_PIXELDATA, arr.tobytes())
+		_, little_endian = dcm_encoding_from_transfer_syntax(ds.file_meta.TransferSyntaxUID)
+		byteorder = '<' if little_endian else '>'
+		setattr(ds, DCMHEADER_IMG_PIXELDATA, arr.astype(arr.dtype.newbyteorder(byteorder), copy=False).tobytes())
 
 	return ds

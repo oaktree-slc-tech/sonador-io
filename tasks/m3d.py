@@ -1,6 +1,6 @@
 '''	Helper methods for the encoding of 3D STL files to DICOM
 '''
-import os, logging, posixpath, yaml, requests, datetime, itertools, copy, array
+import os, logging, posixpath, requests, datetime, itertools, copy, array
 from collections import OrderedDict
 
 from io import BytesIO
