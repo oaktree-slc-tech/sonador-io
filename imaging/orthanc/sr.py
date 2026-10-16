@@ -8,7 +8,7 @@ from pydicom.dataset import Dataset
 from pydicom.sequence import Sequence
 
 from ...apisettings import IMAGING_SERVER_RESOURCE_REPORT, DCMHEADER_SERIES_INSTANCE_UID, \
-	DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE, DCMHEADER_SR_REF_SERIES_SEQ, \
+	DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE, DCMHEADER_SR_EVIDENCE_SEQUENCES, DCMHEADER_SR_REF_SERIES_SEQ, \
 	DCMHEADER_SR_REF_SOP_SEQ, DCMHEADER_SR_REF_INSTANCE_UID
 from .base import ImagingSeriesCoreResource, ImagingSeriesDcm0Mixin, ImagingSeriesCollection, ImagingServerChildCollection, \
 	DcmInstanceCoreResource, DcmInstanceCoreCollection, ImagingSeriesBulkPopulateMixin
@@ -120,6 +120,23 @@ class DcmStructuredInstanceCollection(DcmInstanceCoreCollection):
 		return functools.reduce(lambda a,b: a.union(b), (dcm.series_reference_uids for dcm in self))
 
 
+def dcmsr_iter_series_references(tags):
+	'''	Iterate over the Referenced Series Sequence items recorded as evidence in a DICOM-SR document.
+
+		Both evidence sequences are consulted: the Current Requested Procedure Evidence Sequence
+		(same-study evidence; used by highdicom >= 0.23) and the Pertinent Other Evidence Sequence
+		(other-study evidence; all evidence in reports written by older Sonador releases). Missing
+		sequences are tolerated.
+
+		@input tags (dict): simplified DICOM tags of the SR instance (sequences as lists of dicts)
+		@yields dict: Referenced Series Sequence item
+	'''
+	for evidence_seq in DCMHEADER_SR_EVIDENCE_SEQUENCES:
+		for refset in tags.get(evidence_seq) or []:
+			for ref in refset.get(DCMHEADER_SR_REF_SERIES_SEQ) or []:
+				yield ref
+
+
 class DcmSRInstance(DcmStructuredInstance):
 	'''	DCM Instance model used for DICOM-SR reports
 	'''
@@ -127,17 +144,19 @@ class DcmSRInstance(DcmStructuredInstance):
 	@functools.lru_cache()
 	def instance_reference_uids(self):
 		'''	Cached property for retrieving the reference UIDs of image instances associated with
-			the structured report.
+			the structured report. Evidence is read from both the Current Requested Procedure Evidence
+			Sequence and the Pertinent Other Evidence Sequence. Series recorded without instance-level
+			references (documents created with `record_instances=False`) contribute no instances.
+
 			@returns set of all unique instance UIDs referenced by the structed report instance
 		'''
 		instance_references = set()
 
-		# Iterate through all references in the sequence, unpack reference UIDs
-		for refset in self.tags.get(DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE, []):
-			for ref in refset.get(DCMHEADER_SR_REF_SERIES_SEQ, []):
-				for dcm in ref.get(DCMHEADER_SR_REF_SOP_SEQ, []):
-					if dcm.get(DCMHEADER_SR_REF_INSTANCE_UID):
-						instance_references.add(dcm.get(DCMHEADER_SR_REF_INSTANCE_UID))
+		# Iterate through all references in the evidence sequences, unpack reference UIDs
+		for ref in dcmsr_iter_series_references(self.tags):
+			for dcm in ref.get(DCMHEADER_SR_REF_SOP_SEQ) or []:
+				if dcm.get(DCMHEADER_SR_REF_INSTANCE_UID):
+					instance_references.add(dcm.get(DCMHEADER_SR_REF_INSTANCE_UID))
 
 		return instance_references
 
@@ -145,16 +164,17 @@ class DcmSRInstance(DcmStructuredInstance):
 	@functools.lru_cache()
 	def series_reference_uids(self):
 		'''	Cached property for retrieving the reference UIDs of image series associated with the
-			structured report.
+			structured report. Evidence is read from both the Current Requested Procedure Evidence
+			Sequence and the Pertinent Other Evidence Sequence.
+
 			@returns set of all unique series UIDs referenced by the structed report instance
 		'''
 		series_references = set()
-		
-		# Iterate through all series references in the report, unpack UIDs
-		for refset in self.tags.get(DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE, []):
-			for ref in refset.get(DCMHEADER_SR_REF_SERIES_SEQ):
-				if ref.get(DCMHEADER_SERIES_INSTANCE_UID):
-					series_references.add(ref.get(DCMHEADER_SERIES_INSTANCE_UID))
+
+		# Iterate through all series references in the evidence sequences, unpack UIDs
+		for ref in dcmsr_iter_series_references(self.tags):
+			if ref.get(DCMHEADER_SERIES_INSTANCE_UID):
+				series_references.add(ref.get(DCMHEADER_SERIES_INSTANCE_UID))
 
 		return series_references
 

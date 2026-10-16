@@ -4,13 +4,13 @@ from client.utils.general import create_token
 
 from pydicom import dcmread
 from pydicom.dataset import FileMetaDataset
-from pydicom.uid import generate_uid, ImplicitVRLittleEndian, ExplicitVRLittleEndian, ExplicitVRBigEndian, \
-	PYDICOM_ROOT_UID
+from pydicom.uid import generate_uid, ExplicitVRLittleEndian, PYDICOM_IMPLEMENTATION_UID
 
 from ..apisettings.base import DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_TRANSFER_SYNTAX_UID, DCMHEADER_SOP_CLASS_UID, \
 	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_STUDY_INSTANCE_UID, \
-	DCMHEADER_PATIENT_ID, DCMTS_STUDY, DCMTS_SERIES, DCMTS_CONTENT, \
+	DCMHEADER_PATIENT_ID, DCMTS_STUDY, DCMTS_SERIES, DCMTS_CONTENT, DCM_PREAMBLE, \
 	SONADOR_CLIENT, SONADOR_SCHEME_VERSION
+from ..dcmcompat import dcm_transfer_syntax_from_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ def dcmread_backfill(fpath, patient_id=None, study_uid=None, series_uid=None, in
 	return _dcm
 
 
-def dcm_part10_backfill(dcm, implementation_class_uid=PYDICOM_ROOT_UID, 
+def dcm_part10_backfill(dcm, implementation_class_uid=PYDICOM_IMPLEMENTATION_UID, 
 		implementation_class_version='%s %s' % (SONADOR_CLIENT, SONADOR_SCHEME_VERSION)):
 	'''	Read the provied DICOM dataset and ensure that it is well formed and complete 
 		(per Part10 encoding rules).
@@ -84,21 +84,19 @@ def dcm_part10_backfill(dcm, implementation_class_uid=PYDICOM_ROOT_UID,
 	'''
 	_updated = False
 
+	# Check for the 128 byte preamble. pydicom writes the preamble and "DICM" prefix only when the
+	# dataset carries a preamble; datasets created in memory (pydicom.Dataset) have none.
+	if getattr(dcm, 'preamble', None) is None:
+		dcm.preamble = DCM_PREAMBLE
+		_updated = True
+
 	# Check for file meta
 	_filemeta = getattr(dcm, 'file_meta', None)
 	if _filemeta is None or not getattr(_filemeta, DCMHEADER_TRANSFER_SYNTAX_UID, None):
 
-		# Infer transfer syntax from the dataset flags
-		if dcm.is_little_endian and dcm.is_implicit_VR:
-			ts = ImplicitVRLittleEndian
-		elif dcm.is_little_endian and not dcm.is_implicit_VR:
-			ts = ExplicitVRLittleEndian
-		elif not dcm.is_little_endian and not dcm.is_implicit_VR:
-			rs = ExplicitVRBigEndian
-
-		else:
-			# Extremely rare, default to Explicit LE
-			ts = ExplicitVRLittleEndian
+		# Infer the transfer syntax from the encoding the dataset was read with. pydicom 3 exposes
+		# it as `original_encoding`; datasets created in memory have none and default to Explicit VR LE.
+		ts = dcm_transfer_syntax_from_dataset(dcm, default=ExplicitVRLittleEndian)
 
 		# Create file meta
 		_filemeta = _filemeta or FileMetaDataset()

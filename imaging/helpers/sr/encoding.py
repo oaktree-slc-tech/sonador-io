@@ -1,6 +1,7 @@
 import os, functools, abc, json
 from typing import Optional, Sequence, Union
 
+from pydicom.dataset import Dataset
 from pydicom.sr.codedict import codes as dcmcodes
 from pydicom.uid import generate_uid
 
@@ -8,7 +9,7 @@ from highdicom.sr.templates import Template, Code as DcmCode, CodedConcept as Dc
 	TrackingIdentifier, ObserverContext, ObservationContext, DeviceObserverIdentifyingAttributes, \
 	LanguageOfContentItemAndDescendants, AlgorithmIdentification, RealWorldValueMap, \
 	TimePointContext, _MeasurementsAndQualitativeEvaluations as DcmMeasurementAndQualitativeEvaluationsBase, \
-	MeasurementReport as SRMeasurementReport
+	MeasurementReport as SRMeasurementReport, ImageLibrary
 from highdicom.sr import EnhancedSR, Scoord3DContentItem, QualitativeEvaluation as DcmQualitativeEvaluation, \
 	Measurement as DcmMeasurement
 from highdicom.sr.enum import RelationshipTypeValues
@@ -144,15 +145,54 @@ class VolumetricPointCollection(DcmMeasurementAndQualitativeEvaluationsBase):
 
 
 class SonadorSRMeasurementReport(SRMeasurementReport):
-	'''	Measurement report template which provides support for meta groups.
+	'''	Measurement report template (derived from TID 1500 "Measurement Report") which provides
+		support for Sonador meta groups and volumetric point collections.
+
+		Unlike the upstream `MeasurementReport`, a Sonador report does not have to contain imaging
+		measurement groups: reports consisting only of meta groups and/or volumetric point collections
+		are valid. At least one group of any kind is required.
 	'''
 	template_id = '%s.1500' % DCMSR_SONADOR_SR.value
 
-	def __init__(self, *args,
-			meta_groups:Optional[Sequence[ReportMetaGroup]]=None, 
-			volume_measurements:Optional[Sequence[VolumetricPointCollection]]=None,
-			**kwargs):
-		super().__init__(*args, **kwargs)
+	def __init__(self,
+			observation_context:ObservationContext,
+			procedure_reported:Union[DcmCodedConcept, DcmCode, Sequence[Union[DcmCodedConcept, DcmCode]]],
+			imaging_measurements:Optional[Sequence[DcmMeasurementAndQualitativeEvaluationsBase]]=None,
+			title:Optional[Union[DcmCodedConcept, DcmCode]]=None,
+			language_of_content_item_and_descendants:Optional[LanguageOfContentItemAndDescendants]=None,
+			referenced_images:Optional[Sequence[Dataset]]=None, *,
+			meta_groups:Optional[Sequence[ReportMetaGroup]]=None,
+			volume_measurements:Optional[Sequence[VolumetricPointCollection]]=None):
+		'''	Initialize the report. The positional/keyword arguments mirror `highdicom.sr.MeasurementReport`;
+			`meta_groups` and `volume_measurements` are Sonador extensions.
+
+			@input imaging_measurements (sequence of highdicom measurement groups, default=None): TID 1500
+				"Imaging Measurements" groups. May be empty when meta groups or volume measurements are provided.
+			@input meta_groups (sequence of ReportMetaGroup, default=None): metadata groups
+			@input volume_measurements (sequence of VolumetricPointCollection, default=None): point collections
+		'''
+		imaging_measurements = list(imaging_measurements or [])
+		meta_groups = list(meta_groups or [])
+		volume_measurements = list(volume_measurements or [])
+
+		if not (imaging_measurements or meta_groups or volume_measurements):
+			raise ValueError('A Sonador measurement report requires at least one imaging measurement group, '
+				+ 'meta group, or volumetric point collection.')
+
+		if imaging_measurements:
+			super().__init__(observation_context=observation_context, procedure_reported=procedure_reported,
+				imaging_measurements=imaging_measurements, title=title,
+				language_of_content_item_and_descendants=language_of_content_item_and_descendants,
+				referenced_images=referenced_images)
+
+		else:
+			# highdicom >= 0.23 rejects an empty `imaging_measurements` list. Build the TID 1500 root
+			# container (title, language, observation context, procedure reported, image library) without
+			# the "Imaging Measurements" container; the Sonador groups are appended below.
+			Template.__init__(self, [self._report_root_item(
+				observation_context=observation_context, procedure_reported=procedure_reported, title=title,
+				language_of_content_item_and_descendants=language_of_content_item_and_descendants,
+				referenced_images=referenced_images)], is_root=True)
 
 		# Retrieve root item
 		report_item = self[0]
@@ -168,7 +208,7 @@ class SonadorSRMeasurementReport(SRMeasurementReport):
 
 			for m in meta_groups:
 				if not isinstance(m, ReportMetaGroup):
-					raise TypeError(('Invalid type "%". Items included in `meta_groups` '
+					raise TypeError(('Invalid type "%s". Items included in `meta_groups` '
 						+ ' must have type ReportMetaGroup') % type(m))
 
 				meta_container_item.ContentSequence.extend(m)
@@ -194,5 +234,38 @@ class SonadorSRMeasurementReport(SRMeasurementReport):
 
 		if hasattr(report_item, 'ContentTemplateSequence'):			
 			report_item.ContentTemplateSequence[0].TemplateIdentifier = self.template_id
+
+	@staticmethod
+	def _report_root_item(observation_context, procedure_reported, title=None,
+			language_of_content_item_and_descendants=None, referenced_images=None):
+		'''	Create the TID 1500 root container item without imaging measurements. Mirrors the
+			construction performed by `highdicom.sr.MeasurementReport.__init__`.
+		'''
+		if title is None:
+			title = dcmcodes.cid7021.ImagingMeasurementReport
+		if not isinstance(title, (DcmCodedConcept, DcmCode)):
+			raise TypeError('Argument "title" must have type CodedConcept or Code.')
+		if not isinstance(observation_context, ObservationContext):
+			raise TypeError('Argument "observation_context" must have type ObservationContext.')
+
+		item = ContainerContentItem(name=title, template_id='1500')
+		item.ContentSequence = ContentSequence()
+
+		if language_of_content_item_and_descendants is None:
+			language_of_content_item_and_descendants = LanguageOfContentItemAndDescendants(DCMSR_DEFAULT_LANGUAGE)
+		item.ContentSequence.extend(language_of_content_item_and_descendants)
+		item.ContentSequence.extend(observation_context)
+
+		if isinstance(procedure_reported, (DcmCodedConcept, DcmCode)):
+			procedure_reported = [procedure_reported]
+		for procedure in procedure_reported:
+			item.ContentSequence.append(CodeContentItem(
+				name=dcmcodes.DCM.ProcedureReported, value=procedure,
+				relationship_type=RelationshipTypeValues.HAS_CONCEPT_MOD))
+
+		if referenced_images:
+			item.ContentSequence.extend(ImageLibrary(referenced_images))
+
+		return item
 
 	# TODO: add support for parsing meta and volume measurements from content sequence

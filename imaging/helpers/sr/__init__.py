@@ -26,6 +26,11 @@ from ...orthanc.base import ImagingResourceBaseCollection
 from ...orthanc.sr import DcmSRSeries
 
 from .encoding import SonadorSRMeasurementReport
+from ....dcmcompat import require_oaktree_highdicom
+
+# The SR document templates below pass `record_instances`, which only exists in the Oak-Tree
+# highdicom fork. Fail at import, with an actionable message, rather than inside document creation.
+require_oaktree_highdicom()
 
 
 class SonadorBaseSR(metaclass=abc.ABCMeta):

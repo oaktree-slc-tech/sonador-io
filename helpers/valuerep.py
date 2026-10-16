@@ -1,4 +1,4 @@
-import re, usaddress
+import re
 
 from nameparser import HumanName
 from pydicom.valuerep import PersonName as DcmPersonName

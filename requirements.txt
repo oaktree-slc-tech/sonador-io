@@ -1,12 +1,16 @@
 --extra-index-url https://code.oak-tree.tech/api/v4/projects/335/packages/pypi/simple
 
 # Data parsing and display
-client 
+client>=0.4.2
 tabulate>=0.8.7
 pytz
 nameparser
 usaddress
 
-# DICOM
-pydicom
-highdicom>=0.21.1
+# DICOM. pydicom 3 is required; highdicom must be the Oak-Tree fork (see dcmcompat.py), which is
+# published to the Oak-Tree registry as <upstream version>.postN. The fork is pinned exactly: a
+# compatible-release specifier (~=) ignores the post-release segment and would also admit stock
+# 0.28.x releases, which install but lack the fork extension. Keep in step with
+# dcmcompat.HIGHDICOM_FORK_VERSION and packages/sonador.
+pydicom>=3.0.1
+highdicom==0.28.2.post1
