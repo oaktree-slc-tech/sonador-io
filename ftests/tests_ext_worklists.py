@@ -10,7 +10,8 @@ from client.errors import ClientOperationError
 from ..apisettings import SONADOR_IMAGING_SERVER, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
 	DCMHEADER_SERIES_INSTANCE_UID
 from ..apisettings.worklists import SONADOR_WORKLIST_STATUS_SCHEDULED, SONADOR_WORKLIST_STATUS_INPROGRESS, \
-	SONADOR_WORKLIST_STATUS_COMPLETED, SONADOR_WORKLIST_STATUS_CANCELLED
+	SONADOR_WORKLIST_STATUS_COMPLETED, SONADOR_WORKLIST_STATUS_CANCELLED, SONADOR_WORKLIST_STATUS_OPEN, \
+	SONADOR_WORKLIST_STATUS_ALL, SONADOR_WORKLIST_QUERY_STATE, SONADOR_WORKLIST_QUERY_USER, SONADOR_WORKLIST_QUERY_GROUP
 from ..helpers import response2filearchive
 from ..servers import sonador_apitoken_fetch
 from ..errors import soandor_clientexception_server_errors
@@ -858,3 +859,79 @@ class SonadorStudyReviewerWorklistTests(AclBaseTestCase):
 					msg='Newly-assigned user02 does not see the reassigned worklist item via the DICOMweb browse endpoint')
 
 			w02.delete()
+
+	def test_worklist_browse_dicomweb_study_and_filters(self, *args, **kwargs):
+		'''	Verify that the study of an item retrieved through the DICOMweb worklist browse endpoint
+			(ImageServer.fetch_user_dcmweb_worklist) can retrieve its series, that the item exposes the
+			Requested Procedure (reason for review and description), and that the browse endpoint
+			applies the State, User, and Group filters. These are the operations the Sonador IO
+			Blender worklist panel performs.
+		'''
+		iserver, testgroup01, testuser01 = self.setupTestAuth(
+			testuser_config=TESTUSER01, testgroup_name=TESTGROUP01, **kwargs)
+		server_acl01 = iserver.admin_create_acl(testgroup01, { 'resource': '*', 'worklist': True, 'duration': 5 })
+
+		# Download test series
+		r_cx = self.fetchTestResource(self.nih_cxr_testdcm)
+
+		with self.stageImageArchiveSeries(iserver, response2filearchive(r_cx)) as (test_sx, test_hache):
+
+			test_s = iserver.get_study(test_sx.parent.pk)
+			local_acl01 = test_s.create_group_acl(testgroup01, {
+				'View': True, 'Modify': False, 'Remove': False, 'CommentEdit': False, 'CommentView': False, 'ACL': False,
+			})
+
+			# Worklist item with a Requested Procedure
+			reason, description = 'Review fracture (Sonador IO ftest)', 'Segmentation (Sonador IO ftest)'
+			w01 = test_s.create_reviewer_worklist_item(testgroup01, testuser01, SONADOR_WORKLIST_STATUS_SCHEDULED,
+				worklist={ 'Procedure': { 'RequestedProcedure': {
+					'ReasonForTheRequestedProcedure': reason, 'RequestedProcedureDescription': description,
+				}}})
+			sleep(0.15)
+			test_s.index()
+			sleep(1.5)
+
+			with self.getLimitedImageServer(iserver, testuser01) as iserver_test01:
+
+				# Item is listed by the default (Open) and the user/group filtered query
+				browse01 = iserver_test01.fetch_user_dcmweb_worklist(query_params={
+					SONADOR_WORKLIST_QUERY_USER: testuser01.pk, SONADOR_WORKLIST_QUERY_GROUP: testgroup01.pk })
+				_w = next((w for w in browse01 if w.pk == w01.pk), None)
+				self.assertIsNotNone(_w, msg='Worklist item not returned by the browse endpoint filtered by its user and group')
+
+				# Requested Procedure accessors
+				self.assertEqual(_w.reason_for_review, reason, msg='Incorrect reason for review: %s' % _w.reason_for_review)
+				self.assertEqual(_w.requested_procedure_description, description,
+					msg='Incorrect requested procedure description: %s' % _w.requested_procedure_description)
+
+				# The study of the browse item retrieves its series
+				self.assertTrue(any(_sx.pk == test_sx.pk for _sx in _w.parent.series_collection),
+					msg='Study of a worklist browse item is unable to retrieve its series')
+
+				# The study of the browse item (initialized from DICOMweb data, without ParentPatient)
+				# retrieves its patient
+				self.assertEqual(_w.parent.patient, test_s.patient,
+					msg='Study of a worklist browse item has an incorrect patient: %s' % _w.parent.patient)
+				self.assertEqual(_w.parent.parent.pk, test_s.patient,
+					msg='Study of a worklist browse item is unable to retrieve its patient')
+
+				# Completed items are excluded by the default (Open) filter and included by "All"
+				_w.update({ 'State': SONADOR_WORKLIST_STATUS_COMPLETED })
+				sleep(0.15)
+				self.assertTrue(all(w.pk != w01.pk for w in iserver_test01.fetch_user_dcmweb_worklist(
+						query_params={ SONADOR_WORKLIST_QUERY_STATE: SONADOR_WORKLIST_STATUS_OPEN })),
+					msg='Completed worklist item returned by the Open state filter')
+				self.assertTrue(any(w.pk == w01.pk for w in iserver_test01.fetch_user_dcmweb_worklist(
+						query_params={ SONADOR_WORKLIST_QUERY_STATE: SONADOR_WORKLIST_STATUS_ALL })),
+					msg='Completed worklist item not returned by the All state filter')
+				self.assertTrue(any(w.pk == w01.pk for w in iserver_test01.fetch_user_dcmweb_worklist(
+						query_params={ SONADOR_WORKLIST_QUERY_STATE: SONADOR_WORKLIST_STATUS_COMPLETED })),
+					msg='Completed worklist item not returned by the Completed state filter')
+
+				# A group filter for a group without the item excludes it
+				self.assertTrue(all(w.pk != w01.pk for w in iserver_test01.fetch_user_dcmweb_worklist(
+						query_params={ SONADOR_WORKLIST_QUERY_STATE: SONADOR_WORKLIST_STATUS_ALL,
+							SONADOR_WORKLIST_QUERY_GROUP: testgroup01.pk + 100000 })),
+					msg='Worklist item returned by a group filter for a different group')
+
+			w01.delete()

@@ -448,6 +448,7 @@ DCMHEADER_STATION_NAME = 'StationName'
 
 DCMHEADER_REQUESTED_PROCEDURE_ID = 'RequestedProcedureID'
 DCMHEADER_REQUESTED_PROCEDURE_DESCRIPTION = 'RequestedProcedureDescription'
+DCMHEADER_REASON_FOR_REQUESTED_PROCEDURE = 'ReasonForTheRequestedProcedure'
 
 
 # Clinical Trial and Data Headers

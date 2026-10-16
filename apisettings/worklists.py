@@ -10,6 +10,17 @@ SONADOR_WORKLIST_STATUS_INPROGRESS = 'In-progress'
 SONADOR_WORKLIST_STATUS_COMPLETED = 'Completed'
 SONADOR_WORKLIST_STATUS_CANCELLED = 'Cancelled'
 
+# Virtual states accepted by the State filter of the user worklist (DICOMweb worklist/studies):
+# "Open" (Scheduled and In-progress, the server default) and "All" (every state)
+SONADOR_WORKLIST_STATUS_OPEN = 'Open'
+SONADOR_WORKLIST_STATUS_ALL = 'All'
+
+# User worklist query parameters, in addition to the study query parameters (allFields, DICOM
+# headers, limit, offset)
+SONADOR_WORKLIST_QUERY_STATE = 'State'
+SONADOR_WORKLIST_QUERY_USER = 'User'
+SONADOR_WORKLIST_QUERY_GROUP = 'Group'
+
 # Reserved, server-owned keys inside the worklist item's Meta (orthanc-sonador#54, section 6.1).
 # Procedure/history data is written only through the validated `Procedure` block of worklist
 # create/update requests; values submitted under these keys via the general Meta channel are

@@ -10,7 +10,9 @@ from collections import OrderedDict
 from client.remote import request_client_error
 from client.utils.object import pick, omit
 
-from ...apisettings import IMAGING_SERVER_RESOURCE_STUDY
+from ...apisettings import IMAGING_SERVER_RESOURCE_STUDY, DCMHEADER_REQUESTED_PROCEDURE_DESCRIPTION, \
+	DCMHEADER_REASON_FOR_REQUESTED_PROCEDURE
+from ...apisettings.worklists import SONADOR_WORKLIST_META_REQUESTED_PROCEDURE
 from ...servers.auth import SonadorUserObjectMixin, SonadorGroupObjectMixin
 from ..dicomweb import dicomweb_tag_name, dicomweb_tag_keys, dicomweb_code_keys, \
 	dicomweb_value, dicomweb2keyval, dcmjson2orthanc
@@ -51,6 +53,28 @@ class ReviewerStudyWorklistItem(KafkaMixin, SonadorGroupObjectMixin, SonadorUser
 	@property
 	def state(self):
 		return self._objectdata.get('State')
+
+	@property
+	def meta(self):
+		'''	Worklist item metadata, including the server-owned procedure and review history keys
+		'''
+		return self._objectdata.get('Meta') or {}
+
+	@property
+	def requested_procedure(self):
+		'''	Requested Procedure of the worklist item (reason for review and description)
+		'''
+		return self.meta.get(SONADOR_WORKLIST_META_REQUESTED_PROCEDURE) or {}
+
+	@property
+	def reason_for_review(self):
+		'''	Reason for review: Reason for the Requested Procedure of the worklist item
+		'''
+		return self.requested_procedure.get(DCMHEADER_REASON_FOR_REQUESTED_PROCEDURE)
+
+	@property
+	def requested_procedure_description(self):
+		return self.requested_procedure.get(DCMHEADER_REQUESTED_PROCEDURE_DESCRIPTION)
 	
 	@property
 	def kafka_url(self):
@@ -98,7 +122,7 @@ class ReviewerStudyWorklistItemCollection(DcmExtCollectionParentMixin, DcmExtBas
 
 		if not error_msg:
 			error_msg = lambda r: request_client_error(
-				'Unable to retrieve user worklist from PACS server (url="%s"). Status code: %s.' % (
+				'Unable to retrieve user worklist (%s) from PACS server %s (url="%s"). Status code: %s.' % (
 					cls.model.__name__, pacs.server_label, r.request.url, r.status_code,
 				), r)
 
@@ -125,9 +149,12 @@ class ReviewerStudyWorklistItemCollection(DcmExtCollectionParentMixin, DcmExtBas
 			if worklist_item_json.get(cls.model.parent_attr):
 				parent_dcm_json[parent_model_class.pk_attr] = worklist_item_json.get(cls.model.parent_attr)
 
-			# Initialize worklist item
-			worklist_item = cls.model(pacs, worklist_item_json,
-				parent=parent_model_class(pacs, parent_dcm_json), **kwargs)
+			# Initialize worklist item. The item and its parent belong to the Sonador server
+			# associated with the PACS, the PACS is referenced by the parent. (Initializing the
+			# parent with the PACS as its server prevents its child resources such as the
+			# series of a study from being retrieved.)
+			worklist_item = cls.model(pacs.server, worklist_item_json,
+				parent=parent_model_class(pacs.server, parent_dcm_json, pacs=pacs), **kwargs)
 
 			# Add worklist item to collection
 			dcmweb_worklist.append(worklist_item)
