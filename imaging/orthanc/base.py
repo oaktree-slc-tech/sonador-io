@@ -1086,7 +1086,17 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 	@property
 	def patient(self):
-		return self._objectdata.get(IMAGING_SERVER_PARENT_PATIENT)
+		'''	Orthanc ID of the study's patient. Studies initialized from DICOMweb data (such as the
+			studies of user worklist items) do not include it: it is retrieved from the study's
+			Orthanc resource on first use.
+		'''
+		_patient = self._objectdata.get(IMAGING_SERVER_PARENT_PATIENT)
+		if not _patient and self.pk and getattr(self, 'pacs', None) is not None:
+			_patient = self.pacs.get_study(self.pk)._objectdata.get(IMAGING_SERVER_PARENT_PATIENT)
+			if _patient:
+				self._objectdata[IMAGING_SERVER_PARENT_PATIENT] = _patient
+
+		return _patient
 
 	@property
 	def parent(self):
