@@ -1206,9 +1206,9 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 			@returns collection of DICOM series instances that associated with the current study
 		'''
-		verify = kwargs.get('verify', None)
-		if verify is None:
-			verify = self.server.verify
+		# SSL verification of the Sonador connection unless given (through the imaging server, which also
+		# covers studies constructed with the imaging server as `server`)
+		verify = self.pacs.verify_ssl(verify=kwargs.get('verify', None))
 
 		# Retrieve series details
 		r = self.pacs._request_get(
