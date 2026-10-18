@@ -1347,8 +1347,10 @@ class SonadorImagingServer(OrthancServerAuthDataCollectionMixin, OrthancServerBa
 
 	@property
 	def server_label(self):
+		'''	Display label for the imaging server: its name with the key, or the key alone
+		'''
 		if getattr(self, 'name', None):
-			'%s (%s)' % (self.name, self.pk)
+			return '%s (%s)' % (self.name, self.pk)
 		return self.pk
 
 	def orthanc_apiurl(self, resource_endpoint, query_params='', query_lowercase=False, internal_dns=None):
