@@ -11,7 +11,9 @@
 from collections import OrderedDict
 
 from .base import DCMHEADER_FRAME_OF_REFERENCE_UID, DCMHEADER_SLICE_THICKNESS, DCMHEADER_PATIENT_POSITION, \
-	DCMHEADER_IMAGE_POSITION_PATIENT, DCMHEADER_IMAGE_ORIENTATION_PATIENT
+	DCMHEADER_IMAGE_POSITION_PATIENT, DCMHEADER_IMAGE_ORIENTATION_PATIENT, DCMHEADER_POSITION_REFERENCE_INDICATOR, \
+	DCM_MODALITY_SEG, DCM_MODALITY_SR, DCM_MODALITY_M3D, DCM_MODALITY_DOC, DCM_MODALITY_PR, DCM_MODALITY_KO, \
+	DCM_MODALITY_RTSTRUCT
 from .media import DCM_MEDIA_PATIENT_TAGS, DCM_MEDIA_STUDY_TAGS, DCM_MEDIA_CLINICAL_TRIAL_TAGS, \
 	ANATOMY_BONE_HEXCOLOR_PRIMARY, ANATOMY_BONE_HEXCOLOR, ANATOMY_BONE_THORAX_HEXCOLOR_PRIMARY, \
 	ANATOMY_BONE_LOWER_LIMB_HEXCOLOR_PRIMARY, ANATOMY_BONE_LOWER_LIMB_HEXCOLOR, \
@@ -30,9 +32,50 @@ from .media import DCM_MEDIA_PATIENT_TAGS, DCM_MEDIA_STUDY_TAGS, DCM_MEDIA_CLINI
 M3D_DCM_PATIENT_TAGS = DCM_MEDIA_PATIENT_TAGS
 M3D_DCM_STUDY_TAGS = DCM_MEDIA_STUDY_TAGS
 M3D_DCM_SERIES_TAGS = set((
-    DCMHEADER_FRAME_OF_REFERENCE_UID, DCMHEADER_SLICE_THICKNESS,
+    DCMHEADER_FRAME_OF_REFERENCE_UID, DCMHEADER_POSITION_REFERENCE_INDICATOR, DCMHEADER_SLICE_THICKNESS,
     DCMHEADER_PATIENT_POSITION, DCMHEADER_IMAGE_POSITION_PATIENT, DCMHEADER_IMAGE_ORIENTATION_PATIENT))
 M3D_CLINICAL_TRIAL_TAGS = DCM_MEDIA_CLINICAL_TRIAL_TAGS
+
+
+# Coordinate system and units of M3D models.
+#
+# An Encapsulated STL/OBJ/MTL instance (PS3.3 A.85 - A.87) carries the Frame of Reference module:
+# its Frame of Reference UID identifies the origin and axes implicit in the model data. Models that
+# Sonador derives from imaging share the frame of reference of the source images, i.e. the
+# patient-based coordinate system of PS3.3 C.7.6.2.1.1: x increases towards the left side of the
+# patient, y towards the posterior, z towards the head ("LPS"), in millimetres. The units of the
+# model file itself are declared by the Measurement Units Code Sequence of the Manufacturing 3D
+# Model module (CID 7063 "Model Scale Unit", UCUM codes).
+M3D_COORDINATE_SYSTEM_LPS = 'LPS'
+# Right/anterior/superior: the convention of NIfTI and 3D Slicer, x and y negated with respect to LPS
+M3D_COORDINATE_SYSTEM_RAS = 'RAS'
+M3D_COORDINATE_SYSTEMS = (M3D_COORDINATE_SYSTEM_LPS, M3D_COORDINATE_SYSTEM_RAS)
+
+# CID 7063 Model Scale Unit (UCUM), with the length of one unit in metres
+M3D_UNIT_CODING_SCHEME = 'UCUM'
+M3D_UNIT_M = 'm'
+M3D_UNIT_CM = 'cm'
+M3D_UNIT_MM = 'mm'
+M3D_UNIT_UM = 'um'
+M3D_UNIT_SCALES = OrderedDict((
+	(M3D_UNIT_M, 1.0),
+	(M3D_UNIT_CM, 0.01),
+	(M3D_UNIT_MM, 0.001),
+	(M3D_UNIT_UM, 0.000001),
+))
+# Unit assumed for models that do not declare one: the millimetre of the patient coordinate system
+M3D_UNIT_DEFAULT = M3D_UNIT_MM
+
+# Provenance of a resolved frame of reference (or of its units): declared by the M3D instance
+# headers, inherited from a referenced (source) series, or assumed
+M3D_FRAME_SOURCE_INSTANCE = 'instance'
+M3D_FRAME_SOURCE_REFERENCE = 'reference'
+M3D_FRAME_SOURCE_DEFAULT = 'default'
+
+# Modalities of derived (non-image) series. When a model references several series, image series
+# are preferred as the source of the frame of reference.
+M3D_DERIVED_MODALITIES = set((DCM_MODALITY_SEG, DCM_MODALITY_SR, DCM_MODALITY_M3D, DCM_MODALITY_DOC,
+	DCM_MODALITY_PR, DCM_MODALITY_KO, DCM_MODALITY_RTSTRUCT))
 
 
 # Total Segmentator Labels

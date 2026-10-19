@@ -11,7 +11,10 @@ from ..apisettings.media import DCMEDIA_ENCAPSULATED_PDF_SOP_CLASS, DCMEDIA_PDF_
 	DCMEDIA_ENCAPSULATED_STL_SOP_CLASS, DCMEDIA_ENCAPSULATED_STL_SOP_CLASS_CT,  \
 	DCMEDIA_ENCAPSULATED_STL_SOP_CLASS_MRI, DCMEDIA_SUPPORTED_STL_SOP_CLASSES, \
 		DCMEDIA_STL_MIMETPYE, DCMEDIA_STL_MODALITY
+from ..apisettings import DCMHEADER_MEASUREMENT_UNITS_CODE_SEQUENCE
+from ..apisettings.m3d import M3D_UNIT_DEFAULT
 from ..imaging.helpers.conversion import dcm_encode_filedata
+from ..imaging.helpers.m3d import dcm_encode_m3d_units
 
 
 def dcm_encode_media(mediafile_meta, media_file, dcm_attrs=None, **kwargs):
@@ -110,13 +113,16 @@ def dcm_encode_glb(glb_dcmattrs, glb_file, *args, dcmfile_meta=None, **kwargs):
 	return dcm_encode_media(fmeta, glb_file, *args, dcm_attrs=glb_dcmattrs, **kwargs)
 
 
-def dcm_encode_stl(stl_dcmattrs, stl_file, *args, dcmfile_meta=None, **kwargs):
+def dcm_encode_stl(stl_dcmattrs, stl_file, *args, dcmfile_meta=None, stl_units=M3D_UNIT_DEFAULT, **kwargs):
 	'''	Create a DICOM file that encapsulates an STL document. Delegates to dcm_encode_media.
 
 		@input stl_dcmattrs (dict): DICOM attributes to be added to the file
 		@input stl_file (like-like-object): STL file to be encoded
 		@input dcmfile_meta (pydicom.dataset.Dataset, default=empty dataset): pre-existing
 			set of headers to which media files should be added.
+		@input stl_units (str, default=M3D_UNIT_DEFAULT): units of distance of the STL coordinates
+			(UCUM code of CID 7063), recorded in the Measurement Units Code Sequence (Type 1 of the
+			Manufacturing 3D Model module) unless the attributes already provide the sequence.
 
 		@returns pydicom.dataset.FileDataset
 	'''
@@ -144,6 +150,10 @@ def dcm_encode_stl(stl_dcmattrs, stl_file, *args, dcmfile_meta=None, **kwargs):
 	# Add STL mimetype to metadata
 	if not stl_dcmattrs.get(DCMHEADER_ENCAPSULATED_DOCUMENT_MIMETYPE):
 		stl_dcmattrs[DCMHEADER_ENCAPSULATED_DOCUMENT_MIMETYPE] = DCMEDIA_STL_MIMETPYE
+
+	# Units of the model coordinate system (STL files carry none)
+	if not stl_dcmattrs.get(DCMHEADER_MEASUREMENT_UNITS_CODE_SEQUENCE):
+		stl_dcmattrs[DCMHEADER_MEASUREMENT_UNITS_CODE_SEQUENCE] = dcm_encode_m3d_units(stl_units)
 
 	# Create file metadata structure for an encapsulated STL object
 	fmeta = dcmfile_meta or Dataset()
