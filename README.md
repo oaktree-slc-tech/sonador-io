@@ -30,3 +30,24 @@ Examples of how to utilize the features of the client can be found in the [Sonad
 * Basic usage of the client is outlined in [this notebook](https://code.oak-tree.tech/oak-tree/medical-imaging/sonador-examples/-/blob/master/sonador-client.image-io.ipynb), and introduces three of the core classes in the library: `sonador.servers.SonadorServer`, `sonador.servers.SonadorImagingServer`, and imaging resouce models.
 * An overview of working with structured data (via DICOM-SR documents) can be found [here](https://code.oak-tree.tech/oak-tree/medical-imaging/sonador-examples/-/blob/master/sonador-client02.dicom-sr.ipynb?ref_type=heads).
 * Basic AI capbilities and how to interface with AI based tools (via `numpy`) are demonstrated in [this notebook](https://code.oak-tree.tech/oak-tree/medical-imaging/sonador-examples/-/blob/master/sonador-client03.ai-lung.ipynb?ref_type=heads).
+
+### Coordinate System and Units of M3D Models
+Encapsulated STL instances (M3D modality) carry a Frame of Reference UID (the origin and axes implicit
+in the model data) and a Measurement Units Code Sequence (units of distance of the model coordinates,
+CID 7063). `sonador.imaging.helpers.m3d` resolves both for a model instance: the model headers first,
+with a fallback to the frame of reference of the source series the model references
+(`ReferencedSeriesSequence`), in which case the model lies in the DICOM patient coordinate system
+(LPS, millimetres); millimetres are assumed when nothing is declared.
+
+```python
+from sonador.imaging.helpers.m3d import dcm_m3d_frame
+
+frame = dcm_m3d_frame(instance)                    # any instance of an M3D series
+frame = dcm_m3d_frame(instance, headers=instance.dcmfile())   # headers from a retrieved file, no tags request
+frame.frame_of_reference_uid, frame.units, frame.scale_to('m'), frame.frame_source, frame.describe()
+```
+
+`DcmM3DInstance.frame` / `resolve_frame()` and `DcmM3DSeries.frame` expose the same resolution on
+the M3D model classes. The STL encoders (`sonador.tasks.media.dcm_encode_stl`,
+`sonador.tasks.m3d.dcm_encode_m3d_models`) record the units of the encoded coordinates
+(`stl_units`, millimetres by default) and copy the frame of reference of the source series.

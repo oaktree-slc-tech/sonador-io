@@ -28,7 +28,7 @@ from ..apisettings import DicomMetaKey, DicomMeta, DCM_DATE_STRFORMAT, DCM_TIME_
 	DCMHEADER_CONTENT_DATE, DCMHEADER_CONTENT_TIME, DCMHEADER_RECOMMENDED_DISPLAY_COLOR_VALUE, \
 	DCMHEADER_SR_SOP_CLASS_UID
 from ..apisettings.m3d import M3D_DCM_PATIENT_TAGS, M3D_DCM_STUDY_TAGS, M3D_DCM_SERIES_TAGS, \
-	M3D_CLINICAL_TRIAL_TAGS
+	M3D_CLINICAL_TRIAL_TAGS, M3D_UNIT_DEFAULT
 
 from ..helpers import srcode2dataset, dcm_encode_series_ref
 from ..helpers.color import hex2rgb, rgb2cielab
@@ -42,9 +42,14 @@ def dcm_encode_m3d_models(sx, m3d_models, m3d_series_uid=None, m3d_series_number
 		ref_sopclass_uid=None, m3d_series_headers=None, m3d_instance_headers=None,
 		stl_headers=[v for v in itertools.chain(
 			M3D_DCM_PATIENT_TAGS, M3D_DCM_STUDY_TAGS, M3D_DCM_SERIES_TAGS, M3D_CLINICAL_TRIAL_TAGS)],
-		stl_instance_numbers=None, stl_file_colors=None, privateheaders_blocks=None,
+		stl_instance_numbers=None, stl_file_colors=None, stl_units=M3D_UNIT_DEFAULT, privateheaders_blocks=None,
 		privateheaders_callback=None, presave_callback=None, dry_run=False, hcache=None):
 	''' Encode M3D models for the provided imaging series. All provided models will be part of a common series.
+
+		The models are placed in the frame of reference of the source series: the Frame of Reference
+		UID and Position Reference Indicator are copied from the source instances (M3D_DCM_SERIES_TAGS,
+		see `stl_headers`), the source series is referenced (ReferencedSeriesSequence), and the units
+		of the model coordinates are recorded (Measurement Units Code Sequence, `stl_units`).
 
 		@input sx (sonador.imaging.orthanc.base.ImagingSeries): imaging series to be used
 			as the source for the M3D models. The models will be linked to the series
@@ -58,6 +63,9 @@ def dcm_encode_m3d_models(sx, m3d_models, m3d_series_uid=None, m3d_series_number
 			series and copied to the M3D series.
 		@input stl_instance_numbers (dict): instance numbers keyed to the file labels
 		@input stl_file_colors (dict): color codes keyed to the file labels
+		@input stl_units (str, default=M3D_UNIT_DEFAULT): units of distance of the STL coordinates
+			(UCUM code of CID 7063), recorded in the Measurement Units Code Sequence of every model
+			unless its instance headers provide the sequence
 		@input dry_run (bool, default=False): when True, models are converted to encapsulated STL
 			but no files are transferred to the server.
 		
@@ -123,7 +131,7 @@ def dcm_encode_m3d_models(sx, m3d_models, m3d_series_uid=None, m3d_series_number
 				CIELabColor(*rgb2cielab(hex2rgb(stl_file_colors.get(mlabel)))).value)
 
 		# Encode file to DICOM
-		dcm_model = dcm_encode_stl(model_hdata, model_stream)
+		dcm_model = dcm_encode_stl(model_hdata, model_stream, stl_units=stl_units)
 
 		# Add private headers
 		if privateheaders_blocks:

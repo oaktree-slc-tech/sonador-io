@@ -480,6 +480,11 @@ DCMHEADER_IMAGE_ORIENTATION_PATIENT = 'ImageOrientationPatient'
 
 DCMHEADER_PATIENT_POSITION = 'PatientPosition'
 
+# Frame of Reference module (PS3.3 C.7.4.1): part of the imaging target used as a reference
+# (annotation only, not a mathematical spatial reference)
+DCMCODE_POSITION_REFERENCE_INDICATOR = ('0020', '1040')
+DCMHEADER_POSITION_REFERENCE_INDICATOR = 'PositionReferenceIndicator'
+
 DCMHEADER_SLICE_THICKNESS = 'SliceThickness'
 DCMHEADER_SLICE_LOCATION = 'SliceLocation'
 DCMHEADER_PIXEL_SPACING = 'PixelSpacing'
@@ -544,6 +549,25 @@ DCMHEADER_ENCAPSULATED_DOCUMENT_MIMETYPE = 'MIMETypeOfEncapsulatedDocument'
 
 DCMCODE_ENCAPSULATED_DOCUMENT_TITLE = ('0042', '0010')
 DCMHEADER_ENCAPSULATED_DOCUMENT_TITLE = 'DocumentTitle'
+
+# Instances from which an encapsulated document was derived (Encapsulated Document module, PS3.3 C.24.2)
+DCMCODE_SOURCE_INSTANCE_SEQUENCE = ('0042', '0013')
+DCMHEADER_SOURCE_INSTANCE_SEQUENCE = 'SourceInstanceSequence'
+
+# Manufacturing 3D Model module (PS3.3 C.35.1): units of distance of the coordinate system of the
+# encapsulated model file (Type 1, a single item of CID 7063 "Model Scale Unit"), and the model
+# provenance flags
+DCMCODE_MEASUREMENT_UNITS_CODE_SEQUENCE = ('0040', '08EA')
+DCMHEADER_MEASUREMENT_UNITS_CODE_SEQUENCE = 'MeasurementUnitsCodeSequence'
+
+DCMCODE_MODEL_MODIFICATION = ('0068', '7001')
+DCMHEADER_MODEL_MODIFICATION = 'ModelModification'
+
+DCMCODE_MODEL_MIRRORING = ('0068', '7002')
+DCMHEADER_MODEL_MIRRORING = 'ModelMirroring'
+
+DCMCODE_MODEL_GROUP_UID = ('0068', '7004')
+DCMHEADER_MODEL_GROUP_UID = 'ModelGroupUID'
 
 DCMCODE_BODY_PART_EXAMINED = ('0018', '0015')
 DCMHEADER_BODY_PART_EXAMINED = 'BodyPartExamined'
