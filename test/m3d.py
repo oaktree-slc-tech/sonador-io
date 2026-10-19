@@ -15,13 +15,18 @@ from pydicom.sequence import Sequence
 from ..apisettings import DCMHEADER_FRAME_OF_REFERENCE_UID, DCMHEADER_MEASUREMENT_UNITS_CODE_SEQUENCE, \
 	DCMHEADER_POSITION_REFERENCE_INDICATOR, DCMHEADER_PATIENT_POSITION, DCMHEADER_SR_REF_SERIES_SEQ, \
 	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_CODE_VALUE, DCMHEADER_CODING_SCHEME_DESIGNATOR, DCMHEADER_CODE_MEANING, \
-	DCMHEADER_ENCAPSULATED_DOCUMENT, DCMHEADER_ENCAPSULATED_DOCUMENT_MIMETYPE, DCMHEADER_MODALITY, DCMHEADER_SOP_CLASS_UID
+	DCMHEADER_ENCAPSULATED_DOCUMENT, DCMHEADER_ENCAPSULATED_DOCUMENT_MIMETYPE, DCMHEADER_MODALITY, DCMHEADER_SOP_CLASS_UID, \
+	DCMHEADER_CODING_SCHEME_VERSION
 from ..apisettings.media import DCMEDIA_ENCAPSULATED_STL_SOP_CLASS, DCMEDIA_STL_MIMETPYE
 from ..apisettings.m3d import M3D_UNIT_MM, M3D_UNIT_CM, M3D_UNIT_M, M3D_UNIT_UM, M3D_UNIT_SCALES, M3D_UNIT_CODING_SCHEME, \
 	M3D_COORDINATE_SYSTEM_LPS, M3D_COORDINATE_SYSTEM_RAS, \
 	M3D_FRAME_SOURCE_INSTANCE, M3D_FRAME_SOURCE_REFERENCE, M3D_FRAME_SOURCE_DEFAULT, M3D_DCM_SERIES_TAGS
+from ..apisettings.sr import srcode2dataset, DcmCode
+from ..imaging.helpers import headers as headers_module
 from ..imaging.helpers.m3d import M3DFrame, dcm_header_value, dcm_header_uid, dcm_referenced_series_uids, \
 	dcm_m3d_units, dcm_encode_m3d_units, dcm_m3d_frame_from_headers, dcm_m3d_frame
+from ..imaging.orthanc.media import DcmEncapsulatedDocumentInstance
+from ..imaging.orthanc.seg import DcmSegmentationInstance
 from ..imaging.orthanc.base import DcmInstance
 from ..imaging.orthanc.m3d import DcmM3DInstance
 from ..tasks.media import dcm_encode_stl
@@ -71,6 +76,51 @@ class HeaderAccessTest(unittest.TestCase):
 		self.assertIsNone(dcm_header_value(None, DCMHEADER_FRAME_OF_REFERENCE_UID))
 		self.assertEqual(dcm_referenced_series_uids({}), [])
 
+	def test_header_value_keeps_valid_falsey_values(self):
+		'''	Only absent headers, None and blank strings fall back to the default
+		'''
+		for value in (0, False, [], 0.0):
+			self.assertEqual(dcm_header_value({'InstanceNumber': value}, 'InstanceNumber', 'dflt'), value)
+		for value in (None, '', '   ', '\t'):
+			self.assertEqual(dcm_header_value({'InstanceNumber': value}, 'InstanceNumber', 'dflt'), 'dflt')
+		ds = Dataset(); ds.InstanceNumber = 0
+		self.assertEqual(dcm_header_value(ds, 'InstanceNumber', 'dflt'), 0)
+		self.assertEqual(dcm_header_value(ds, 'SeriesNumber', 'dflt'), 'dflt')
+
+		# Objects without `get` are read by attribute; UIDs are normalized, not validated
+		self.assertEqual(dcm_header_value(SimpleNamespace(Modality='CT'), DCMHEADER_MODALITY), 'CT')
+		self.assertEqual(dcm_header_uid({DCMHEADER_FRAME_OF_REFERENCE_UID: ' not-a-uid '}, DCMHEADER_FRAME_OF_REFERENCE_UID), 'not-a-uid')
+		self.assertEqual(dcm_header_uid({DCMHEADER_FRAME_OF_REFERENCE_UID: 12}, DCMHEADER_FRAME_OF_REFERENCE_UID), '12')
+
+	def test_referenced_series_uids(self):
+		'''	The shared reader (imaging.helpers.headers) lists the Referenced Series Sequence in order,
+			without repeats, skipping items without a UID and normalizing whitespace; the model
+			properties keep their set-valued API on top of it
+		'''
+		self.assertIs(dcm_referenced_series_uids, headers_module.dcm_referenced_series_uids)
+		tags = {DCMHEADER_SR_REF_SERIES_SEQ: [
+			{DCMHEADER_SERIES_INSTANCE_UID: SX_SEG}, {}, {DCMHEADER_SERIES_INSTANCE_UID: ' %s ' % SX_CT},
+			{DCMHEADER_SERIES_INSTANCE_UID: None}, {DCMHEADER_SERIES_INSTANCE_UID: '   '},
+			{DCMHEADER_SERIES_INSTANCE_UID: SX_SEG}, {DCMHEADER_SERIES_INSTANCE_UID: '1.2.3.mr'}]}
+		ds = Dataset()
+		ds.ReferencedSeriesSequence = Sequence([dataset_from_tags(dict((k, v) for k, v in item.items() if v is not None))
+			for item in tags[DCMHEADER_SR_REF_SERIES_SEQ]])
+		for headers in (tags, ds):
+			self.assertEqual(dcm_referenced_series_uids(headers), [SX_SEG, SX_CT, '1.2.3.mr'])
+
+		# Absent, None and empty sequences
+		for headers in ({}, {DCMHEADER_SR_REF_SERIES_SEQ: None}, {DCMHEADER_SR_REF_SERIES_SEQ: []}, Dataset(), None):
+			self.assertEqual(dcm_referenced_series_uids(headers), [])
+
+		# Model properties: same traversal, set-valued
+		for model_class in (DcmEncapsulatedDocumentInstance, DcmSegmentationInstance):
+			dcm = model_class(None, {'ID': 'doc-i1', 'MainDicomTags': {}}, series=SimpleNamespace(parent=None))
+			dcm._tags = tags
+			self.assertEqual(dcm.series_reference_uids, {SX_SEG, SX_CT, '1.2.3.mr'})
+			dcm = model_class(None, {'ID': 'doc-i2', 'MainDicomTags': {}}, series=SimpleNamespace(parent=None))
+			dcm._tags = {}
+			self.assertEqual(dcm.series_reference_uids, set())
+
 	def test_units(self):
 		self.assertIsNone(dcm_m3d_units({}))
 		self.assertEqual(dcm_m3d_units({}, default=M3D_UNIT_MM), M3D_UNIT_MM)
@@ -85,12 +135,27 @@ class HeaderAccessTest(unittest.TestCase):
 			dcm_m3d_units({DCMHEADER_MEASUREMENT_UNITS_CODE_SEQUENCE: [units_item(M3D_UNIT_MM, scheme='SCT')]})
 
 	def test_encode_units(self):
-		seq = dcm_encode_m3d_units(M3D_UNIT_UM)
-		self.assertEqual(len(seq), 1)
-		self.assertEqual((seq[0].CodeValue, seq[0].CodingSchemeDesignator, seq[0].CodeMeaning), ('um', 'UCUM', 'um'))
-		self.assertEqual(dcm_m3d_units({DCMHEADER_MEASUREMENT_UNITS_CODE_SEQUENCE: seq}), M3D_UNIT_UM)
+		for units in (M3D_UNIT_M, M3D_UNIT_CM, M3D_UNIT_MM, M3D_UNIT_UM):
+			seq = dcm_encode_m3d_units(units)
+			self.assertEqual(len(seq), 1)
+			self.assertEqual((seq[0].CodeValue, seq[0].CodingSchemeDesignator, seq[0].CodeMeaning), (units, 'UCUM', units))
+			self.assertNotIn(DCMHEADER_CODING_SCHEME_VERSION, seq[0])
+			self.assertEqual(dcm_m3d_units({DCMHEADER_MEASUREMENT_UNITS_CODE_SEQUENCE: seq}), units)
 		with self.assertRaises(ValueError):
 			dcm_encode_m3d_units('inch')
+
+	def test_coded_concept_serialization(self):
+		'''	The units are serialized by the shared converter. By default it writes the Coding Scheme
+			Version as an empty element when the code has none; the M3D sequence omits it (omit_empty)
+		'''
+		item = srcode2dataset(DcmCode('mm', 'UCUM', 'mm'))
+		self.assertIn(DCMHEADER_CODING_SCHEME_VERSION, item)
+		self.assertIsNone(item.CodingSchemeVersion)
+		item = srcode2dataset(DcmCode('mm', 'UCUM', 'mm'), omit_empty=True)
+		self.assertNotIn(DCMHEADER_CODING_SCHEME_VERSION, item)
+		self.assertEqual((item.CodeValue, item.CodingSchemeDesignator, item.CodeMeaning), ('mm', 'UCUM', 'mm'))
+		item = srcode2dataset(DcmCode('mm', 'UCUM', 'mm', scheme_version='2.1'), omit_empty=True)
+		self.assertEqual(item.CodingSchemeVersion, '2.1')
 
 
 class FrameResolutionTest(unittest.TestCase):

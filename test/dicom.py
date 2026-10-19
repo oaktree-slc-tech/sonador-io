@@ -17,6 +17,7 @@ from pydicom.data import get_testdata_file
 from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.sequence import Sequence
 from pydicom.sr.codedict import codes
+from pydicom.sr.coding import Code
 from pydicom.uid import UID
 from pydicom.uid import generate_uid, ImplicitVRLittleEndian, ExplicitVRLittleEndian, ExplicitVRBigEndian, \
 	SecondaryCaptureImageStorage, RLELossless
@@ -417,6 +418,34 @@ class SRReportTemplateTestCase(unittest.TestCase):
 		# Mirrors the upstream MeasurementReport signature
 		report = SonadorSRMeasurementReport(self.observation_context, self.procedure, [self.imaging_group()])
 		self.assert_report_structure(report, expect_imaging=True, expect_meta=False, expect_volume=False)
+
+	def procedure_items(self, root):
+		'''	(concept name, value scheme/code, relationship) of the Procedure Reported items of a root
+			container (the first item of a template, or the SR document itself), in order
+		'''
+		return [(item.ConceptNameCodeSequence[0].get('CodeValue'), item.ConceptCodeSequence[0].get('CodingSchemeDesignator'),
+				item.ConceptCodeSequence[0].get('CodeValue'), item.RelationshipType, item.ValueType)
+			for item in root.ContentSequence
+			if item.ConceptNameCodeSequence[0].get('CodeValue') == codes.DCM.ProcedureReported.value]
+
+	def test_procedure_items_match_upstream(self):
+		'''	The root built without imaging measurements encodes the procedures exactly as the upstream
+			MeasurementReport does (shared encoder), for one and for several procedures, in order
+		'''
+		for procedures in (self.procedure, [self.procedure, Code('24627-2', 'LN', 'CT Chest')]):
+			with self.subTest(procedures=procedures):
+				upstream = SonadorSRMeasurementReport(
+					observation_context=self.observation_context, procedure_reported=procedures,
+					imaging_measurements=[self.imaging_group()])
+				sonador = SonadorSRMeasurementReport(
+					observation_context=self.observation_context, procedure_reported=procedures,
+					meta_groups=[self.meta_group()])
+				items = self.procedure_items(sonador[0])
+				self.assertEqual(items, self.procedure_items(upstream[0]))
+				self.assertEqual([i[2] for i in items],
+					[p.value for p in (procedures if isinstance(procedures, list) else [procedures])])
+				self.assertEqual(set(i[3] for i in items), {RelationshipTypeValues.HAS_CONCEPT_MOD.value})
+				self.assertEqual(self.procedure_items(self.document(sonador)), items)
 
 	def test_empty_report_rejected(self):
 		with self.assertRaises(ValueError):
