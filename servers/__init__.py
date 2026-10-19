@@ -796,6 +796,11 @@ class SonadorServer(RemoteServer):
 
 # Imaging Server
 
+# Keyword arguments consumed by the Orthanc group proxy setup (SonadorImagingServer._orthanc_group_for)
+# and the request itself, which are not forwarded to the proxy methods
+ORTHANC_GROUP_PROXY_KWARGS = ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')
+
+
 class SonadorImagingServer(OrthancServerAuthDataCollectionMixin, OrthancServerBase):
 	'''	Object representation of a Sonador imaging server
 	'''
@@ -1582,49 +1587,28 @@ class SonadorImagingServer(OrthancServerAuthDataCollectionMixin, OrthancServerBa
 			@input group (sonador.servers.auth.SonadorGroup): group which the tag should be added to
 			@input tag (highdicom.sr.CodedConcept): coded concept that should be used to create the tag
 		'''
-		group_datacollection_class = self._group_datacollection_class(**kwargs)
-		orthanc_group_datamodel_class = self._orthanc_group_datamodel_class(**kwargs)
-
-		if not isinstance(group, group_datacollection_class.model):
-			raise TypeError('Invalid group instance, must be of type %s' % group_datacollection_class.model.__name__)
+		orthanc_group = self._orthanc_group_for(group, orthanc_group_datamodel_class=orthanc_group_datamodel_class, **kwargs)
 		if not isinstance(tag, CodedConcept):
-			raise TypeError('Invalid concept %s, must be of type %s' % (content, CodedConcept.__name__))
+			raise TypeError('Invalid concept %s, must be of type %s' % (tag, CodedConcept.__name__))
 
-		# Initialize Orthanc group instance and create tag
-		orthanc_group = orthanc_group_datamodel_class(self, group)
-		return orthanc_group.create_tag(tag, 
-			**omit(kwargs, ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')))
+		return orthanc_group.create_tag(tag, **omit(kwargs, ORTHANC_GROUP_PROXY_KWARGS))
 
 	def fetch_tags(self, group, **kwargs):
 		''' Retrieve the tags for the provided group
 		'''
-		group_datacollection_class = self._group_datacollection_class(**kwargs)
-		orthanc_group_datamodel_class = self._orthanc_group_datamodel_class(**kwargs)
-
-		if not isinstance(group, group_datacollection_class.model):
-			raise TypeError('Invalid group instance, must be of type %s' % group_datacollection_class.model.__name__)
-
-		# Initialize Orthanc group instance and fetch tag collection
-		orthanc_group = orthanc_group_datamodel_class(self, group)
-		return orthanc_group.fetch_tags(
-			**omit(kwargs, ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')))
+		return self._orthanc_group_for(group, **kwargs).fetch_tags(**omit(kwargs, ORTHANC_GROUP_PROXY_KWARGS))
 
 	def get_tag(self, group, uid, *args, **kwargs):
 		'''	Retrieve a tag instance
 		'''
-		group_datacollection_class = self._group_datacollection_class(**kwargs)
-		orthanc_group_datamodel_class = self._orthanc_group_datamodel_class(**kwargs)
-
-		if not isinstance(group, group_datacollection_class.model):
-			raise TypeError('Invalid group instance, must be of type %s' % group_datacollection_class.model.__name__)
-
-		# Initialize Orthanc group instance and fetch tag collection
-		orthanc_group = orthanc_group_datamodel_class(self, group)
-		return orthanc_group.get_tag(uid, 
-			**omit(kwargs, ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')))
+		return self._orthanc_group_for(group, **kwargs).get_tag(uid, *args, **omit(kwargs, ORTHANC_GROUP_PROXY_KWARGS))
 
 	def _orthanc_group_for(self, group, **kwargs):
-		'''	Orthanc group proxy for a Sonador group instance
+		'''	Orthanc group proxy for a Sonador group instance: the group is validated against the group
+			model of the server and wrapped in the Orthanc group data model (both classes may be
+			overridden through `group_datacollection_class` / `orthanc_group_datamodel_class`). Callers
+			strip those keyword arguments, and `verify`, before forwarding the rest to the proxy
+			(ORTHANC_GROUP_PROXY_KWARGS).
 		'''
 		group_datacollection_class = self._group_datacollection_class(**kwargs)
 		orthanc_group_datamodel_class = self._orthanc_group_datamodel_class(**kwargs)
@@ -1637,8 +1621,7 @@ class SonadorImagingServer(OrthancServerAuthDataCollectionMixin, OrthancServerBa
 	def fetch_display_attributes(self, group, **kwargs):
 		'''	Retrieve the display attributes of the provided group
 		'''
-		return self._orthanc_group_for(group, **kwargs).fetch_display_attributes(
-			**omit(kwargs, ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')))
+		return self._orthanc_group_for(group, **kwargs).fetch_display_attributes(**omit(kwargs, ORTHANC_GROUP_PROXY_KWARGS))
 
 	def create_display_attribute(self, group, code, label=None, **kwargs):
 		'''	Add a display attribute to the provided group
@@ -1647,13 +1630,13 @@ class SonadorImagingServer(OrthancServerAuthDataCollectionMixin, OrthancServerBa
 			@input label (str): optional display label
 		'''
 		return self._orthanc_group_for(group, **kwargs).create_display_attribute(code, label=label,
-			**omit(kwargs, ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')))
+			**omit(kwargs, ORTHANC_GROUP_PROXY_KWARGS))
 
 	def get_display_attribute(self, group, uid, *args, **kwargs):
 		'''	Retrieve one display attribute of the provided group
 		'''
 		return self._orthanc_group_for(group, **kwargs).get_display_attribute(uid, *args,
-			**omit(kwargs, ('verify', 'group_datacollection_class', 'orthanc_group_datamodel_class')))
+			**omit(kwargs, ORTHANC_GROUP_PROXY_KWARGS))
 
 	def update_display_attribute(self, group, uid, label, **kwargs):
 		'''	Change the display name of a display attribute

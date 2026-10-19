@@ -19,8 +19,9 @@
 	in millimetres. Headers may be given as pydicom datasets or as dictionaries of (Orthanc
 	simplified) tags, so that the frame can be resolved from the tags index without retrieving files.
 
-	@fn dcm_header_value: read a header from a dataset or tag dictionary
-	@fn dcm_referenced_series_uids: series referenced by an instance (ReferencedSeriesSequence)
+	Header access (`dcm_header_value`, `dcm_header_uid`, `dcm_referenced_series_uids`) is shared with
+	the Orthanc models through `sonador.imaging.helpers.headers`.
+
 	@fn dcm_m3d_units: units declared by the Measurement Units Code Sequence
 	@fn dcm_encode_m3d_units: encode the Measurement Units Code Sequence
 	@fn dcm_m3d_frame_from_headers: resolve the frame of reference and units of a model from headers
@@ -34,55 +35,13 @@ from pydicom.dataset import Dataset
 from pydicom.sequence import Sequence
 
 from ...apisettings import DCMHEADER_FRAME_OF_REFERENCE_UID, DCMHEADER_POSITION_REFERENCE_INDICATOR, \
-	DCMHEADER_PATIENT_POSITION, DCMHEADER_MEASUREMENT_UNITS_CODE_SEQUENCE, DCMHEADER_SERIES_INSTANCE_UID, \
-	DCMHEADER_SR_REF_SERIES_SEQ, DCMHEADER_CODE_VALUE, DCMHEADER_CODING_SCHEME_DESIGNATOR, DCMHEADER_CODE_MEANING
+	DCMHEADER_PATIENT_POSITION, DCMHEADER_MEASUREMENT_UNITS_CODE_SEQUENCE, \
+	DCMHEADER_CODE_VALUE, DCMHEADER_CODING_SCHEME_DESIGNATOR, DCMHEADER_CODE_MEANING
 from ...apisettings.m3d import M3D_UNIT_SCALES, M3D_UNIT_DEFAULT, M3D_UNIT_MM, M3D_UNIT_M, M3D_UNIT_CODING_SCHEME, \
 	M3D_COORDINATE_SYSTEM_LPS, M3D_COORDINATE_SYSTEM_RAS, M3D_COORDINATE_SYSTEMS, \
 	M3D_FRAME_SOURCE_INSTANCE, M3D_FRAME_SOURCE_REFERENCE, M3D_FRAME_SOURCE_DEFAULT, M3D_DERIVED_MODALITIES
-
-
-def dcm_header_value(headers, name, default=None):
-	'''	Retrieve a header value from a pydicom dataset or from a dictionary of tags (e.g. the
-		simplified tags of an Orthanc instance, or the main DICOM tags of a series). Empty values
-		are returned as the default.
-
-		@input headers (pydicom.dataset.Dataset or Mapping): headers
-		@input name (str): DICOM keyword of the header
-		@input default: value returned when the header is absent or empty
-
-		@returns header value or default
-	'''
-	if headers is None:
-		return default
-
-	value = headers.get(name, None) if isinstance(headers, Mapping) else getattr(headers, name, None)
-	if value is None or (isinstance(value, str) and not value.strip()):
-		return default
-
-	return value
-
-
-def dcm_header_uid(headers, name):
-	'''	Retrieve a UID header as a string (stripped), or None if absent or empty
-	'''
-	value = dcm_header_value(headers, name)
-	return str(value).strip() or None if value is not None else None
-
-
-def dcm_referenced_series_uids(headers):
-	'''	Series Instance UIDs of the series referenced by the headers (ReferencedSeriesSequence), in
-		the order of the sequence.
-
-		@input headers (pydicom.dataset.Dataset or Mapping): headers of the instance
-		@returns list of str
-	'''
-	uids = []
-	for item in dcm_header_value(headers, DCMHEADER_SR_REF_SERIES_SEQ) or []:
-		uid = dcm_header_uid(item, DCMHEADER_SERIES_INSTANCE_UID)
-		if uid and uid not in uids:
-			uids.append(uid)
-
-	return uids
+from ...apisettings.sr import DcmCode, srcode2dataset
+from .headers import dcm_header_value, dcm_header_uid, dcm_referenced_series_uids
 
 
 def dcm_m3d_units(headers, default=None):
@@ -124,10 +83,8 @@ def dcm_encode_m3d_units(units=M3D_UNIT_DEFAULT):
 		raise ValueError('Unsupported model scale unit "%s". Supported units (CID 7063, %s): %s.' % (
 			units, M3D_UNIT_CODING_SCHEME, ', '.join(M3D_UNIT_SCALES)))
 
-	item = Dataset()
-	setattr(item, DCMHEADER_CODE_VALUE, units)
-	setattr(item, DCMHEADER_CODING_SCHEME_DESIGNATOR, M3D_UNIT_CODING_SCHEME)
-	setattr(item, DCMHEADER_CODE_MEANING, units)
+	# CID 7063 codes the unit symbol as the meaning; no Coding Scheme Version is written
+	item = srcode2dataset(DcmCode(units, M3D_UNIT_CODING_SCHEME, units), omit_empty=True)
 
 	return Sequence([item])
 
@@ -276,12 +233,12 @@ def dcm_m3d_referenced_series(instance, headers=None):
 	if not reference_uids:
 		return []
 
-	# Study series by UID, then in the order of the references (a stable sort keeps that order
-	# within the image / derived groups)
+	# Study series by UID, then in the order of the references (already without repeats; a stable
+	# sort keeps that order within the image / derived groups)
 	study_series = {}
 	for sx in instance.model_study.series_collection:
 		study_series.setdefault(sx.series_uid, sx)
-	series = [study_series[uid] for uid in dict.fromkeys(reference_uids) if uid in study_series]
+	series = [study_series[uid] for uid in reference_uids if uid in study_series]
 
 	return sorted(series, key=lambda sx: sx.modality in M3D_DERIVED_MODALITIES)
 

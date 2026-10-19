@@ -54,12 +54,16 @@ DCMSR_CODE_SCHEME = 'SchemeDesignator'
 DCMSR_CDOE_SCHEME_VERSION = 'SchemeVersion'
 
 
-def srcode2dataset(dcmcode: Union[DcmCode,DcmCodedConcept], dcm_mdata=None, codedconcept_mapping=DCM_CODED_CONCEPT_MAPPING):
+def srcode2dataset(dcmcode: Union[DcmCode,DcmCodedConcept], dcm_mdata=None, codedconcept_mapping=DCM_CODED_CONCEPT_MAPPING,
+		omit_empty=False):
 	'''	Convert the provided DICOM-SR code or coded concept to a pydicom.dataset.Dataset instance.
 
 		@input dcmcode (highdicom.sr.template.Code): code instance to convert to a Dataset.
 		@input dcm_mdata (pydicom.dataset.Dataset, default=blank dataset instance): 
 			dataset to which the code data should be added.
+		@input omit_empty (bool, default=False): leave out the attributes the code does not provide
+			(e.g. the Coding Scheme Version of a code without one). By default they are written as
+			empty elements.
 
 		@returns pydicom.dataset.Dataset
 	'''
@@ -68,7 +72,10 @@ def srcode2dataset(dcmcode: Union[DcmCode,DcmCodedConcept], dcm_mdata=None, code
 
 	# Map values from Code/CodedConcept to Dataset
 	for k,v in codedconcept_mapping.items():
-		setattr(dcm_mdata, v, getattr(dcmcode, k, None))
+		value = getattr(dcmcode, k, None)
+		if value is None and omit_empty:
+			continue
+		setattr(dcm_mdata, v, value)
 
 	return dcm_mdata
 

@@ -259,9 +259,7 @@ class SonadorSRMeasurementReport(SRMeasurementReport):
 		if isinstance(procedure_reported, (DcmCodedConcept, DcmCode)):
 			procedure_reported = [procedure_reported]
 		for procedure in procedure_reported:
-			item.ContentSequence.append(CodeContentItem(
-				name=dcmcodes.DCM.ProcedureReported, value=procedure,
-				relationship_type=RelationshipTypeValues.HAS_CONCEPT_MOD))
+			item.ContentSequence.append(srencode_procedure_reported(procedure))
 
 		if referenced_images:
 			item.ContentSequence.extend(ImageLibrary(referenced_images))

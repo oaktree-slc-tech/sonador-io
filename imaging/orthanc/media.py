@@ -7,6 +7,7 @@ from ...apisettings import DCMHEADER_SERIES_INSTANCE_UID, \
 
 from .base import DcmInstanceCoreResource, DcmInstanceCoreCollection, ImagingSeriesBulkPopulateMixin
 from .sr import DcmSRSeries, DcmSRSeriesCollection, DcmStructuredInstance, DcmStructuredInstanceCollection
+from ..helpers.headers import dcm_referenced_series_uids
 
 
 class DcmEncapsulatedDocumentSeries(DcmSRSeries):
@@ -48,8 +49,7 @@ class DcmEncapsulatedDocumentInstance(DcmStructuredInstance):
 			
 			@returns set of all unique series UIDs referenced by the document instance.
 		'''
-		return set([refset.get(DCMHEADER_SERIES_INSTANCE_UID) for refset in self.tags.get(DCMHEADER_SR_REF_SERIES_SEQ, [])
-			if refset.get(DCMHEADER_SERIES_INSTANCE_UID)])
+		return set(dcm_referenced_series_uids(self.tags))
 
 
 class DcmEncapsulatedDocumentInstanceCollection(DcmStructuredInstanceCollection):
