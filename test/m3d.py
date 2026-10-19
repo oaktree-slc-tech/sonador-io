@@ -211,6 +211,23 @@ class M3DInstanceFrameTest(unittest.TestCase):
 		self.assertEqual([sx.series_uid for sx in dcm.referenced_series(dataset_from_tags(model_tags(references=(SX_SEG,))))],
 			[SX_SEG])
 
+	def test_referenced_series_keep_reference_order(self):
+		'''	Two referenced image series in different frames of reference: the first reference of the
+			model provides the frame whichever order the study enumerates its series in
+		'''
+		ct_a = series_stub('1.2.3.ct.a', 'CT', instance_tags={DCMHEADER_FRAME_OF_REFERENCE_UID: '1.2.3.for.a'})
+		ct_b = series_stub('1.2.3.ct.b', 'CT', instance_tags={DCMHEADER_FRAME_OF_REFERENCE_UID: '1.2.3.for.b'})
+		seg = series_stub(SX_SEG, 'SEG', instance_tags={DCMHEADER_FRAME_OF_REFERENCE_UID: '1.2.3.for.b'})
+		tags = model_tags(references=(SX_SEG, ct_a.series_uid, ct_b.series_uid, ct_a.series_uid))
+
+		for study_series in ([ct_a, ct_b, seg], [ct_b, ct_a, seg], [seg, ct_b, ct_a]):
+			dcm = self.make_instance(tags, study_series)
+			self.assertEqual([sx.series_uid for sx in dcm.source_series], [ct_a.series_uid, ct_b.series_uid, SX_SEG])
+			frame = dcm.frame
+			self.assertEqual((frame.frame_of_reference_uid, frame.source_series_uid), ('1.2.3.for.a', ct_a.series_uid))
+			self.assertEqual((ct_a.tag_requests, ct_b.tag_requests, seg.tag_requests), (1, 0, 0))
+			ct_a.tag_requests = 0
+
 	def test_frame_from_source_series_instance_tags(self):
 		'''	The series main tags carry no frame of reference (Orthanc's default main tags do not), so
 			the tags of the first instance of the preferred series are retrieved; the other series is

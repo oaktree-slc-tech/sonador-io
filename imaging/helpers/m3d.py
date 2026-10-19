@@ -261,7 +261,9 @@ def dcm_m3d_frame_from_headers(headers, references=(), default_units=M3D_UNIT_DE
 def dcm_m3d_referenced_series(instance, headers=None):
 	'''	Series of the parent study referenced by a model instance (ReferencedSeriesSequence): the
 		imaging and segmentation series the model was derived from. Image series are listed before
-		derived series (SEG, SR, ...), as the preferred source of a frame of reference.
+		derived series (SEG, SR, ...), as the preferred source of a frame of reference; within each
+		group the series keep the order of the model's references (the order in which the study
+		enumerates its series does not affect the result).
 
 		@input instance (sonador.imaging.orthanc.base.DcmInstanceCoreResource): model instance (any
 			instance of an M3D series, whichever model class represents it)
@@ -271,8 +273,15 @@ def dcm_m3d_referenced_series(instance, headers=None):
 		@returns list of sonador.imaging.orthanc.base.ImagingSeries
 	'''
 	reference_uids = dcm_referenced_series_uids(instance.tags if headers is None else headers)
-	series = [sx for sx in instance.model_study.series_collection if sx.series_uid in reference_uids] \
-		if reference_uids else []
+	if not reference_uids:
+		return []
+
+	# Study series by UID, then in the order of the references (a stable sort keeps that order
+	# within the image / derived groups)
+	study_series = {}
+	for sx in instance.model_study.series_collection:
+		study_series.setdefault(sx.series_uid, sx)
+	series = [study_series[uid] for uid in dict.fromkeys(reference_uids) if uid in study_series]
 
 	return sorted(series, key=lambda sx: sx.modality in M3D_DERIVED_MODALITIES)
 
