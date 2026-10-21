@@ -1579,6 +1579,7 @@ class SonadorImagingServer(OrthancServerAuthDataCollectionMixin, OrthancServerBa
 
 			@input group (sonador.servers.auth.SonadorGroup): group which the tag should be added to
 			@input tag (highdicom.sr.CodedConcept): coded concept that should be used to create the tag
+			@input meta (dict): optional `Meta` document (display attributes) stored with the tag
 		'''
 		group_datacollection_class = self._group_datacollection_class(**kwargs)
 		orthanc_group_datamodel_class = self._orthanc_group_datamodel_class(**kwargs)

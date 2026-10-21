@@ -28,24 +28,27 @@ class SonadorTagsApiTests(AclBaseTestCase):
 		'''
 		iserver = self.getImageServer()
 
-		# Remove all policies associated with test user or groups
+		# Remove tags created by test methods, then the policies. A group's tags are reachable
+		# only while the group has a policy on the server, and a removal requires Series Tags to be
+		# enabled on that policy, even for the administrator.
 		testgroup01 = iserver.server.admin_create_group(self.testgroup01)
 		testgroup02 = iserver.server.admin_create_group(self.testgroup02)
 		_group_ids = set((testgroup01.pk, testgroup02.pk))
 
 		for _acl_policy in iserver.fetch_acl():
-			if _acl_policy.group in _group_ids:
-				_acl_policy.delete()
+			if _acl_policy.group not in _group_ids:
+				continue
 
-		# Remove tags created by test methods
-		for g in (testgroup01, testgroup02):
-
-			try: 
-				for _t in iserver.fetch_tags(g):
+			try:
+				_acl_policy.update({ 'tag': True })
+				for _t in iserver.fetch_tags(testgroup01 if _acl_policy.group == testgroup01.pk else testgroup02):
 					_t.delete()
-			
+
 			except Exception as err:
-				logger.warning('Unable to remove tags for group=%s due to an error. Error:\n%s' % (g.pk, err))
+				logger.warning('Unable to remove tags for group=%s due to an error. Error:\n%s' % (_acl_policy.group, err))
+
+			finally:
+				_acl_policy.delete()
 
 	def test_tag_management(self, *args, **kwargs):
 		'''	Ensure that it is possible to create and manage DICOM tags
@@ -59,8 +62,9 @@ class SonadorTagsApiTests(AclBaseTestCase):
 		iserver, testgroup, testuser = self.setupTestAuth(
 			testuser_config=TESTUSER01, testgroup_name=self.testgroup01, **kwargs)
 
-		# Create server policy to associate the group with the image server
-		testacl = iserver.admin_create_acl(testgroup, { 'resource': '*', 'duration': 1 })
+		# Create server policy to associate the group with the image server; Series Tags must be
+		# enabled on it before anyone, the administrator included, may create or remove tags
+		testacl = iserver.admin_create_acl(testgroup, { 'resource': '*', 'duration': 1, 'tag': True, 'tag_modify': True })
 
 		# Create tag via API
 		try: tag0 = iserver.create_tag(testgroup, TEST_IMG_ACCEPT)
@@ -92,3 +96,45 @@ class SonadorTagsApiTests(AclBaseTestCase):
 		# Delete ACL policy and ensure that attempting to retrieve the tags for the group results in a 404 error
 		testacl.delete()
 		self.assertRaises(ClientOperationError, lambda: iserver.fetch_tags(testgroup))
+
+	def test_tag_meta(self, *args, **kwargs):
+		'''	Ensure that a tag's `Meta` document (display attributes) can be created, read, replaced,
+			and cleared, and that invalid display attributes are refused
+
+			1.	Create a tag with display colors; colors are returned in canonical `#RRGGBB` form
+			2.	Replace the document with `update_meta`; the code fields are unchanged
+			3.	An invalid color is refused and the stored document is kept
+			4.	`update_meta(None)` clears the document
+		'''
+		iserver, testgroup, testuser = self.setupTestAuth(
+			testuser_config=TESTUSER01, testgroup_name=self.testgroup01, **kwargs)
+		iserver.admin_create_acl(testgroup, { 'resource': '*', 'duration': 1, 'tag': True, 'tag_modify': True })
+
+		tag0 = iserver.create_tag(testgroup, TEST_IMG_ACCEPT,
+			meta={ 'DisplayAttributes': { 'Color': { 'Background': '#123', 'Value': '#8ad0a8' } } })
+
+		tag1 = iserver.get_tag(testgroup, tag0.pk)
+		self.assertEqual(tag1.display_color, { 'Background': '#112233', 'Value': '#8AD0A8' })
+
+		# The instance holds the normalized document and does not alias the caller's dictionary
+		meta = { 'DisplayAttributes': { 'Color': { 'Value': '#abc', 'Meaning': None } } }
+		tag1.update_meta(meta)
+		self.assertEqual(tag1.display_color, { 'Value': '#AABBCC' })
+		meta['DisplayAttributes']['Color']['Value'] = '#000000'
+		self.assertEqual(tag1.display_color, { 'Value': '#AABBCC' })
+
+		tag1.update_meta({ 'DisplayAttributes': { 'Color': { 'Meaning': '#C0C7F8' } } })
+		self.assertEqual(tag1.display_color, { 'Meaning': '#C0C7F8' })
+		tag2 = iserver.get_tag(testgroup, tag0.pk)
+		self.assertEqual(tag2.display_color, { 'Meaning': '#C0C7F8' })
+		self.assertEqual((tag2.value, tag2.meaning, tag2.scheme, tag2.scheme_version),
+			(TEST_IMG_ACCEPT.value, TEST_IMG_ACCEPT.meaning, TEST_IMG_ACCEPT.scheme_designator, TEST_IMG_ACCEPT.scheme_version))
+
+		for invalid in ({ 'DisplayAttributes': { 'Color': { 'Value': 'green' } } }, { 'DisplayAttributes': { 'Font': 'Arial' } }, { 'Unknown': {} }):
+			self.assertRaises(ClientOperationError, lambda: tag2.update_meta(invalid))
+		self.assertEqual(iserver.get_tag(testgroup, tag0.pk).display_color, { 'Meaning': '#C0C7F8' })
+
+		tag2.update_meta(None)
+		self.assertEqual((tag2.meta, tag2.display_color), ({}, {}))
+		tag3 = iserver.get_tag(testgroup, tag0.pk)
+		self.assertEqual((tag3.meta, tag3.display_color), ({}, {}))
