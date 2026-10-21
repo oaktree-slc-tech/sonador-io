@@ -46,10 +46,12 @@ class SonadorDisplayAttributesApiTests(AclBaseTestCase):
 		return iserver.admin_create_acl(group, perms)
 
 	def _remove_policy(self, iserver, group, policy):
-		'''	A group's collection is reachable only while the group has a policy on the server, so the
-			attributes are removed as the administrator before the policy is.
+		'''	A group's collection is reachable only while the group has a policy on the server, and a
+			removal, even by the administrator, requires the feature to be enabled on that policy; so
+			the policy is re-enabled, the attributes are removed, and the policy is deleted last.
 		'''
 		try:
+			policy.update({ 'display_attr': True })
 			for tag in iserver.fetch_display_attributes(group):
 				tag.delete()
 		finally:
@@ -191,6 +193,11 @@ class SonadorDisplayAttributesApiTests(AclBaseTestCase):
 				self.assertDenied(lambda: iserver_staff.delete_display_attribute(group02, seeded.pk), msg='staff delete on a policy without display_attr')
 				self.assertEqual(iserver.get_display_attribute(group02, seeded.pk).label, 'Seeded')
 				self.assertNotIn(group02.pk, set(g['id'] for g in iserver_staff.fetch_display_attributes_aggregate()['groups']))
+
+				# The plugin applies the rule itself: the administrator, whom Sonador authorizes for
+				# everything, is refused a create on the disabled policy with a validation error
+				self.assertRejected(lambda: iserver.create_display_attribute(group02, INDEXED_CODE), msg='administrator create on a policy without display_attr')
+				self.assertEqual(self._codes(iserver.fetch_display_attributes(group02)), { '0008,103E' })
 
 		finally:
 			for group in (group01, group02):

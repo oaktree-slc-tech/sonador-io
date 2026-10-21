@@ -53,6 +53,9 @@ DCMSR_CODE_MEANING = 'Meaning'
 DCMSR_CODE_SCHEME = 'SchemeDesignator'
 DCMSR_CDOE_SCHEME_VERSION = 'SchemeVersion'
 
+# Document of properties attached to a tag, e.g. display attributes (see display_attrs)
+DCMSR_TAG_META = 'Meta'
+
 
 def srcode2dataset(dcmcode: Union[DcmCode,DcmCodedConcept], dcm_mdata=None, codedconcept_mapping=DCM_CODED_CONCEPT_MAPPING):
 	'''	Convert the provided DICOM-SR code or coded concept to a pydicom.dataset.Dataset instance.
