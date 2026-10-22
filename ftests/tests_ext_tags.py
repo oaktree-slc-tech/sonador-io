@@ -111,10 +111,10 @@ class SonadorTagsApiTests(AclBaseTestCase):
 		iserver.admin_create_acl(testgroup, { 'resource': '*', 'duration': 1, 'tag': True, 'tag_modify': True })
 
 		tag0 = iserver.create_tag(testgroup, TEST_IMG_ACCEPT,
-			meta={ 'DisplayAttributes': { 'Color': { 'Background': '#123', 'Value': '#8ad0a8' } } })
+			meta={ 'DisplayAttributes': { 'Color': { 'Background': '#123', 'Border': '#fff', 'Value': '#8ad0a8' } } })
 
 		tag1 = iserver.get_tag(testgroup, tag0.pk)
-		self.assertEqual(tag1.display_color, { 'Background': '#112233', 'Value': '#8AD0A8' })
+		self.assertEqual(tag1.display_color, { 'Background': '#112233', 'Border': '#FFFFFF', 'Value': '#8AD0A8' })
 
 		# The instance holds the normalized document and does not alias the caller's dictionary
 		meta = { 'DisplayAttributes': { 'Color': { 'Value': '#abc', 'Meaning': None } } }
