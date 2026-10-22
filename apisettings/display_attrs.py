@@ -1,6 +1,6 @@
 '''	Display attributes: properties which control how a resource is rendered in the viewer.
 
-	The shared element is the color-role contract (`Background`, `Value`, `Meaning`, each a
+	The shared element is the color-role contract (`Background`, `Border`, `Value`, `Meaning`, each a
 	hexadecimal sRGB color). Each consumer wraps it differently; a tag stores it in its `Meta`
 	document (`DCMSR_TAG_META`) as `{ 'DisplayAttributes': { 'Color': {...} } }`.
 '''
@@ -10,9 +10,10 @@ import re
 DISPLAY_ATTRIBUTES = 'DisplayAttributes'
 DISPLAY_ATTRIBUTES_COLOR = 'Color'
 DISPLAY_COLOR_BACKGROUND = 'Background'
+DISPLAY_COLOR_BORDER = 'Border'
 DISPLAY_COLOR_VALUE = 'Value'
 DISPLAY_COLOR_MEANING = 'Meaning'
-DISPLAY_COLOR_ROLES = (DISPLAY_COLOR_BACKGROUND, DISPLAY_COLOR_VALUE, DISPLAY_COLOR_MEANING)
+DISPLAY_COLOR_ROLES = (DISPLAY_COLOR_BACKGROUND, DISPLAY_COLOR_BORDER, DISPLAY_COLOR_VALUE, DISPLAY_COLOR_MEANING)
 
 HEX_COLOR_RE = re.compile(r'^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$')
 

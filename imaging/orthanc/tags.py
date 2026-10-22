@@ -96,7 +96,7 @@ class Tag(DcmExtParentMixin, DcmExtBaseModel):
 
 	@property
 	def display_color(self):
-		'''	Colors of the rendered tag: `Background`, `Value` and `Meaning` (hexadecimal `#RRGGBB`)
+		'''	Colors of the rendered tag: `Background`, `Border`, `Value` and `Meaning` (hexadecimal `#RRGGBB`)
 		'''
 		return tag_display_color(self.meta)
 
