@@ -62,21 +62,16 @@ class OrthancGroup:
 		'''
 		return self.tags_modelcollection_class.fetch(parent=self, **kwargs)
 
-	def create_tag(self, tag, **kwargs):
+	def create_tag(self, tag, meta=None, **kwargs):
 		'''	Create a tag for the group
 
 			@input tag (highdicom.CodedConcept): coded concept to be used for the tag
+			@input meta (dict): optional `Meta` document, e.g. display attributes
+				`{ 'DisplayAttributes': { 'Color': { 'Value': '#8AD0A8' } } }`
 		'''
-		# Unpack coded concept values to JSON
-		_data = {
-			DCMSR_CODE_VALUE: tag.value, 
-			DCMSR_CODE_MEANING: tag.meaning, 
-			DCMSR_CODE_SCHEME: tag.scheme_designator,
-		}
-		if tag.scheme_version:
-			_data[DCMSR_CDOE_SCHEME_VERSION] = tag.scheme_version
-
-		# Convert coded concept data to dict
+		from .tags import tag_api_json
+		_data = tag_api_json(tag.value, tag.meaning, tag.scheme_designator, tag.scheme_version,
+			**({ 'meta': meta } if meta else {}))
 		return self.tags_modelcollection_class.create(self, _data, **kwargs)
 
 	def get_tag(self, uid, *args, **kwargs):

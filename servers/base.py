@@ -677,11 +677,18 @@ class ImagingServerChildCollectionFetchMixin:
 	@classmethod
 	def fetch_modelinstance(cls, pacs, objectid, error_msg=None,
 			apiurl_callable='orthanc_apiurl', headers_callable='orthanc_request_headers', **kwargs):
-		'''	Retrieve 
+		'''	Retrieve a single model instance from the PACS server
+
+			@input verify (bool or str): SSL verification of the request; the connection default when None
+			@input headers (dict): additional request headers, sent together with the headers the
+				`headers_callable` builds (which take precedence, as in `orthanc_request_headers`)
 		'''
 		verify = kwargs.pop('verify', None)
 		if verify is None:
 			verify = pacs.server.verify
+
+		# Caller headers: merged into the request below, not forwarded to the model constructor
+		headers = kwargs.pop('headers', None)
 
 		if not error_msg:
 			error_msg = lambda r: request_client_error(
@@ -690,8 +697,12 @@ class ImagingServerChildCollectionFetchMixin:
 				), r)
 
 		def fetch_modelinstance(resource_endpoint, *_args, **_kwargs):
-			'''	Patch pacs._request_get to include error message callable
+			'''	Patch pacs._request_get to include the error message callable and the caller headers
 			'''
+			if headers:
+				_headers = dict(headers)
+				_headers.update(_kwargs.get('headers') or {})
+				_kwargs['headers'] = _headers
 			return pacs._request_get(resource_endpoint, error_msg, *_args, **_kwargs)
 
 		return fetch_sonador_dataobject(

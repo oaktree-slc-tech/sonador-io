@@ -20,6 +20,30 @@ from .base import KafkaMixin
 logger = logging.getLogger(__name__)
 
 
+# Request options of a write that also apply to the GET reading the resource back: the SSL
+# `verify` setting, additional request `headers`, and the extra transport arguments (`rkwargs`:
+# timeout, cert, proxies, ...). Two kinds of `rkwargs` entries are left out. `data` and `files`
+# are write-only payload: the readback sends none. `json`, `headers` and `verify` are set by the
+# write itself (see `sonador_dataobject_update`), which overwrites whatever `rkwargs` carried under
+# those names; the readback sends no `json`, and takes `headers` and `verify` as its own arguments,
+# so forwarding the entries would pass those two twice.
+READBACK_REQUEST_OPTIONS = ('verify', 'headers', 'rkwargs')
+RKWARGS_RESERVED_OPTIONS = ('json', 'data', 'files', 'headers', 'verify')
+
+
+def readback_request_options(kwargs):
+	'''	Request options for reading a resource back after a write made with `kwargs`, so that
+		the readback reaches the server the same way the write did
+
+		@input kwargs (dict): keyword arguments of the write (`DcmExtBaseModel.update`)
+		@returns dict: keyword arguments for the `fetch_modelinstance` of the resource's collection
+	'''
+	options = pick(kwargs, READBACK_REQUEST_OPTIONS)
+	if options.get('rkwargs'):
+		options['rkwargs'] = omit(options['rkwargs'], RKWARGS_RESERVED_OPTIONS)
+	return options
+
+
 class DcmExtBaseModel(GuruBaseObject):
 	'''	Extension base model: data object associated with a DICOM resource
 	'''
