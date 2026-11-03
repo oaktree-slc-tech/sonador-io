@@ -24,10 +24,11 @@ HIGHDICOM_DISTRIBUTION = 'highdicom'
 HIGHDICOM_FORK_URL = 'https://code.oak-tree.tech/oak-tree/medical-imaging/highdicom'
 HIGHDICOM_FORK_INDEX_URL = 'https://code.oak-tree.tech/api/v4/projects/335/packages/pypi/simple'
 
-# Exact pin of the published fork artifact. A compatible-release specifier (`~=`) ignores the
-# post-release segment when deriving its prefix and therefore also admits stock 0.28.x releases
-# (0.28.3, ...), which install fine but lack `record_instances`. Bump the version here, in
-# requirements.txt and in packages/sonador together when a new fork build is published.
+# Version of the published highdicom fork build the client is developed against. It identifies
+# the fork release in `highdicom_dist_is_fork_release` and names the build to install in the
+# ImportError raised by `require_oaktree_highdicom`. The installable constraint is declared by the
+# packaging repository (packages/sonador, `setup.py`), which is updated alongside this value when
+# a new fork build is published.
 HIGHDICOM_FORK_VERSION = '0.28.2.post1'
 HIGHDICOM_FORK_REQUIREMENT = '%s==%s' % (HIGHDICOM_DISTRIBUTION, HIGHDICOM_FORK_VERSION)
 

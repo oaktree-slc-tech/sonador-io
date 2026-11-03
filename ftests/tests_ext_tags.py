@@ -96,3 +96,45 @@ class SonadorTagsApiTests(AclBaseTestCase):
 		# Delete ACL policy and ensure that attempting to retrieve the tags for the group results in a 404 error
 		testacl.delete()
 		self.assertRaises(ClientOperationError, lambda: iserver.fetch_tags(testgroup))
+
+	def test_tag_meta(self, *args, **kwargs):
+		'''	Ensure that a tag's `Meta` document (display attributes) can be created, read, replaced,
+			and cleared, and that invalid display attributes are refused
+
+			1.	Create a tag with display colors; colors are returned in canonical `#RRGGBB` form
+			2.	Replace the document with `update_meta`; the code fields are unchanged
+			3.	An invalid color is refused and the stored document is kept
+			4.	`update_meta(None)` clears the document
+		'''
+		iserver, testgroup, testuser = self.setupTestAuth(
+			testuser_config=TESTUSER01, testgroup_name=self.testgroup01, **kwargs)
+		iserver.admin_create_acl(testgroup, { 'resource': '*', 'duration': 1, 'tag': True, 'tag_modify': True })
+
+		tag0 = iserver.create_tag(testgroup, TEST_IMG_ACCEPT,
+			meta={ 'DisplayAttributes': { 'Color': { 'Background': '#123', 'Border': '#fff', 'Value': '#8ad0a8' } } })
+
+		tag1 = iserver.get_tag(testgroup, tag0.pk)
+		self.assertEqual(tag1.display_color, { 'Background': '#112233', 'Border': '#FFFFFF', 'Value': '#8AD0A8' })
+
+		# The instance holds the normalized document and does not alias the caller's dictionary
+		meta = { 'DisplayAttributes': { 'Color': { 'Value': '#abc', 'Meaning': None } } }
+		tag1.update_meta(meta)
+		self.assertEqual(tag1.display_color, { 'Value': '#AABBCC' })
+		meta['DisplayAttributes']['Color']['Value'] = '#000000'
+		self.assertEqual(tag1.display_color, { 'Value': '#AABBCC' })
+
+		tag1.update_meta({ 'DisplayAttributes': { 'Color': { 'Meaning': '#C0C7F8' } } })
+		self.assertEqual(tag1.display_color, { 'Meaning': '#C0C7F8' })
+		tag2 = iserver.get_tag(testgroup, tag0.pk)
+		self.assertEqual(tag2.display_color, { 'Meaning': '#C0C7F8' })
+		self.assertEqual((tag2.value, tag2.meaning, tag2.scheme, tag2.scheme_version),
+			(TEST_IMG_ACCEPT.value, TEST_IMG_ACCEPT.meaning, TEST_IMG_ACCEPT.scheme_designator, TEST_IMG_ACCEPT.scheme_version))
+
+		for invalid in ({ 'DisplayAttributes': { 'Color': { 'Value': 'green' } } }, { 'DisplayAttributes': { 'Font': 'Arial' } }, { 'Unknown': {} }):
+			self.assertRaises(ClientOperationError, lambda: tag2.update_meta(invalid))
+		self.assertEqual(iserver.get_tag(testgroup, tag0.pk).display_color, { 'Meaning': '#C0C7F8' })
+
+		tag2.update_meta(None)
+		self.assertEqual((tag2.meta, tag2.display_color), ({}, {}))
+		tag3 = iserver.get_tag(testgroup, tag0.pk)
+		self.assertEqual((tag3.meta, tag3.display_color), ({}, {}))
