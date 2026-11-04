@@ -38,6 +38,62 @@ Examples of how to utilize the features of the client can be found in the [Sonad
 * An overview of working with structured data (via DICOM-SR documents) can be found [here](https://code.oak-tree.tech/oak-tree/medical-imaging/sonador-examples/-/blob/master/sonador-client02.dicom-sr.ipynb?ref_type=heads).
 * Basic AI capabilities and how to interface with AI based tools (via `numpy`) are demonstrated in [this notebook](https://code.oak-tree.tech/oak-tree/medical-imaging/sonador-examples/-/blob/master/sonador-client03.ai-lung.ipynb?ref_type=heads).
 
+### Series Tags and DICOM-SR Findings
+Series Tags are qualitative findings that apply to a whole imaging series. The Sonador Viewer and
+Sonador IO exchange them as TID 1500 DICOM-SR documents under the Sonador-SR 0.3 profile
+(`sonador.apisettings.sr.seriestag`): one measurement group per tag, the tag code carried verbatim, and
+the per-finding properties (description, text, location, display colours) as children of the Finding.
+Readers accept Enhanced SR, Comprehensive SR and Comprehensive 3D SR with root template `1500` or
+`Sonador-SR.1500`, including files written by earlier Viewer releases, and record every repair as a
+diagnostic (`info` / `warning` / `error`; `strict=True` raises on `warning` and `error`).
+
+```python
+from sonador.imaging.helpers.sr import SonadorComprehensiveSR3D, SonadorImagingMeasurementReport
+from sonador.apisettings.base import Finding
+
+# Read: one document -> report model; one or more documents -> DcmSRSeries with parsed instances
+report = SonadorComprehensiveSR3D.from_sr('report.dcm')
+report.series_tag_findings                       # Finding: value, meaning, tracking_uid, reference,
+report.diagnostics                               #   description, text, location, display
+for report_group in report.groups:               # every group; a group read without a Finding code
+	for finding in report_group.findings or ():  #   (kept as a generic group) has findings=None
+		...
+
+# Write: a new Imaging Measurement Report for the Viewer (Comprehensive 3D SR, Sonador-SR.1500)
+tag = study.pacs.get_tag(group, tag_id)          # or any Code / CodedConcept
+model = SonadorImagingMeasurementReport(sonador_ref_series=series, findings=[Finding.series_tag(tag, description='...')],
+	report_procedure=procedure, person_observer='Family^Given', record_instances=False)
+document = model.create_sr()                     # evidence synthesised from the cached JSON
+
+# Re-save: same template, predecessor linked; Enhanced SR parent -> Enhanced SR (flat layout; upgraded
+# to Comprehensive 3D SR with a warning when the content needs it), Comprehensive SR parent ->
+# Comprehensive 3D SR, Comprehensive 3D SR parent -> Comprehensive 3D SR
+report.create_sr()
+```
+
+With `record_instances=False` the evidence is built from the cached patient, study, series and
+instance JSON. That makes no request when the instance JSON carries the SOP class and SOP instance
+UIDs, which is the case for a study populated with `bulkpopulate_related(child_instances=True)` on
+the Sonador Orthanc build; an instance whose cached tags lack them is fetched once. With
+`record_instances=True` every instance of the reference series is downloaded and recorded.
+
+Findings are retrieved from an imaging server through the study. After
+`study_collection.bulkpopulate_related(child_instances=True)` the first access parses the current
+document of every SR series of the study (one `file` request per SR series, none afterwards;
+`parse_sr=True` does the same inside the bulk call, `study.parse_sr(all_revisions=True)` also loads
+the superseded revisions). The three entry points differ in scope and shape:
+
+```python
+study.findings()                                 # {imaging_series_uid: {measurement_type: FindingCollection}}
+study.findings(series_uid)                       # {measurement_type: FindingCollection} for one imaging series
+study.findings(series_uid, 'series-tag')         # FindingCollection (empty when there is none)
+series.findings()                                # {measurement_type: FindingCollection} for this imaging series
+series.findings('series-tag')                    # FindingCollection, served through the parent study's cache
+sr_series.findings()                             # the study-shaped mapping, from this SR series' current document only
+```
+
+Each `Finding` links back to its `ImagingSeries`, `DcmInstance` and `DcmSRInstance`.
+
 ### Coordinate System and Units of M3D Models
 Encapsulated STL instances (M3D modality) carry a Frame of Reference UID (the origin and axes implicit
 in the model data) and a Measurement Units Code Sequence (units of distance of the model coordinates,

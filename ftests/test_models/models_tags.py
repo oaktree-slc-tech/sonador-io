@@ -1,7 +1,8 @@
 '''	Tests of the Series Tag model which need no server connection: the `Meta` document write and
 	the readback that follows it.
 
-	Run from the directory containing the `sonador` package: python -m unittest sonador.test.tags
+	Run from the directory containing the `sonador` package:
+		python -m unittest sonador.ftests.test_models.models_tags
 '''
 import unittest
 
@@ -11,7 +12,9 @@ from sonador.imaging.orthanc.ext import readback_request_options
 from sonador.imaging.orthanc.group import OrthancGroup
 from sonador.imaging.orthanc.tags import Tag, TagCollection
 
-from .worklists import IMAGESERVER_JSON, FakeResponse
+from ...test.fakes import IMAGESERVER_JSON, FakeResponse
+
+__all__ = ['ReadbackRequestOptionsTestCase', 'TagMetaReadbackTestCase']
 
 TAG_JSON = {'ID': 'tag-1', 'Value': 'T-1', 'Meaning': 'Tag one', 'SchemeDesignator': 'SONADOR', 'Meta': {'DisplayAttributes': {'Color': {'Value': '#112233'}}}}
 

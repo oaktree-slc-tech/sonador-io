@@ -27,6 +27,7 @@ from ...apisettings import ImageCoord, ImageSpacing, ImageOrientation, ImageStac
 	RGBColor, LABColor, XYZColor, EUCLID_COORD_ORIGIN, DicomDatetimePairKey, DicomDatetimePair, DicomMetaKey, DicomMeta, \
 	IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
 	IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_LAST_UPDATE, IMAGING_SERVER_RECEPTION_DATE, IMAGING_SERVER_DICOMTAGS_SIGNATURE, \
+	IMAGING_SERVER_METADATA, \
 	IMAGING_SERVER_SERIES_INDEX, IMAGING_SERVER_FILE_SIZE, IMAGING_SERVER_FILE_UUID, \
 	IMAGING_SERVER_PARENT_PATIENT, IMAGING_SERVER_PARENT_STUDY, IMAGING_SERVER_PARENT_SERIES, \
 	DCMHEADER_PATIENT_ID, DCMHEADER_PATIENT_NAME, \
@@ -205,20 +206,54 @@ class ImagingResourceCoreMixin(KafkaMixin, metaclass=ABCMeta):
 				), r),
 			headers=self.pacs.orthanc_request_headers(**kwargs))
 
+	def _local_server_timestamp(self, key):
+		'''	Server-side timestamp `key` of the resource from the data at hand, without a request: the
+			resource JSON (expanded resources carry `LastUpdate`) or its `Metadata` document (bulk-content
+			answers carry one).
+
+			@input key (str): Orthanc metadata key (`LastUpdate`, `ReceptionDate`)
+			@returns str or None: the value as the server wrote it; None when neither holds it
+		'''
+		value = self._objectdata.get(key)
+		if value is None:
+			value = (self._objectdata.get(IMAGING_SERVER_METADATA) or {}).get(key)
+		return value
+
+	def _server_timestamp(self, key):
+		'''	Server-side timestamp `key` of the resource as a datetime: from the data at hand
+			(`_local_server_timestamp`), else from the resource metadata (`meta`: one request that
+			fetches every metadata key of the resource, cached).
+
+			@input key (str): Orthanc metadata key (`LastUpdate`, `ReceptionDate`)
+			@returns datetime.datetime or None: None when the server has no such value
+		'''
+		value = self._local_server_timestamp(key)
+		if value is None:
+			value = self.meta.get(key)
+		return json_str2datetime(value) if isinstance(value, six.string_types) and value else value
+
+	@property
+	def mtime(self):
+		'''	Date/time the resource was last modified on the imaging server (Orthanc `LastUpdate`
+			metadata): the arrival of an instance, or a change to the resource or to one of its
+			children. Distinct from `ts`, the date/time encoded in the DICOM headers, and from
+			`ctime`, the time the resource appeared on the server. Read from the resource JSON or
+			bulk-content metadata when present, else with one metadata request; cached.
+
+			@returns datetime.datetime or None
+		'''
+		if getattr(self, '_mtime', None) is None:
+			self._mtime = self._server_timestamp(IMAGING_SERVER_LAST_UPDATE)
+
+		return self._mtime
+
 	@property
 	def lastupdate(self):
-		'''	Timestamp of last resource update
-		'''
-		if getattr(self, '_lastupdate', None) is None:
-			r = self.pacs._request_get(
-				self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'metadata', IMAGING_SERVER_LAST_UPDATE), query_params={'expand': True }),
-				lambda r: request_client_error(
-					'Unable to retrieve metadata for %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
-					r
-				), headers=self.pacs.orthanc_request_headers(headers=None)).text
-			setattr(self, '_lastupdate', json_str2datetime(r))
+		'''	(DEPRECATED) Date/time the resource was last modified on the imaging server; alias of `mtime`
 
-		return getattr(self, '_lastupdate', None)
+			@returns datetime.datetime or None
+		'''
+		return self.mtime
 
 	@property
 	def modified_from(self):
@@ -448,6 +483,44 @@ class ImagingResourceMixin(SonadorResourceCacheMixin, ImagingResourceCoreMixin):
 	@property
 	def patientdata(self):
 		return self._objectdata.get(self.patient_dcmtags_attr, {})
+
+	def _cached_instances(self):
+		'''	DICOM instances of the resource that are already at hand, read from the cached child
+			collections down to the instances without a request. The patient, study and series models
+			override this; the base returns None.
+
+			@returns list of DcmInstance or None: None when a level is not cached
+		'''
+		return None
+
+	def _fetch_instances(self, **kwargs):
+		'''	DICOM instances of the resource with their server metadata, in one bulk-content request
+
+			@returns list of DcmInstance
+		'''
+		bdata = self.pacs.fetch_bulk_content([self.pk], resource=IMAGING_SERVER_RESOURCE_IMAGE, **kwargs)
+		return list(bdata.get(IMAGING_SERVER_RESOURCE_IMAGE) or [])
+
+	@property
+	def ctime(self):
+		'''	Date/time the resource appeared on the imaging server: the reception of its earliest
+			instance (Orthanc `ReceptionDate` metadata). Read from the instances at hand when every one
+			carries its reception date (instances from a bulk-content answer do), else with one
+			bulk-content request for the instances of the resource; cached. Distinct from `ts`, the
+			date/time encoded in the DICOM headers, and from `mtime`, the last modification on the
+			server.
+
+			@returns datetime.datetime or None: None for a resource without instances
+		'''
+		if getattr(self, '_ctime', None) is None:
+			instances = self._cached_instances()
+			if instances is None or not all(dcm._local_server_timestamp(IMAGING_SERVER_RECEPTION_DATE) for dcm in instances):
+				instances = self._fetch_instances()
+			times = [dcm.ctime for dcm in instances]
+			times = [t for t in times if t is not None]
+			self._ctime = min(times) if times else None
+
+		return self._ctime
 
 	@property
 	@abstractmethod
@@ -900,6 +973,21 @@ class ImagingPatient(ImagingResourceMixin, ImagingServerChildBaseObject):
 
 		setattr(self, '_studies', studies_collection)
 
+	def _cached_instances(self):
+		'''	Instances of the cached studies of the patient, without a request
+
+			@returns list of DcmInstance or None: None when the studies or one of their levels is not cached
+		'''
+		studies = self.__dict__.get('_studies')
+		if studies is None:
+			return None
+		instances = []
+		for study in studies:
+			cached = study._cached_instances()
+			if cached is None:
+				return None
+			instances.extend(cached)
+		return instances
 
 	def fetch_series(self, **kwargs):
 		'''	Retrieve details of the series associated with the patient
@@ -942,11 +1030,14 @@ class ImagingPatientCollection(ImagingResourceBaseCollection):
 	'''
 	model = ImagingPatient
 
-	def bulkpopulate_related(self, *args, child_studies=True, child_series=True, child_instances=False, **kwargs):
+	def bulkpopulate_related(self, *args, child_studies=True, child_series=True, child_instances=False, parse_sr=False, **kwargs):
 		'''	Populate models related to collection instances in the most efficient manner possible.
 
 			@input child_studies (bool, default=True): bulk populate "studies_collection" of collection instances.
 			@input child_series (bool, default=True): bulk populate "series_collection" of child studies.
+			@input child_instances (bool, default=False): bulk populate the DICOM instances of the series.
+			@input parse_sr (bool, default=False): with `child_instances`, parse the current document of each SR series of
+				the studies in the same pass (one `file` request per SR series).
 		'''
 		if child_series and not child_studies:
 			raise ValueError('Unable to populate series data, option rquires that study be retrieved.')
@@ -1001,7 +1092,8 @@ class ImagingPatientCollection(ImagingResourceBaseCollection):
 									[bdata_instances.get_modelinstance(dcm_id)._objectdata for dcm_id in sx.instances if bdata_instances.get_modelinstance(dcm_id)])
 
 						# Populate study subcollections: DICOM-SR, DICOM-SEG
-						s._populate_subcollections(populate_dcm_instances=child_instances and bdata_instances)
+						s._populate_subcollections(populate_dcm_instances=child_instances and bdata_instances,
+							parse_sr=parse_sr and child_instances and bool(bdata_instances))
 
 
 IMAGING_STUDY_OUTPUT_COLUMNS = OrderedDict((
@@ -1247,6 +1339,22 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 		setattr(self, '_series', series_collection)
 
+	def _cached_instances(self):
+		'''	Instances of the cached series of the study, without a request
+
+			@returns list of DcmInstance or None: None when the series or their instances are not cached
+		'''
+		series = self.__dict__.get('_series')
+		if series is None:
+			return None
+		instances = []
+		for sx in series:
+			cached = sx._cached_instances()
+			if cached is None:
+				return None
+			instances.extend(cached)
+		return instances
+
 	def fetch_sr(self, **kwargs):
 		'''	Fetch the DICOM-SR instances that are associated with the study
 		'''
@@ -1278,6 +1386,73 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 			raise ValueError('Input must be an instance of a DcmSRSeriesCollection')
 
 		setattr(self, '_sr', sr_collection)
+
+	def parse_sr(self, report_class=None, strict=False, all_revisions=False, **kwargs):
+		'''	Parse the current document of every SR series of the study, or every document with
+			`all_revisions=True` (`DcmSRSeriesCollection.parse`). The current-document parse costs one
+			`file` request per SR series unless its file is cached; `all_revisions=True` costs one per
+			revision whose file is not cached. Either way the instance collection of each SR series is
+			fetched first unless the study was populated with `bulkpopulate_related(child_instances=True)`.
+			The reports are cached on the instances.
+
+			@input report_class (subclass of SonadorBaseSR, default=SonadorComprehensiveSR3D)
+			@input strict (bool, default=False): raise SRDiagnosticError on a `warning` or `error`
+				diagnostic, in the selection of the current document and in the parse
+			@input all_revisions (bool, default=False): parse the superseded revisions as well
+			@returns DcmSRSeriesCollection: the SR series collection of the study
+		'''
+		return self.sr_collection.parse(report_class=report_class, strict=strict, all_revisions=all_revisions, **kwargs)
+
+	def invalidate_findings(self):
+		'''	Drop the parsed reports of the SR series of the study, so that the next `findings` access
+			(or `report` access on an instance) parses the current documents again. The cached files are
+			kept. The default `measurements` reads no report, so it is unaffected.
+		'''
+		if self.__dict__.get('_sr') is not None:
+			self._sr.invalidate()
+
+	def findings(self, series_uid=None, measurement_type=None, **kwargs):
+		'''	Qualitative findings of the study: the current document of every SR series, keyed by
+			imaging-series UID and measurement type. After `bulkpopulate_related(child_instances=True)` on the study
+			collection, the first access costs one `file` GET per SR series and later accesses none: the
+			parsed reports are cached on the SR instances. Without the child instances, the instance
+			collection of each SR series is fetched first; `all_revisions=True` also fetches the
+			superseded revisions.
+
+			@input series_uid (str, default=None): imaging series to narrow to
+			@input measurement_type (str, default=None): measurement type to narrow to (`series-tag`)
+			@input kwargs: passed to `DcmSRInstanceCollection.findings` (`all_revisions`, `diagnostics`,
+				`strict`)
+			@returns
+			  - dict keyed to imaging-series UID: `{series_uid: {measurement_type: FindingCollection}}`
+			  - dict keyed to measurement type for a `series_uid`: `{measurement_type: FindingCollection}`
+			  - dict keyed to imaging-series UID for a `measurement_type`: `{series_uid: FindingCollection}`
+			  - FindingCollection for both
+		'''
+		return self.sr_collection.findings(series_uid=series_uid, measurement_type=measurement_type, **kwargs)
+
+	def measurements(self, series_uid=None, measurement_type=None, **kwargs):
+		'''	Quantitative measurements of the study: the current document of every SR series, keyed by
+			imaging-series UID and measurement type. Arguments as `findings`. The default `DcmSRInstance.measurements` parses no
+			quantitative measurement type and reads neither the report nor the file, so this call makes
+			no `file` request, parses nothing and returns empty shapes until a subclass of `DcmSRInstance`
+			supplies them; an empty result is not evidence that a document holds no quantitative items.
+
+			@returns
+			  - dict keyed to imaging-series UID: `{series_uid: {measurement_type: MeasurementCollection}}`
+			  - dict keyed to measurement type for a `series_uid`: `{measurement_type: MeasurementCollection}`
+			  - dict keyed to imaging-series UID for a `measurement_type`: `{series_uid: MeasurementCollection}`
+			  - MeasurementCollection for both (empty when nothing matches)
+		'''
+		return self.sr_collection.measurements(series_uid=series_uid, measurement_type=measurement_type, **kwargs)
+
+	@property
+	def series_by_uid(self):
+		'''	Series of the study keyed by Series Instance UID, from the series collection
+
+			@returns OrderedDict of str to ImagingSeries
+		'''
+		return OrderedDict((sx.series_uid, sx) for sx in self.series_collection)
 
 	def fetch_seg(self, **kwargs):
 		'''	Fetch the DICOM-SEG instances that are associated with the study
@@ -1517,8 +1692,12 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		return self.comments_modelcollection_class.fetch_modelinstance(self, cid, *args, **kwargs)
 
 	def _populate_subcollections(self, 
-			populate_sr=True, populate_seg=True, populate_m3d=True, populate_doc=True, populate_dcm_instances=False):
+			populate_sr=True, populate_seg=True, populate_m3d=True, populate_doc=True, populate_dcm_instances=False,
+			parse_sr=False):
 		'''	Populate study SR and SEG collections from the series collection
+
+			@input parse_sr (bool, default=False): parse the current document of each SR series in the same pass (requires
+				`populate_dcm_instances`; one `file` request per SR series)
 		'''
 		def _populate_dcm_instances(sx_):
 			'''	Populate the DICOM instance data of the provided specialized model series model from the general
@@ -1539,6 +1718,8 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 			if populate_dcm_instances:
 				for sx_sr in self.sr_collection:
 					_populate_dcm_instances(sx_sr)
+				if parse_sr:
+					self.sr_collection.parse()
 
 		if populate_seg:
 			self.seg_collection = self.seg_from_json(
@@ -1708,12 +1889,15 @@ class ImagingStudyCollection(ImagingResourceBaseCollection):
 
 		return super()._init_collection_models(**kwargs)
 
-	def bulkpopulate_related(self, *args, parent_patient=True, child_series=True, child_instances=False, **kwargs):
+	def bulkpopulate_related(self, *args, parent_patient=True, child_series=True, child_instances=False, parse_sr=False, **kwargs):
 		'''	Populate models related to collection instances in the most efficient manner possible.
 
 			@input parent_patient (bool, default=True): bulk populate "parent" attribute of collection instances.
 			@input child_series (bool, default=True): bulk populate the "series_collection" attribute
 				of model instances.
+			@input child_instances (bool, default=False): bulk populate the DICOM instances of the series.
+			@input parse_sr (bool, default=False): with `child_instances`, parse the current document of each SR series of
+				the studies in the same pass (one `file` request per SR series).
 		'''
 		# Retrieve patient and sibling series data. Both types of resources can be retrieved in a single request.
 		if parent_patient or child_series:
@@ -1753,7 +1937,8 @@ class ImagingStudyCollection(ImagingResourceBaseCollection):
 								[bdata_instances.get_modelinstance(dcm_id)._objectdata for dcm_id in sx.instances if bdata_instances.get_modelinstance(dcm_id)])
 
 					# Populate study subcollections: DICOM-SR, DICOM-SEG, ...
-					s._populate_subcollections(populate_dcm_instances=child_instances and bdata_instances)
+					s._populate_subcollections(populate_dcm_instances=child_instances and bdata_instances,
+						parse_sr=parse_sr and child_instances and bool(bdata_instances))
 
 
 IMAGING_SERIES_OUTPUT_COLUMNS = OrderedDict((
@@ -1980,7 +2165,18 @@ class ImagingSeriesCoreResource(ImagingResourceMixin, ImagingResourceParentMixin
 		'''
 		return self.server._init_dataclass_from_json(
 			self.dcminstance_modelcollection_class, jdata, pacs=self.pacs, series=self, **kwargs)
-	
+
+	def _cached_instances(self):
+		'''	Cached instances of the series (`_slices` of an imaging series, `_instances` of a
+			specialized series), without a request
+
+			@returns list of DcmInstance or None: None when the instances have not been fetched
+		'''
+		cached = self.__dict__.get('_slices')
+		if cached is None:
+			cached = self.__dict__.get('_instances')
+		return list(cached) if cached is not None else None
+
 	@property
 	def comments_modelcollection_class(self):
 		'''	Model collection class that should be used to initialize comments
@@ -2139,14 +2335,48 @@ class ImagingSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 			reverse=True)
 
 	@property
-	@functools.lru_cache()
 	def annotations(self):
-		'''	DICOM-SR annotations associated with the series with most recent reports first.
+		'''	DICOM-SR series of the parent study whose documents refer to this series, most recent (by
+			`ts`) first. Not cached: a repopulated study or a parsed document is seen on the next access.
+			The evidence is read from the cached files or parsed reports when present, else from the
+			instance tags.
+
+			@returns list of DcmSRSeries
 		'''
 		return sorted(
 			[dcmsr for dcmsr in self.parent.sr_collection if self.series_uid in dcmsr.series_reference_uids],
 			key=lambda dcm: dcm.ts if dcm.ts else datetime.datetime(year=1900, month=1, day=1),
 			reverse=True)
+
+	def findings(self, measurement_type=None, **kwargs):
+		'''	Qualitative findings that apply to this series, from the current document of every SR series
+			of the parent study (`ImagingStudy.findings` narrowed to this series). After
+			`bulkpopulate_related(child_instances=True)` on the study collection, the first access costs
+			one `file` GET per SR series of the study and later accesses none; without the child
+			instances, the instance collection of each SR series is fetched first.
+
+			@input measurement_type (str, default=None): measurement type to narrow to (`series-tag`)
+			@input kwargs: passed to `DcmSRInstanceCollection.findings` (`all_revisions`, `diagnostics`,
+				`strict`)
+			@returns
+			  - dict keyed to measurement type: `{measurement_type: FindingCollection}`
+			  - FindingCollection for a measurement type
+		'''
+		return self.parent.findings(series_uid=self.series_uid, measurement_type=measurement_type, **kwargs)
+
+	def measurements(self, measurement_type=None, **kwargs):
+		'''	Quantitative measurements that apply to this series, from the current document of every SR
+			series of the parent study (`ImagingStudy.measurements` narrowed to this series). Arguments
+			as `findings`. The default `DcmSRInstance.measurements` parses no
+			quantitative measurement type and reads neither the report nor the file, so this call makes
+			no `file` request, parses nothing and returns empty shapes until a subclass of `DcmSRInstance`
+			supplies them; an empty result is not evidence that a document holds no quantitative items.
+
+			@returns
+			  - dict keyed to measurement type: `{measurement_type: MeasurementCollection}`
+			  - MeasurementCollection for a measurement type (empty when nothing matches)
+		'''
+		return self.parent.measurements(series_uid=self.series_uid, measurement_type=measurement_type, **kwargs)
 
 	@property
 	def m3d_models(self):
@@ -2166,7 +2396,8 @@ class ImagingSeriesBulkPopulateMixin:
 	'''	Mixin class which adds methods to enable efficient population of related models 
 		(parent study and patient) on instances within series collections.
 	'''
-	def bulkpopulate_related(self, *args, parent_study=True, parent_patient=True, sibling_series=True, child_instances=False, **kwargs):
+	def bulkpopulate_related(self, *args, parent_study=True, parent_patient=True, sibling_series=True, child_instances=False,
+			parse_sr=False, **kwargs):
 		'''	Populate models related to collection instances in the most efficient manner possible. The method
 			makes two requests.
 			1. Populate parent study and child instances
@@ -2178,6 +2409,10 @@ class ImagingSeriesBulkPopulateMixin:
 				of collection instances. Requires that parent_study option be True.
 			@input sibling_series (bool, default=True): bulk populate the "series_collection" attribute
 				of the parent study. Requires that parent_study option be True.
+			@input child_instances (bool, default=False): bulk populate the DICOM instances of the series.
+			@input parse_sr (bool, default=False): with `child_instances` and `sibling_series`, parse the
+				current document of each SR series of the parent studies in the same pass (one `file`
+				request per SR series). Requires that parent_study option be True.
 		'''
 		# For populating patient or sibling data, ensure that the parent study will be available.
 		if (parent_patient or sibling_series) and not parent_study:
@@ -2246,7 +2481,8 @@ class ImagingSeriesBulkPopulateMixin:
 								[bdata_instances.get_modelinstance(dcm_id)._objectdata for dcm_id in _sx.instances if bdata_instances.get_modelinstance(dcm_id)])
 					
 					# Populate specialized subcollections: DICOM-SR, DICOM-SEG, ...
-					sx.parent._populate_subcollections(populate_dcm_instances=child_instances and bdata_instances)
+					sx.parent._populate_subcollections(populate_dcm_instances=child_instances and bdata_instances,
+						parse_sr=parse_sr and child_instances and bool(bdata_instances))
 
 
 class ImagingSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingResourceBaseCollection):
@@ -2369,6 +2605,29 @@ class DcmInstanceCoreResource(ImagingResourceCoreMixin, ImagingResourceParentMix
 			self._ts = None
 
 		return getattr(self, '_ts', None)
+
+	@property
+	def ctime(self):
+		'''	Date/time the instance was received by the imaging server (Orthanc `ReceptionDate`
+			metadata). Distinct from `ts`, the content date/time encoded in the DICOM headers. Read
+			from the instance JSON or bulk-content metadata when present, else with one metadata
+			request; cached.
+
+			@returns datetime.datetime or None
+		'''
+		if getattr(self, '_ctime', None) is None:
+			self._ctime = self._server_timestamp(IMAGING_SERVER_RECEPTION_DATE)
+
+		return self._ctime
+
+	@property
+	def mtime(self):
+		'''	Date/time the instance was last modified on the imaging server. Instances are immutable
+			on Orthanc (a modified instance is a new instance), so this is the reception date, `ctime`.
+
+			@returns datetime.datetime or None
+		'''
+		return self.ctime
 
 	@property
 	def parent(self):
@@ -2662,21 +2921,6 @@ class DcmInstance(SonadorResourceCacheMixin, DcmInstanceCoreResource):
 		'''
 		return int(self._objectdata.get(IMAGING_SERVER_FILE_SIZE)) if self._objectdata.get(IMAGING_SERVER_FILE_SIZE) \
 			else None
-
-	@property
-	def lastupdate(self):
-		'''	Timestamp of last resource update
-		'''
-		if getattr(self, '_lastupdate', None) is None:
-			r = self.pacs._request_get(
-				self.pacs.orthanc_apiurl(posixpath.join(self.resource_url, 'metadata', IMAGING_SERVER_RECEPTION_DATE), query_params={'expand': True }),
-				lambda r: request_client_error(
-					'Unable to retrieve metadata for %s on server %s. Status code: %s.' % (self.pk, self.pacs.server_label, r.status_code),
-					r
-				), headers=self.pacs.orthanc_request_headers(headers=None)).text
-			setattr(self, '_lastupdate', json_str2datetime(r))
-
-		return getattr(self, '_lastupdate', None)
 
 
 class DcmInstanceCoreCollection(ImagingServerChildCollection):

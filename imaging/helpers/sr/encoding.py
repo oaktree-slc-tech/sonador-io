@@ -150,7 +150,10 @@ class SonadorSRMeasurementReport(SRMeasurementReport):
 
 		Unlike the upstream `MeasurementReport`, a Sonador report does not have to contain imaging
 		measurement groups: reports consisting only of meta groups and/or volumetric point collections
-		are valid. At least one group of any kind is required.
+		are valid, and so is a report with no group of any kind, whose root holds the observation
+		context and the procedure reported only. Whether such a document is wanted is for the report
+		model to decide (`SonadorComprehensiveSR3D.create_report_sr` records the `empty-report-content`
+		warning); the template writes what it is given.
 	'''
 	template_id = '%s.1500' % DCMSR_SONADOR_SR.value
 
@@ -167,17 +170,13 @@ class SonadorSRMeasurementReport(SRMeasurementReport):
 			`meta_groups` and `volume_measurements` are Sonador extensions.
 
 			@input imaging_measurements (sequence of highdicom measurement groups, default=None): TID 1500
-				"Imaging Measurements" groups. May be empty when meta groups or volume measurements are provided.
+				"Imaging Measurements" groups; the container is omitted when there are none.
 			@input meta_groups (sequence of ReportMetaGroup, default=None): metadata groups
 			@input volume_measurements (sequence of VolumetricPointCollection, default=None): point collections
 		'''
 		imaging_measurements = list(imaging_measurements or [])
 		meta_groups = list(meta_groups or [])
 		volume_measurements = list(volume_measurements or [])
-
-		if not (imaging_measurements or meta_groups or volume_measurements):
-			raise ValueError('A Sonador measurement report requires at least one imaging measurement group, '
-				+ 'meta group, or volumetric point collection.')
 
 		if imaging_measurements:
 			super().__init__(observation_context=observation_context, procedure_reported=procedure_reported,

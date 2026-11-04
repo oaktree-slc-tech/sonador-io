@@ -1,4 +1,5 @@
-'''	Base DICOM constants, data structures, and encoded concepts for Sonador.
+'''	Base DICOM constants and encoded concepts for Sonador (`sonador.apisettings.base.constants`).
+	The SR data classes live in `sonador.apisettings.base.sr`; both are re-exported by `sonador.apisettings.base`.
 	
 	NOTE: `highdicom` provides both `Code` and `CodedConcept` components. Within
 	Sonador the convention is to use `CodedConcept` to refer to the names of categories of values
@@ -8,6 +9,11 @@
 	* 0.1 (2022): basic encoding structures including "Sonador-SEG" and "Sonador-SR" structures
 	* 0.2 (2023-0828): spatial SR constructs (2D/3D point concepts) used for creating SR documents 
 		that can be used for machine learning applications.
+	* 0.3 (2026-1030): Sonador Viewer exchange profile for Series Tags: the extended measurement meta
+		attributes (description, text, location) and the display attributes (colour roles) carried by
+		a finding (`apisettings.sr.seriestag`). Readers match concepts by code value and designator; a
+		concept carrying a scheme version other than the registered one is read as the same concept,
+		with a warning.
 
 	Architectural notes:
 	* The Sonador client library works with three types of data objects:
@@ -33,8 +39,9 @@
 	* 	When defining new codes or coded concepts that require a `scheme_designator`, the version should
 		be referenced explicitly rather than using the "most recent" version variable.
 '''
-import abc, re, functools, datetime, copy, logging, numbers
+import abc, re, functools, datetime, copy, logging, numbers, pathlib
 from collections import namedtuple, OrderedDict
+from importlib import metadata as importlib_metadata
 from typing import Sequence, Union
 
 import numpy as np
@@ -67,7 +74,37 @@ SONADOR_CLIENT = '%s-Client' % SONADOR_MANUFACTURER
 SONADOR_CLIENT_DESCRIPTION = 'Client library for working with medical imaging data stored in Sonador/Orthanc.'
 SONADOR_SCHEME_VERSION_01 = '0.1'		# 2022
 SONADOR_SCHEME_VERSION_02 = '0.2'		# 2023-0828
-SONADOR_SCHEME_VERSION = SONADOR_SCHEME_VERSION_02
+SONADOR_SCHEME_VERSION_03 = '0.3'		# 2026-1030
+SONADOR_SCHEME_VERSION = SONADOR_SCHEME_VERSION_03
+
+# Equipment profile of the programs writing Sonador DICOM-SR documents:
+# Manufacturer `Sonador`, model name per program. The Python library reports the installed `sonador`
+# distribution version, `dev` when it runs from a source checkout.
+SONADOR_IO = '%s-IO' % SONADOR_MANUFACTURER
+SONADOR_VIEWER = '%s-Viewer' % SONADOR_MANUFACTURER
+SONADOR_DISTRIBUTION = 'sonador'
+SONADOR_SOFTWARE_VERSION_DEV = 'dev'
+
+
+def sonador_software_version(distribution=SONADOR_DISTRIBUTION, default=SONADOR_SOFTWARE_VERSION_DEV):
+	'''	Version of the installed `sonador` distribution (importlib.metadata), `dev` when the library is
+		not an installed distribution: no distribution metadata, or the imported package is a source
+		checkout rather than the files the distribution installed.
+	'''
+	try:
+		dist = importlib_metadata.distribution(distribution)
+	except importlib_metadata.PackageNotFoundError:
+		return default
+
+	package_dir = pathlib.Path(__file__).resolve().parents[2]
+	installed = dist.locate_file(distribution)
+	try:
+		if pathlib.Path(str(installed)).resolve() != package_dir:
+			return default
+	except OSError:
+		return default
+
+	return dist.version or default
 
 SONADOR_SEG = 'Sonador-SEG'
 SONADOR_SEG_DESCRIPTION = '%s implements tools for working with segmentation data' % SONADOR_SEG
@@ -158,13 +195,13 @@ class DicomDatetimePair:
 	@property
 	@functools.lru_cache()
 	def date_value(self):
-		from ..serialization import dcm_str2date
+		from ...serialization import dcm_str2date
 		return dcm_str2date(self._dvalue) if self._dvalue else self._dvalue
 
 	@property
 	@functools.lru_cache()
 	def time_value(self):
-		from ..serialization import dcm_str2time
+		from ...serialization import dcm_str2time
 		return dcm_str2time(self._tvalue) if self._tvalue else self._tvalue
 
 	@property
@@ -205,6 +242,9 @@ DCMHEADER_MAPPING_RESOURCE_UID = 'MappingResourceUID'
 
 DCMCODE_LONG_CODE_VALUE = ('0008', '0119')
 DCMHEADER_LONG_CODE_VALUE = 'LongCodeValue'
+
+DCMCODE_URN_CODE_VALUE = ('0008', '0120')
+DCMHEADER_URN_CODE_VALUE = 'URNCodeValue'
 
 DCMCODE_MAPPING_RESOURCE_NAME = ('0008', '0122')
 DCMHEADER_MAPPING_RESOURCE_NAME = 'MappingResourceName'
@@ -251,9 +291,11 @@ IMAGING_SERVER_AUTHREQUEST_LEVEL_LOOKUP = {
 }
 
 IMAGING_SERVER_LAST_UPDATE = 'LastUpdate'
+IMAGING_SERVER_CREATED = 'Created'
 IMAGING_SERVER_MODIFIED = 'Modified'
 IMAGING_SERVER_STABLE = 'IsStable'
 IMAGING_SERVER_MAINDICOM = 'MainDicomTags'
+IMAGING_SERVER_METADATA = 'Metadata'
 IMAGING_SERVER_PATIENT_MAINDICOM = 'PatientMainDicomTags'
 IMAGING_SERVER_DICOMTAGS_SIGNATURE = 'MainDicomTagsSignature'
 IMAGING_SERVER_PARENT_PATIENT = 'ParentPatient'
@@ -905,623 +947,10 @@ ORTHANC_JOB_STATUS_SUCCESS = 'Success'
 ORTHANC_JOB_STATUS_FAILED = 'Failed'
 
 
-
-# SR Data Structures
-
-
-class SRDataObject:
-	'''	Structured reporting data object. Provides methods and properties for working with
-		local data within Sonador.
-
-		@type (str, default=None): string which describes the type of SR object.
-			(Return value depends on the object type, and may not be defined.)
-	'''
-	def _init_srdata(self, object_type=None, codes:Sequence[Union[Code,CodedConcept]]=None):
-		self._type = object_type
-		self._codes = codes
-
-	@property
-	def type(self):
-		return self._type
-
-	@property
-	def codes(self):
-		return self._codes
-
-
-class SRDataCollectionMember(SRDataObject):
-	'''	Structured reporting data object which can be associated with a collection.
-	'''
-	def __init__(self, collection=None, 
-			object_type=None, codes:Sequence[Union[Code,CodedConcept]]=None, **kwargs):
-		self._init_srdata(object_type=object_type, codes=codes)
-		self._init_collection(collection=collection)
-
-	def _init_collection(self, collection=None):
-		self.collection = collection
-
-	@abc.abstractmethod
-	def create_sr(self):
-		'''	Encode a DICOM-SR representation of the collection
-		'''	
-
-	@property
-	@functools.lru_cache()
-	def sr(self):
-		'''	Return an SR encoded representation of the data object
-		'''
-		return self.create_sr()
-
-
-class SRDataObjectCollection(SRDataObject, JsonObjectCollection):
-	'''	Collection of SR objects
-	'''
-	model = SRDataObject
-	object_type_attr = 'object_type'
-
-	def __init__(self, *args, object_type=None, codes:Sequence[Union[Code,CodedConcept]]=None, **kwargs):
-		self._init_srdata(object_type=object_type, codes=codes)
-		super().__init__(*args, **kwargs)
-
-	def _init_collection_modelinstance(self, *args, **kwargs):
-		'''	Initialize collection model instance
-		'''
-		return self.model(*args, **kwargs)
-
-	def _init_collection_models(self, **kwargs):
-		'''	Initialize collection models
-		'''
-		# Add object type and codes to model instance
-		if not kwargs.get(self.object_type_attr) and self.type:
-			kwargs[self.object_type_attr] = self.type
-		if not kwargs.get('codes') and self.codes:
-			kwargs['codes'] = self.codes
-
-		# Add a reference to the collection
-		if not kwargs.get('collection'):
-			kwargs['collection'] = self
-
-		def _init_model(data):
-			'''	Initialize model instance from data
-				1. If data is already a model, return instance
-				2. If a dict (or structured dict), initialize data object
-			'''
-			if isinstance(data, self.model) \
-				or (getattr(self, 'basemodel', None) and isinstance(data, getattr(self, 'basemodel', None))):
-				return data
-
-			# Tuple instance
-			elif isinstance(data, (tuple, list)):
-				return self._init_collection_modelinstance(*data, **kwargs)
-
-			# Dictionary instance
-			elif isinstance(data, (dict, OrderedDict)):
-
-				# Determine if any keys need to be omitted.
-				# Keys defined in the data dictionary should be used
-				# over collection attributes.
-				_okw = []
-				if data.get('codes'): _okw.append('codes')
-
-				# Ad collection keyword arguments to the data dict, omit any
-				# keywords which are duplicated between collection and intance
-				data.update(omit(pick(kwargs, kwargs.keys()), _okw))
-				return self._init_collection_modelinstance(**data)
-
-			raise NotImplementedError(
-				'Unsupported data type "%s". Model data must be a dict or a model instance.' % type(data))
-
-		return map(_init_model, self._objectdata)
-
-	@abc.abstractmethod
-	def create_sr(self):
-		'''	Encode a DICOM-SR representation of the collection
-		'''
-
-	@property
-	@functools.lru_cache()
-	def sr(self):
-		'''	Return an SR encoded representation of the collection
-		'''
-		return self.create_sr()
-
-
-class ImageTransformMatrix(SRDataCollectionMember):
-	''' Helper class for representing DICOM frame of reference frame transform matrices.		
-	'''
-	def __init__(self, txmatrix, uid=None, transform_type=None, comment=None, 
-			fiducials=None, ref_images=None, **kwargs):
-		'''	Initialize transformation matrix
-		'''
-		super().__init__(object_type=transform_type, **kwargs)
-
-		self._matrix = txmatrix
-		self._uid = uid
-		self._comment = comment
-		self._fiducials = fiducials
-		self._img_refs = ref_images
-
-	@property
-	def matrix(self):
-		return self._matrix
-
-	@property
-	def uid(self):
-		return self._uid
-
-	@property
-	def comment(self):
-		return self._comment
-
-	@property
-	def fiducials(self):
-		return self._fiducials
-
-	@property
-	def ref_images(self):
-		return self._img_refs
-
-	def create_sr(self, **kwargs):
-		from .sr import dcm_encode_reference_frame_transform_matrix
-		return dcm_encode_reference_frame_transform_matrix(self.matrix, 
-			reference_uid=self.uid, transform_type=self.type, transform_comment=self.comment,
-			fiducials=self.fiducials, ref_images=self.ref_images, codes=self.codes, **kwargs)
-
-
-class ImageTransformMatrixCollection(SRDataObjectCollection):
-	''' Collection of reference frame transform matrices
-	'''
-	model = ImageTransformMatrix
-	object_type_attr = 'transform_type'
-
-	def create_sr(self):
-		''' Create a DICOM representation of the collection
-
-			@returns pydicom.Sequence
-		'''
-		return DcmSequence(m.sr for m in self)
-
-
-class ImageCoord(SRDataCollectionMember):
-	'''	Helper class for working with DICOM (spatial) coordinates
-	'''
-	def __init__(self, x, y, z, reference_frame=None, name=None, point_type=None, **kwargs):
-		'''	Initialize image coordinate
-		'''
-		super().__init__(object_type=point_type, **kwargs)
-		self._name = name
-
-		# Coordinate values
-		self.x = x
-		self.y = y
-		self.z = z
-
-		# Coordinate reference frame
-		self._ref_frame = reference_frame
-
-	@property
-	def _pts(self):
-		return (self.x, self.y, self.z)
-
-	@property
-	def name(self):
-		return self._name
-
-	@property
-	def reference_frame(self):
-		return self._ref_frame
-
-	def __iter__(self):
-		yield from self._pts
-
-	def __str__(self):
-		return '(x=%s,y=%s,z=%s)' % self._pts
-
-	def create_sr(self, **kwargs):
-		from .sr import srencode_coord3d
-		return srencode_coord3d(
-			self.reference_frame.uid if self.reference_frame else generate_uid(), self, 
-			name=self.name, point_type=self.type, **kwargs)
-
-
-class ImageCoordCollection(SRDataObjectCollection):
-	'''	Collection of coordinates
-	'''
-	model = ImageCoord
-	object_type_attr = 'point_type'
-
-	def __init__(self, *args, reference_frame=None, name=None, point_type=None, **kwargs):
-		self._ref_frame = reference_frame
-		self._name = name
-		super().__init__(*args, object_type=point_type, **kwargs)
-
-	def _init_collection_models(self, *args, **kwargs):
-		if not kwargs.get('reference_frame') and self.reference_frame:
-			kwargs['reference_frame'] = self.reference_frame
-
-		return super()._init_collection_models(*args, **kwargs)
-
-	def create_sr(self, **kwargs):
-		'''	Create a DICOM-SR encoded representation of the collection
-		'''
-		from .sr import srencode_coord3d
-		return srencode_coord3d(
-			self.reference_frame.uid if self.reference_frame else generate_uid(), self, 
-			name=self.name, point_type=self.type, **kwargs)
-
-	@property
-	@functools.lru_cache()
-	def array(self):
-		from .sr import points2array
-		return points2array(self)
-
-	@property
-	def reference_frame(self):
-		return self._ref_frame
-
-	@property
-	def name(self):
-		return self._name
-
-
-class Finding(SRDataCollectionMember):
-	'''	Qualitative finding associated with a resource. (Provides a simlified
-		implementation of DICOM-SR TID E501.)
-	'''
-	def __init__(self, name, finding, finding_type=None, **kwargs):
-		'''	Initialize finding
-
-			@input name (highdicom.Code or highdicom.CodedConcept): name of the finding
-			@input finding (highdicom.Code or highdicom.CodedConept): finding value
-		'''
-		super().__init__(object_type=finding_type, **kwargs)
-		self._name = name
-		self._finding = finding
-
-	@property
-	def name(self):
-		return self._name
-
-	@property
-	def finding(self):
-		return self._finding
-
-	def create_sr(self, **kwargs):
-		from .sr import srencode_finding
-		return srencode_finding(self, **kwargs)
-
-
-class FindingCollection(SRDataObjectCollection):
-	'''	Collection of qualitative findings
-	'''
-	model = Finding
-	object_type_attr = 'finding_type'
-
-	def create_sr(self):
-		'''	Return a DICOM-SR encoded iterator for all measurements in the collection
-		'''
-		return tuple(f.sr for f in self)
-
-
-class Measurement(SRDataCollectionMember):
-	'''	Numerical measurement associated with a resource. (Provides a simplified 
-		implementation DICOM-SR TID:3000.) 
-
-		Note: Within the Sonador library, only two fields are required: value and unit. 
-		To persist to measuremets to DICOM-SR, an additional parameter `name`, must also be provided.
-		(Refer to __init__ arguments list for all available parameters and types.)
-
-		@property value (number): measured value
-		@property unit (highdicom.Code or highdicom.CodedConcept): measurement unit
-		@property uid: user assigned ID for tracking the measurement
-	'''
-	def __init__(self, val:Union[int,float,numbers.Number], unit=DCMSR_UNITS_MM, name=None, measurement_type=None, 
-			qualifier=None, tracking_id=None, algorithm=None, derivation=None,  method=None, 
-			finding_sites=None, properties=None, ref_images=None, ref_value=None, **kwargs):
-		'''	Initialize measurement
-
-			@input val (numbers.Number): numeric measurement value
-			@input unit (highdicom.Code or highdicom.CodedConcept, default='mm'): Unit of measurement
-			@input name (highdicom.Code or highdicom.CodedConcept, default=None): Name of the measurement
-			@input qualifier (highdicom.Code or highdicom.CodedConcept, default=None): 
-				Qualification of numeric measurement value or qualitative description.
-			@input tracking_id (default=None): user assigned ID for tracking the value in reports
-			@input algorithm (default=None): description of the algoithm used for making the measurement
-			@input derivation (dault=None): how the value was computed
-			@input method (default=None): measurement method
-			@input finding_sites (default=None): coded description of one or more anatomic locations 
-				associated with the measurement
-			@input properties (default=None): meaurement properties, including evaluations of significance,
-				relationship to a reference population, and its range.
-			@input ref_images (default=None): referenced images which were used as source for the meaurement
-			@input ref_value (default=None): reference real world value map
-		'''
-		super().__init__(object_type=measurement_type, **kwargs)
-		self._val = val
-		self._unit = unit
-		self._name = name
-		self._qualifier = qualifier
-		self._uid = tracking_id
-		self._algorithm = algorithm
-		self._derivation = derivation
-		self._method = method
-		self._finding_sites = finding_sites
-		self._properties = properties
-		self._img_refs = ref_images
-		self._val_ref = ref_value
-
-	@property
-	def value(self):
-		return self._val
-
-	@property
-	def unit(self):
-		return self._unit
-
-	@property
-	def uid(self):
-		return self._uid
-
-	@property
-	def qualifier(self):
-		return self._qualifier
-
-	@property
-	def name(self):
-		return self._name
-
-	@property
-	def algorithm(self):
-		return self._algorithm
-
-	@property
-	def derivation(self):
-		return self._derivation
-
-	@property
-	def method(self):
-		return self._method
-
-	@property
-	def finding_sites(self):
-		return self._finding_sites
-
-	@property
-	def properties(self):
-		return self._properties
-
-	@property
-	def ref_images(self):
-		return self._img_refs
-
-	@property
-	def ref_value(self):
-		return self._val_ref
-
-	def create_sr(self, **kwargs):
-		from .sr import srencode_measurement
-		return srencode_measurement(self, **kwargs)
-
-
-class MeasurementCollection(SRDataObjectCollection):
-	'''	Collection of measurements.
-	'''
-	model = Measurement
-	object_type_attr = 'measurement_type'
-
-	def create_sr(self):
-		'''	Return a DICOM-SR encoded iterator for all measurements in the collection
-		'''
-		return tuple(m.sr for m in self)
-
-
-class ReportBaseGroup(SRDataCollectionMember):
-	'''	Provides a general structure for grouping data together into a DICOM-SR report section.
-	'''
-	sr_template = None
-
-	def __init__(self, *args, tracking_id=None, **kwargs):
-		''' Initialize report group
-
-			@input tracking_id (default=None): user assigned ID for tracking the value in reports
-
-			@input sr_template (subclass of highdicom.sr.templates._MeasurementsAndQualitativeEvaluations):
-				SR template that should be used to encode the report group. By default, TID-1501 which provide
-				support for qualitative findings and quantitative measurements is used.
-		'''
-		self.sr_template = kwargs.pop('sr_template', self.sr_template)
-		self._uid = tracking_id
-
-		super().__init__(*args, **kwargs)
-
-		if not self.sr_template:
-			raise ValueError('Unable to initialize %s, invalid SR template class' % type(self))
-
-	@property
-	def uid(self):
-		return self._uid
-
-	def create_sr(self, *args, **kwargs):
-		from .sr import srencode_report_group
-		if not self.uid:
-			raise ValueError('A user defined tracking ID is required to create a DICOM-SR instance.')
-
-		return srencode_report_group(self.uid, sr_template=self.sr_template, **kwargs)
-
-
-class ReportMetaGroup(ReportBaseGroup):
-	'''	Provides a general structure for metadata, coded concepts, and other information
-		to be added to a report template.
-	'''
-	def __init__(self, meta:Sequence[Union[TextContentItem,NumContentItem,CodeContentItem]], *args, **kwargs):
-		'''	Initialize report group
-
-			@input meta (iterable of highdicom.ContentItem instances): content items to be added to
-				the report group.
-		'''
-		self._meta = meta
-		super().__init__(*args, **kwargs)
-
-	@property
-	def meta(self):
-		return self._meta
-
-	@property
-	def sr_template(self):
-		'''	Dynamic property for retrieving the SR template. Required by Sonaor in order
-			to prevent circular imports. Uses sonador.imaging.sr.helpers.encoding.ReportMetaGroup
-			as the default SR template.
-		'''
-		if getattr(self, '_sr_template', None):
-			return self._sr_template
-
-		from ..imaging.helpers.sr.encoding import ReportMetaGroup as DcmReportMetaGroup
-		return DcmReportMetaGroup
-
-	@sr_template.setter
-	def sr_template(self, val):
-		self._sr_template = val
-
-	def create_sr(self, **kwargs):
-		return super().create_sr(meta=self.meta, **kwargs)
-
-
-class ReportGroup(ReportBaseGroup):
-	'''	Groups quantitative measurements and qualitative findings together into a report section.
-		(Provides a simplified implementation of DICOM-SR TID:1501.)
-	'''
-	sr_template = MeasurementsAndQualitativeEvaluations
-
-	def __init__(self, *args, findings:FindingCollection=None, measurements:MeasurementCollection=None,
-			finding_type=None, finding_sites=None, finding_category=None, algorithm=None, method=None, ref_value=None, **kwargs):
-		'''	Initialize report group	
-	
-			@input tracking_id (default=None): user assigned ID for tracking the value in reports
-			@input finding_type (highdicom.Code or highdicom.CodedConcept, default=None): type of observed
-				finding associated with the group
-			@input finding_category (highdicom.Code or highdicom.CodedConcept, default=None): category
-				of the observed findings (eg, anatomic structure or morphologically abnormal structure)
-			@input measurements (MeasurementCollection, default=None): measurements to be added to the group
-			@input findings (FindingCollection, default=None): findings to be added to the group
-			@input algorithm (default=None): description of the algorithm used for making the measurement or findings.
-				(Findings and measurement may futher have their own algorithm descriptions embedded.)
-			@input finding_sites (default=None): coded description of one or more anatomic locations 
-				associated with the measurement and findings
-			@input ref_value (default=None): reference real world value map
-		'''
-		# Data properties
-		self._finding_category = finding_category
-		self._measurements = measurements
-		self._findings = findings
-		self._algorithm = algorithm
-		self._method = method
-		self._finding_sites = finding_sites
-		self._val_ref = ref_value
-
-		super().__init__(*args, object_type=finding_type, **kwargs)
-
-	@property
-	def finding_category(self):
-		return self._finding_category
-
-	@property
-	def measurements(self):
-		return self._measurements
-
-	@property
-	def findings(self):
-		return self._findings
-
-	@property
-	def algorithm(self):
-		return self._algorithm
-
-	@property
-	def method(self):
-		return self._method
-
-	@property
-	def finding_sites(self):
-		return self._finding_sites
-
-	@property
-	def ref_value(self):
-		return self._val_ref
-
-	def create_sr(self, **kwargs):
-		return super().create_sr(
-			measurements=self.measurements, findings=self.findings, referenced_real_world_value_map=self.ref_value,
-			method=self.method, algorithm_id=self.algorithm, finding_type=self.type, finding_category=self.finding_category,
-			finding_sites=self.finding_sites, **kwargs)
-
-
-class VolumePointCollectionGroup(ReportGroup):
-	'''	Specialized report group (container) which is able to encode spatial points and associated measurements/findings.
-		Extension of DICOM-SR TID:1501. (Uses TID:Sonador-1001 DICOM-SR template by default.)
-	'''
-	def __init__(self, *args, points:Sequence[Union[ImageCoord,ImageCoordCollection]]=None, **kwargs):
-		'''	Initialize report group.
-			(Refer to sonador.apisettings.ReportGroup for full list of init arguments.)
-
-			@input points (iterable of ImageCoordCollection or ImageCoord instances)
-		'''
-		super().__init__(*args, **kwargs)
-		self._points = points
-
-	@property
-	def points(self):
-		return self._points
-
-	@property
-	def sr_template(self):
-		'''	Dynamic property for retrieving the SR template. Required by Sonaor in order
-			to prevent circular imports. Uses sonador.imaging.sr.helpers.encoding.VolumetricPointCollection
-			as the default SR template.
-		'''
-		if getattr(self, '_sr_template', None):
-			return self._sr_template
-
-		from ..imaging.helpers.sr.encoding import VolumetricPointCollection
-		return VolumetricPointCollection
-
-	@sr_template.setter
-	def sr_template(self, val):
-		self._sr_template = val		
-
-	def create_sr(self, **kwargs):
-		return super().create_sr(points=[p.sr for p in self.points], **kwargs)
-
-
-class ReportGroupCollection(SRDataObjectCollection):
-	'''	Collection of report groups
-	'''
-	basemodel = ReportBaseGroup
-	model = ReportGroup
-	object_type_attr = 'finding_type'
-
-	def create_sr(self):
-		'''	Create a DICOM-SR content iterable of all groups in the collection
-		'''
-		return tuple(g.sr for g in self)
-
-	def _init_collection_modelinstance(self, *args, **kwargs):
-		'''	Initialize collection model instance. If `points` is in the list of
-			arguments, return a VolumePointCollectionGroup instance rather than the
-			default model type associated with the collection.
-		'''
-		if 'points' in kwargs:
-			return VolumePointCollectionGroup(*args, **kwargs)
-		elif 'meta' in kwargs:
-			return ReportMetaGroup(*args, **kwargs)
-
-		return super()._init_collection_modelinstance(*args, **kwargs)
-
-
 ImageSpacing = namedtuple('ImageSpacing', ('x', 'y', 'thickness'))
 ImageOrientation = namedtuple('ImageOrientation', ('row', 'col'))
 ImageStackShape = namedtuple('ImageStackShape', ('slices', 'rows', 'cols'))
 
-EUCLID_COORD_ORIGIN = ImageCoord(0, 0, 0)
 
 
 # DICOM Color Representations
