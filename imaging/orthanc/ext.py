@@ -4,7 +4,7 @@
 	* `DcmExtBaseCollection`: collection class which provides methods to create and fetch
 		collections of base models associated with a specific parent.
 '''
-import abc, logging, posixpath, traceback
+import abc, datetime, logging, posixpath, traceback
 from collections import OrderedDict
 
 from client import apisettings as gapi
@@ -12,7 +12,9 @@ from client.local import GuruCoreObject, GuruCoreCollection
 from client.remote import GuruBaseObject, request_client_error
 from client.utils.object import pick, omit
 
+from ...apisettings import IMAGING_SERVER_CREATED, IMAGING_SERVER_LAST_UPDATE
 from ...remote import sonador_dataobject_create, sonador_dataobject_update, SonadorObjectCollection
+from ...serialization import json_str2datetime, str2datetime
 from ...servers.base import ImagingServerChildCollectionFetchMixin
 
 from .base import KafkaMixin
@@ -44,6 +46,36 @@ def readback_request_options(kwargs):
 	return options
 
 
+def ext_str2datetime(value):
+	'''	Parse a timestamp as the Orthanc extension APIs write it (ISO 8601, with or without
+		fractional seconds and offset) to a naive UTC datetime, like the other timestamps of the
+		client. A value that is already a date or datetime is returned as it is. An unparseable
+		value, whether of an unknown form or of a recognised form with an invalid date (a thirteenth
+		month, a thirtieth of February), is logged as a warning and read as None.
+
+		@input value (str, datetime.datetime, datetime.date or None)
+		@returns datetime.datetime, datetime.date or None: None for an empty or unparseable value
+	'''
+	if value is None or isinstance(value, (datetime.datetime, datetime.date)):
+		return value
+	if not isinstance(value, str) or not value:
+		return None
+
+	# Both parsers raise ValueError for a value whose form they recognise but whose date is invalid
+	try:
+		parsed = json_str2datetime(value)
+		if parsed is None:
+			parsed = str2datetime(value)
+	except (ValueError, TypeError):
+		logger.warning('Unable to parse extension model timestamp "%s"' % value)
+		return None
+
+	# Offset-aware values are kept as naive UTC, like the other timestamps of the client
+	if isinstance(parsed, datetime.datetime) and parsed.tzinfo is not None:
+		parsed = parsed.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+	return parsed
+
+
 class DcmExtBaseModel(GuruBaseObject):
 	'''	Extension base model: data object associated with a DICOM resource
 	'''
@@ -53,6 +85,24 @@ class DcmExtBaseModel(GuruBaseObject):
 
 		if not self.parent:
 			raise Exception('Unable to initialize extension model instance, invalid parent')
+
+	@property
+	def ctime(self):
+		'''	Date/time the model instance was created on the imaging server (`Created` of the
+			extension API)
+
+			@returns datetime.datetime or None: None when the server did not report it
+		'''
+		return ext_str2datetime(self._objectdata.get(IMAGING_SERVER_CREATED))
+
+	@property
+	def mtime(self):
+		'''	Date/time the model instance was last modified on the imaging server (`LastUpdate` of
+			the extension API)
+
+			@returns datetime.datetime or None: None when the server did not report it
+		'''
+		return ext_str2datetime(self._objectdata.get(IMAGING_SERVER_LAST_UPDATE))
 
 	@property
 	@abc.abstractmethod

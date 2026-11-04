@@ -3,7 +3,10 @@
 	highdicom: the client requires the Oak-Tree fork of highdicom
 	(https://code.oak-tree.tech/oak-tree/medical-imaging/highdicom). The fork tracks upstream
 	releases and adds the `record_instances` option to the SR document constructors and to
-	`highdicom.sr.utils.collect_evidence`, which the Sonador SR models rely on. It is published
+	`highdicom.sr.utils.collect_evidence`, which the Sonador SR models rely on, and (from
+	0.28.2.post2) accepts code meanings longer than 64 characters with a warning instead of a
+	`ValueError`, which the Sonador-SR 0.3 concept names of the Series Tag profile need on read as
+	well as on write. It is published
 	to the Oak-Tree package registry as `highdicom==<upstream version>.postN`; `highdicom.__version__`
 	reports the upstream base version, so the distribution version (importlib.metadata) and the
 	`record_instances` signature are used to tell the fork apart from a stock install.
@@ -29,12 +32,12 @@ HIGHDICOM_FORK_INDEX_URL = 'https://code.oak-tree.tech/api/v4/projects/335/packa
 # ImportError raised by `require_oaktree_highdicom`. The installable constraint is declared by the
 # packaging repository (packages/sonador, `setup.py`), which is updated alongside this value when
 # a new fork build is published.
-HIGHDICOM_FORK_VERSION = '0.28.2.post1'
+HIGHDICOM_FORK_VERSION = '0.28.2.post2'
 HIGHDICOM_FORK_REQUIREMENT = '%s==%s' % (HIGHDICOM_DISTRIBUTION, HIGHDICOM_FORK_VERSION)
 
 
 def highdicom_dist_version():
-	'''	Installed highdicom distribution version (e.g. "0.28.2.post1"), or None if the
+	'''	Installed highdicom distribution version (e.g. "0.28.2.post2"), or None if the
 		package metadata is not available.
 	'''
 	try:

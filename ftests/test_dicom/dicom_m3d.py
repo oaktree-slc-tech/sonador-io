@@ -1,7 +1,8 @@
 '''	Offline tests of the coordinate system and units of M3D models: the frame helpers, the
 	M3D instance model (fallback to the referenced series), and the STL encoder.
 
-	Run from the directory containing the `sonador` package: python -m unittest sonador.test.m3d
+	Run from the directory containing the `sonador` package:
+		python -m unittest sonador.ftests.test_dicom.dicom_m3d
 '''
 import unittest
 from io import BytesIO
@@ -12,24 +13,24 @@ from pydicom import dcmread
 from pydicom.dataset import Dataset
 from pydicom.sequence import Sequence
 
-from ..apisettings import DCMHEADER_FRAME_OF_REFERENCE_UID, DCMHEADER_MEASUREMENT_UNITS_CODE_SEQUENCE, \
+from ...apisettings import DCMHEADER_FRAME_OF_REFERENCE_UID, DCMHEADER_MEASUREMENT_UNITS_CODE_SEQUENCE, \
 	DCMHEADER_POSITION_REFERENCE_INDICATOR, DCMHEADER_PATIENT_POSITION, DCMHEADER_SR_REF_SERIES_SEQ, \
 	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_CODE_VALUE, DCMHEADER_CODING_SCHEME_DESIGNATOR, DCMHEADER_CODE_MEANING, \
 	DCMHEADER_ENCAPSULATED_DOCUMENT, DCMHEADER_ENCAPSULATED_DOCUMENT_MIMETYPE, DCMHEADER_MODALITY, DCMHEADER_SOP_CLASS_UID, \
 	DCMHEADER_CODING_SCHEME_VERSION
-from ..apisettings.media import DCMEDIA_ENCAPSULATED_STL_SOP_CLASS, DCMEDIA_STL_MIMETPYE
-from ..apisettings.m3d import M3D_UNIT_MM, M3D_UNIT_CM, M3D_UNIT_M, M3D_UNIT_UM, M3D_UNIT_SCALES, M3D_UNIT_CODING_SCHEME, \
+from ...apisettings.media import DCMEDIA_ENCAPSULATED_STL_SOP_CLASS, DCMEDIA_STL_MIMETPYE
+from ...apisettings.m3d import M3D_UNIT_MM, M3D_UNIT_CM, M3D_UNIT_M, M3D_UNIT_UM, M3D_UNIT_SCALES, M3D_UNIT_CODING_SCHEME, \
 	M3D_COORDINATE_SYSTEM_LPS, M3D_COORDINATE_SYSTEM_RAS, \
 	M3D_FRAME_SOURCE_INSTANCE, M3D_FRAME_SOURCE_REFERENCE, M3D_FRAME_SOURCE_DEFAULT, M3D_DCM_SERIES_TAGS
-from ..apisettings.sr import srcode2dataset, DcmCode
-from ..imaging.helpers import headers as headers_module
-from ..imaging.helpers.m3d import M3DFrame, dcm_header_value, dcm_header_uid, dcm_referenced_series_uids, \
+from ...apisettings.sr import srcode2dataset, DcmCode
+from ...imaging.helpers import headers as headers_module
+from ...imaging.helpers.m3d import M3DFrame, dcm_header_value, dcm_header_uid, dcm_referenced_series_uids, \
 	dcm_m3d_units, dcm_encode_m3d_units, dcm_m3d_frame_from_headers, dcm_m3d_frame
-from ..imaging.orthanc.media import DcmEncapsulatedDocumentInstance
-from ..imaging.orthanc.seg import DcmSegmentationInstance
-from ..imaging.orthanc.base import DcmInstance
-from ..imaging.orthanc.m3d import DcmM3DInstance
-from ..tasks.media import dcm_encode_stl
+from ...imaging.orthanc.media import DcmEncapsulatedDocumentInstance
+from ...imaging.orthanc.seg import DcmSegmentationInstance
+from ...imaging.orthanc.base import DcmInstance
+from ...imaging.orthanc.m3d import DcmM3DInstance
+from ...tasks.media import dcm_encode_stl
 
 
 FOR_MODEL, FOR_CT, SX_CT, SX_SEG = '1.2.826.0.1.3680043.8.498.1', '1.2.826.0.1.3680043.8.498.2', '1.2.3.ct', '1.2.3.seg'
@@ -145,12 +146,11 @@ class HeaderAccessTest(unittest.TestCase):
 			dcm_encode_m3d_units('inch')
 
 	def test_coded_concept_serialization(self):
-		'''	The units are serialized by the shared converter. By default it writes the Coding Scheme
-			Version as an empty element when the code has none; the M3D sequence omits it (omit_empty)
+		'''	The units are serialized by the shared converter. The Coding Scheme Version is omitted when
+			the code has none (Type 1C, never written empty), with or without `omit_empty`
 		'''
 		item = srcode2dataset(DcmCode('mm', 'UCUM', 'mm'))
-		self.assertIn(DCMHEADER_CODING_SCHEME_VERSION, item)
-		self.assertIsNone(item.CodingSchemeVersion)
+		self.assertNotIn(DCMHEADER_CODING_SCHEME_VERSION, item)
 		item = srcode2dataset(DcmCode('mm', 'UCUM', 'mm'), omit_empty=True)
 		self.assertNotIn(DCMHEADER_CODING_SCHEME_VERSION, item)
 		self.assertEqual((item.CodeValue, item.CodingSchemeDesignator, item.CodeMeaning), ('mm', 'UCUM', 'mm'))

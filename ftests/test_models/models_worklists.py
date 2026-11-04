@@ -1,21 +1,19 @@
 '''	Tests of the worklist models which need no server connection.
 
-	Run from the directory containing the `sonador` package: python -m unittest sonador.test.worklists
+	Run from the directory containing the `sonador` package:
+		python -m unittest sonador.ftests.test_models.models_worklists
 '''
-import json, unittest
-from types import SimpleNamespace
+import unittest
 
 from sonador.servers import SonadorServer, SonadorImagingServer
 from sonador.apisettings import DicomHeaderData, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_PATIENT
 from sonador.imaging.orthanc import ImagingStudy
 from sonador.imaging.orthanc.worklists import ReviewerStudyWorklistItem
 
-IMAGESERVER_JSON = {
-	'pk': 'srv-1', 'name': 'Test PACS', 'hostname': 'pacs.invalid', 'scheme': 'https', 'port': 443,
-	'internal_hostname': 'pacs.internal.invalid', 'internal_scheme': 'http', 'internal_port': 8042,
-	'dicomweb_root': '/dicom-web', 'wado_root': '/wado', 'token': 'abc', 'active': True, 'default': True,
-	'description': '', 'image_rendering_method': '', 'thumbnail_rendering_method': '', 'qido_supports_include': False,
-}
+from ...test.fakes import IMAGESERVER_JSON, FakeResponse
+
+__all__ = ['WorklistParentStudyTestCase']
+
 
 # DICOMweb worklist item as the browse endpoint returns it: worklist fields plus the study's DICOM tags
 WORKLIST_ITEM_DICOMWEB = {
@@ -46,22 +44,6 @@ CACHE_DCM_TAGS = dict([
 	tag(IMAGING_SERVER_RESOURCE_PATIENT, 'PatientName', '0010', '0010', 'PN'),
 	tag(IMAGING_SERVER_RESOURCE_PATIENT, 'PatientID', '0010', '0020', 'LO'),
 ])
-
-
-class FakeResponse:
-	'''	Minimal stand-in for requests.Response
-	'''
-	def __init__(self, data, url='https://pacs.invalid/x'):
-		self._data = data
-		self.status_code = 200
-		self.ok = True
-		self.headers = {'Content-Type': 'application/json'}
-		self.text = json.dumps(data)
-		self.content = self.text.encode()
-		self.request = SimpleNamespace(url=url)
-
-	def json(self, **kwargs):
-		return json.loads(self.text, **kwargs)
 
 
 class WorklistParentStudyTestCase(unittest.TestCase):

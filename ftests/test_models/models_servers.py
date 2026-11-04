@@ -1,6 +1,7 @@
 '''	Tests of the Sonador server models which need no server connection.
 
-	Run from the directory containing the `sonador` package: python -m unittest sonador.test.servers
+	Run from the directory containing the `sonador` package:
+		python -m unittest sonador.ftests.test_models.models_servers
 '''
 import unittest
 from types import SimpleNamespace
@@ -10,6 +11,8 @@ from highdicom.sr import CodedConcept
 from sonador.servers import SonadorImagingServer
 from sonador.servers.auth import SonadorGroup, SonadorGroupCollection
 from sonador.imaging.orthanc.group import OrthancGroup
+
+__all__ = ['ImagingServerLabelTestCase', 'OrthancGroupProxyTestCase']
 
 
 class ImagingServerLabelTestCase(unittest.TestCase):

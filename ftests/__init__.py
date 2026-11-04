@@ -20,3 +20,6 @@ from .tests_ext_tags import *
 from .tests_bulk import *
 from .tests_download import *
 from .tests_ext_dicomweb_viewer import *
+from .test_sr import *
+from .test_dicom import *
+from .test_models import *

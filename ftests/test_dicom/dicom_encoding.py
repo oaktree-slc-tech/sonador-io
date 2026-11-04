@@ -3,7 +3,7 @@
 	These tests do not require a Sonador server. Run from the directory containing the `sonador`
 	package with:
 
-		python -m unittest sonador.test.dicom -v
+		python -m unittest sonador.ftests.test_dicom.dicom_encoding -v
 '''
 import copy, unittest, warnings
 from importlib import metadata
@@ -27,16 +27,16 @@ from highdicom.sr import Comprehensive3DSR, Scoord3DContentItem, GraphicTypeValu
 from highdicom.sr.enum import RelationshipTypeValues, ValueTypeValues
 from highdicom.sr.utils import find_content_items
 
-from .. import dcmcompat
-from ..apisettings.base import DCMSR_UNITS_MM, DCMHEADER_SR_EVIDENCE_SEQUENCES, \
+from ... import dcmcompat
+from ...apisettings.base import DCMSR_UNITS_MM, DCMHEADER_SR_EVIDENCE_SEQUENCES, \
 	DCMHEADER_SR_CURRENT_REQUESTED_PROCEDURE_EVIDENCE_SEQUENCE, DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE, \
 	DCMHEADER_SR_REF_SERIES_SEQ, DCMHEADER_SR_REF_SOP_SEQ, DCMHEADER_SR_REF_INSTANCE_UID, DCMHEADER_SERIES_INSTANCE_UID
-from ..apisettings.sr import srencode_observation_context, DCMSR_SCOORD3D, DCMSR_REPORT_METADATA, \
+from ...apisettings.sr import srencode_observation_context, DCMSR_SCOORD3D, DCMSR_REPORT_METADATA, \
 	DCMSR_REPORT_VOLUME_MEAUREMENTS
-from ..helpers.local import dcm_part10_backfill
-from ..imaging.helpers.conversion import dcm_encode_filedata, array2dcmimg
-from ..imaging.helpers.sr.encoding import SonadorSRMeasurementReport, ReportMetaGroup, VolumetricPointCollection
-from ..imaging.orthanc.sr import DcmSRInstance, dcmsr_iter_series_references
+from ...helpers.local import dcm_part10_backfill
+from ...imaging.helpers.conversion import dcm_encode_filedata, array2dcmimg
+from ...imaging.helpers.sr.encoding import SonadorSRMeasurementReport, ReportMetaGroup, VolumetricPointCollection
+from ...imaging.orthanc.sr import DcmSRInstance, dcmsr_iter_series_references
 
 
 def dataset2simplified(ds):
@@ -95,7 +95,7 @@ class DcmCompatTestCase(unittest.TestCase):
 		dcmcompat.require_oaktree_highdicom()
 
 	def test_fork_requirement_is_exact(self):
-		'''	The requirement must select the published fork build only. `~=0.28.2.post1` would also
+		'''	The requirement must select the published fork build only. `~=0.28.2.post2` would also
 			admit stock 0.28.3+, which installs but lacks `record_instances`.
 		'''
 		try:
@@ -109,8 +109,9 @@ class DcmCompatTestCase(unittest.TestCase):
 		for stock in ('0.27.0', '0.28.2', '0.28.3', '0.28.9', '0.29.0', '1.0.0'):
 			self.assertFalse(requirement.specifier.contains(stock, prereleases=True),
 				msg='Requirement %s admits stock highdicom %s' % (dcmcompat.HIGHDICOM_FORK_REQUIREMENT, stock))
-		# Later rebuilds of the same base are deliberately not admitted without a pin bump
-		self.assertFalse(requirement.specifier.contains('0.28.2.post2', prereleases=True))
+		# Earlier and later builds of the same base are deliberately not admitted without a pin bump
+		for build in ('0.28.2.post1', '0.28.2.post3'):
+			self.assertFalse(requirement.specifier.contains(build, prereleases=True))
 
 	def test_installed_highdicom_is_the_pinned_fork_release(self):
 		'''	Provenance of the installed artifact: distribution version matches the pin, and the
@@ -447,11 +448,22 @@ class SRReportTemplateTestCase(unittest.TestCase):
 				self.assertEqual(set(i[3] for i in items), {RelationshipTypeValues.HAS_CONCEPT_MOD.value})
 				self.assertEqual(self.procedure_items(self.document(sonador)), items)
 
-	def test_empty_report_rejected(self):
-		with self.assertRaises(ValueError):
-			SonadorSRMeasurementReport(
-				observation_context=self.observation_context, procedure_reported=self.procedure,
-				imaging_measurements=[])
+	def test_empty_report_written_with_header_items_only(self):
+		'''	A report with no group of any kind is built: its root holds the same header items as a
+			meta-group-only report (language, observation context, procedure reported) and nothing
+			else, with no Imaging Measurements container, and it serialises to a document
+		'''
+		empty = SonadorSRMeasurementReport(
+			observation_context=self.observation_context, procedure_reported=self.procedure,
+			imaging_measurements=[])
+		with_meta = SonadorSRMeasurementReport(
+			observation_context=self.observation_context, procedure_reported=self.procedure,
+			meta_groups=[self.meta_group()])
+		names = lambda root: [item.ConceptNameCodeSequence[0].get('CodeValue') for item in root.ContentSequence]
+		self.assertEqual(names(empty[0]), names(with_meta[0])[:-1])
+		self.assertNotIn(codes.DCM.ImagingMeasurements.value, names(empty[0]))
+		self.assertEqual(self.procedure_items(empty[0]), self.procedure_items(with_meta[0]))
+		self.assertEqual(names(self.document(empty)), names(empty[0]))
 
 	def test_invalid_group_types_rejected(self):
 		with self.assertRaises(TypeError):
@@ -546,7 +558,7 @@ class SRModelTestCase(unittest.TestCase):
 	'''
 	def setUp(self):
 		from highdicom.sr.value_types import TextContentItem
-		from ..apisettings.base import ReportMetaGroup as ReportMetaGroupModel
+		from ...apisettings.base import ReportMetaGroup as ReportMetaGroupModel
 		self.ct1, self.ct2 = ct_evidence()
 		self.meta_group = ReportMetaGroupModel(
 			meta=[TextContentItem(name=codes.DCM.Comment, value='metadata only',
@@ -554,7 +566,7 @@ class SRModelTestCase(unittest.TestCase):
 			tracking_id='meta-1')
 
 	def create_document(self, record_instances):
-		from ..imaging.helpers.sr import SonadorComprehensiveSR3D
+		from ...imaging.helpers.sr import SonadorComprehensiveSR3D
 		model = SonadorComprehensiveSR3D(
 			dcm_evidence=[self.ct1, self.ct2], report_procedure=codes.LN.CTUnspecifiedBodyRegion,
 			groups=[self.meta_group], observation_context_device_name='Sonador Tests')
