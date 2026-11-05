@@ -8,6 +8,8 @@
 	@fn dcm_header_value: read a header, empty values as the default
 	@fn dcm_header_uid: read a UID header as a stripped string
 	@fn dcm_referenced_series_uids: Series Instance UIDs of the Referenced Series Sequence, in order
+
+	The writers of the Referenced Series Sequence are in `dcmref`.
 '''
 from client.utils.general import unique_ordered_sequence
 
