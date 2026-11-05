@@ -23,7 +23,7 @@ from client.remote import RemoteServer, request_client_error
 from ..apisettings import SONADOR_ACCESS_ID, SONADOR_SECRET_KEY, SONADOR_URL, SONADOR_APITOKEN, SONADOR_INTERNAL_DNS, \
 		SONADOR_VERIFY_SSL, \
 	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_SR_REF_SERIES_SEQ, DCMHEADER_SR_REF_INSTANCE_SEQ, DCMHEADER_SR_REF_SOP_SEQ, \
-	DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_SR_SOP_CLASS_UID, DCMHEADER_SR_REF_INSTANCE_UID
+	DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_SR_SOP_CLASS_UID, DCMHEADER_SR_REF_INSTANCE_UID, DicomMetaKey
 from ..apisettings.sr import points2array, DCM_CODED_CONCEPT_HEADERS, DCM_CODED_CONCEPT_MAPPING
 from ..apisettings.media import DCMEDIA_PDF_MIMETYPE, DCMEDIA_PDF_EXTENSION, \
 	DCMEDIA_STL_MIMETPYE, DCMEDIA_STL_EXTENSION, \
@@ -245,54 +245,47 @@ def reindex_slicelocation(dcmimage_dir, index_start=0, tmp_prefix='tmp', indexfn
 
 
 def dcm_encode_instance_ref(instance, dcm_mdata=None):
-	'''	Create a DICOM ReferencedInstanceSequence element for the provided instance.
+	'''	Create a DICOM ReferencedInstanceSequence element for the provided instance. Kept for the
+		existing callers; `sonador.imaging.helpers.dcmref.dcm_encode_instance_reference` is the general
+		form, which also accepts a dataset or dictionary of tags.
 
-		@input instance (sonador.imaging.orthanc.base.DcmInstance):
-			instance for which the instance reference should be created.
+		@input instance (sonador.imaging.orthanc.base.DcmInstance, or any instance resource with
+			`sop_class_uid` and `sop_instance_uid`): instance for which the instance reference should be created.
 		@input dcm_mdata (pydicom.dataset.Dataset, default=blank dataset instance):
 			dataset to which the reference should be added
 
 		@returns pydicom.dataset.Dataset
 	'''
-	from ..imaging.orthanc.base import DcmInstance
+	from ..imaging.helpers.dcmref import dcm_encode_instance_reference
 
-	# Ensure that the provided instance is an Orthanc imaging instance
-	if not isinstance(instance, DcmInstance):
-		raise ValueError('Unable to create reference for the instance, input must be '
-			+ 'a DcmInstance.')
-
-	# Initialize dataset and add instance class and UID references
-	dcm_mdata = dcm_mdata or Dataset()
-	setattr(dcm_mdata, DCMHEADER_SR_SOP_CLASS_UID, instance.sop_class_uid)
-	setattr(dcm_mdata, DCMHEADER_SR_REF_INSTANCE_UID, instance.sop_instance_uid)
-
-	return dcm_mdata
+	try:
+		return dcm_encode_instance_reference(instance, dcm_mdata=dcm_mdata)
+	except ValueError as err:
+		raise ValueError('Unable to create reference for the instance, input must be an instance resource '
+			'with a SOP Class UID and a SOP Instance UID. %s' % err) from err
 
 
 def dcm_encode_series_ref(series, dcm_mdata=None):
-	'''	Create a DICOM ReferencedSeriesSequence for the provided series and associated instances.
+	'''	Create a DICOM ReferencedSeriesSequence item for the provided series and all of its instances
+		(the Common Instance Reference form). Kept for the existing callers;
+		`sonador.imaging.helpers.dcmref.dcm_encode_series_reference` is the general form, which also
+		writes series-only items and accepts a DicomMetaKey or a UID.
 
-		@input series (sonador.imaging.orthanc.base.ImagingSeries): series for which the series
-			reference should be created.
+		@input series (sonador.imaging.orthanc.base.ImagingSeries, or any series resource with a
+			`series_uid` and an instance collection: SR, SEG and encapsulated-document series included):
+			series for which the series reference should be created.
 		@input dcm_mdata (pydicom.dataset.Dataset, default=blank dataset instance):
 			dataset to which the references should be added
 
 		@returns pydicom.dataset.Dataset
 	'''
-	from ..imaging.orthanc.base import ImagingSeries
+	from ..imaging.helpers.dcmref import dcm_encode_series_reference
 
-	# Ensure that the provided series is an Orthanc imaging series
-	if not isinstance(series, ImagingSeries):
+	if isinstance(series, (str, DicomMetaKey)) or getattr(series, 'series_uid', None) is None:
 		raise ValueError('Unable to create reference series for series, reference series must be '
-			+ 'an ImagingSeries instance.')
+			+ 'a series resource (ImagingSeries or another series model) with its instances.')
 
-	# Initialize dataset and add series
-	dcm_mdata = dcm_mdata or Dataset()
-	setattr(dcm_mdata, DCMHEADER_SERIES_INSTANCE_UID, series.series_uid)
-	setattr(dcm_mdata, DCMHEADER_SR_REF_INSTANCE_SEQ, Sequence(
-		[dcm_encode_instance_ref(dcm) for dcm in series.slices_collection]))
-
-	return dcm_mdata
+	return dcm_encode_series_reference(series, reference_instances=True, dcm_mdata=dcm_mdata)
 
 
 

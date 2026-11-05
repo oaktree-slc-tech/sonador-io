@@ -375,6 +375,13 @@ DCMHEADER_IMG_PIXELDATA = 'PixelData'
 DCMHEADER_IMG_ROWS = 'Rows'
 DCMHEADER_IMG_COLS = 'Columns'
 
+# VOI LUT module (PS3.3 C.11.2): display window (center, width) applied to the pixel values after the
+# Modality LUT or Rescale Slope/Intercept transformation, so in the output units of that step
+DCMCODE_WINDOW_CENTER = ('0028', '1050')
+DCMHEADER_WINDOW_CENTER = 'WindowCenter'
+DCMCODE_WINDOW_WIDTH = ('0028', '1051')
+DCMHEADER_WINDOW_WIDTH = 'WindowWidth'
+
 # DICOM Image Profiles
 DCM_IMG_PROFILE_UNSIGNED_INT = { DCMHEADER_PIXEL_REPRESENTATION: 0}
 DCM_IMG_PROFILE_SIGNED_INT = { DCMHEADER_PIXEL_REPRESENTATION: 1 }
@@ -469,10 +476,22 @@ DCMTS_SERIES = DicomDatetimePairKey(
 DCMCODE_SERIES_DESCRIPTION = ('0008', '103e')
 DCMHEADER_SERIES_DESCRIPTION = 'SeriesDescription'
 
+# Image Type (PS3.3 C.7.6.1.1.2) is multi-valued: value 1 gives the pixel data characteristics
+# (ORIGINAL: acquired by the device; DERIVED: computed from other images), value 2 the patient
+# examination characteristics (PRIMARY: created as a direct result of the examination; SECONDARY:
+# created afterwards). Writers compose the attribute from the values, for example
+# `[DCM_IMAGE_TYPE_DERIVED, DCM_IMAGE_TYPE_SECONDARY]` for a computed secondary capture.
 DCMCODE_IMAGE_TYPE = ('0008', '0008')
 DCMHEADER_IMAGE_TYPE = 'ImageType'
 
-DCM_IMAGE_TYPE_DERIVED = 'Derived\\Secondary'
+DCM_IMAGE_TYPE_ORIGINAL = 'ORIGINAL'
+DCM_IMAGE_TYPE_DERIVED = 'DERIVED'
+DCM_IMAGE_TYPE_PRIMARY = 'PRIMARY'
+DCM_IMAGE_TYPE_SECONDARY = 'SECONDARY'
+
+# Derivation Description (General Image module): how a DERIVED image was computed from its sources
+DCMCODE_DERIVATION_DESCRIPTION = ('0008', '2111')
+DCMHEADER_DERIVATION_DESCRIPTION = 'DerivationDescription'
 
 DCMHEADER_INSTITUTION_NAME = 'InstitutionName'
 DCMHEADER_INSTITUTION_ADDRESS = 'InstitutionAddress'
