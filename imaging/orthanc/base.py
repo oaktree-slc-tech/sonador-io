@@ -48,6 +48,7 @@ from ...apisettings.media import DCMEDIA_M3D_MODALITY
 from ...helpers import request_client_error, fetch_sonador_session_token, response2filearchive
 from ...helpers.valuerep import str2name
 from ..helpers.imagetype import dcm_series_imagetype_tags, dcm_image_type, dcm_tags_are_derived
+from ..helpers.codes import dcm_series_description_codes
 from ...serialization import json_datetime_parser, json_str2datetime, dcm_str2date, dcm_str2time
 from ...remote import SonadorBaseObject, SonadorObjectCollection, fetch_sonador_data_collection
 from ...servers import ImagingServerChildCollection, ImagingServerChildBaseObject, SonadorImagingServer
@@ -2288,6 +2289,19 @@ class ImagingSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 			@returns bool
 		'''
 		return dcm_tags_are_derived(dcm_series_imagetype_tags(self))
+
+	@property
+	def description_codes(self):
+		'''	Coded concepts of the Series Description Code Sequence (0008,103F) of the series, in the order
+			of the items: from the series tags when the server indexes the attribute at the series level,
+			else from the tags of the first instance (a cold series fetches its instance collection and
+			then the instance tags from the server; both are cached on the resource). An empty list when
+			the attribute is absent. The sequence may hold several items, see `imaging.helpers.codes`.
+			Errors reading the instance tags propagate.
+
+			@returns list of highdicom.sr.CodedConcept
+		'''
+		return dcm_series_description_codes(self)
 
 	@property
 	@functools.lru_cache()

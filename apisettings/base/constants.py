@@ -476,6 +476,9 @@ DCMTS_SERIES = DicomDatetimePairKey(
 DCMCODE_SERIES_DESCRIPTION = ('0008', '103e')
 DCMHEADER_SERIES_DESCRIPTION = 'SeriesDescription'
 
+DCMCODE_SERIES_DESCRIPTION_CODE_SEQUENCE = ('0008', '103f')
+DCMHEADER_SERIES_DESCRIPTION_CODE_SEQUENCE = 'SeriesDescriptionCodeSequence'
+
 # Image Type (PS3.3 C.7.6.1.1.2) is multi-valued: value 1 gives the pixel data characteristics
 # (ORIGINAL: acquired by the device; DERIVED: computed from other images), value 2 the patient
 # examination characteristics (PRIMARY: created as a direct result of the examination; SECONDARY:
