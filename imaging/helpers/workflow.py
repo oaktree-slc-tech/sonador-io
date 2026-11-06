@@ -1,7 +1,7 @@
 '''	Helper utilities used for working with local DICOM instances (pydicom.Dataset or pydicom.FileDataset).
 '''
 
-import datetime
+import copy, datetime
 from pydicom.dataset import Dataset
 
 from ...apisettings import SONADOR_CLIENT, DCM_ORIGINAL_ATTRIBUTES_SEQUENCE, \
@@ -17,11 +17,17 @@ def dcmheader_modify(dcm, headers, modified_attributes_sequence=True,
 		works on local instances of DICOM data. For modifying remote data stored in
 		Sonador utilize imaging.orthanc.base.ImagingResource.modify method.
 
+		With `modified_attributes_sequence` one item is appended to the Original Attributes Sequence
+		per call, holding in its Modified Attributes Sequence the previous value of each header whose
+		value was non-empty and changed. An attribute the instance did not have, or held empty, has no
+		previous value and is not recorded; when nothing is recorded no item is appended. Previous values
+		are copies, a sequence is recorded as it was and does not follow later changes of the instance.
+
 		@input dcm (pydicom.Dataset): DICOM instance to be modified
 		@input headers (dict): Dictionary of new headers to be applied
 		@input modified_attributes_sequence (bool, default=True): when True,
 			create (or extend) a modified attributes sequence containing the
-			previous values.
+			previous values. When False the headers are applied without a record.
 		@input mod_ts (datetime, default=datetime.utcnow): date/time to be used
 			for the modified timestamp.
 		@input modifying_system (str, default='Sonador-Client'): string to be used
@@ -51,7 +57,7 @@ def dcmheader_modify(dcm, headers, modified_attributes_sequence=True,
 		# Container for all modified attributes
 		modattr_sequence = []
 		
-	else: modattr_sequence is None
+	else: modattr_sequence = None
 
 	# Iterate through headers and apply the new values
 	for h,v in headers.items():
@@ -61,7 +67,7 @@ def dcmheader_modify(dcm, headers, modified_attributes_sequence=True,
 
 			# Create dataset instance for previous value
 			oattr = Dataset()
-			setattr(oattr, h, getattr(dcm, h))
+			setattr(oattr, h, copy.deepcopy(getattr(dcm, h)))
 
 			# Append to sequence chain
 			modattr_sequence.append(oattr)
