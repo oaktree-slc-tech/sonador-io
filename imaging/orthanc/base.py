@@ -47,6 +47,7 @@ from ...apisettings.media import DCMEDIA_M3D_MODALITY
 
 from ...helpers import request_client_error, fetch_sonador_session_token, response2filearchive
 from ...helpers.valuerep import str2name
+from ..helpers.imagetype import dcm_series_imagetype_tags, dcm_image_type, dcm_tags_are_derived
 from ...serialization import json_datetime_parser, json_str2datetime, dcm_str2date, dcm_str2time
 from ...remote import SonadorBaseObject, SonadorObjectCollection, fetch_sonador_data_collection
 from ...servers import ImagingServerChildCollection, ImagingServerChildBaseObject, SonadorImagingServer
@@ -2263,6 +2264,30 @@ class ImagingSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 	@property
 	def kafka_url(self):
 		return posixpath.join(self.resource_url, 'kafka')
+
+	@property
+	def image_type(self):
+		'''	Values of the Image Type (0008,0008) of the series, upper case and in position: from the series
+			tags when the server indexes the attribute at the series level, else from the tags of the first
+			instance (a cold series fetches its instance collection and then the instance tags from the
+			server; both are cached on the resource). An empty list when the attribute is absent. Errors
+			reading the instance tags propagate; `imaging.helpers.imagetype.dcm_series_is_derived` offers a
+			three-valued form with retries.
+
+			@returns list of str
+		'''
+		return dcm_image_type(dcm_series_imagetype_tags(self))
+
+	@property
+	def derived(self):
+		'''	Whether the series is derived from other images: Image Type value 1 DERIVED or value 2 SECONDARY
+			(a display copy resampled to a coarser grid, a secondary capture, a computed image); without an
+			Image Type, a Derivation Description or Source Image Sequence (`dcm_tags_are_derived`). The
+			tags are read as for `image_type`; errors propagate.
+
+			@returns bool
+		'''
+		return dcm_tags_are_derived(dcm_series_imagetype_tags(self))
 
 	@property
 	@functools.lru_cache()
