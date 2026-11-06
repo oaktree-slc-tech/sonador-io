@@ -488,10 +488,26 @@ DCM_IMAGE_TYPE_ORIGINAL = 'ORIGINAL'
 DCM_IMAGE_TYPE_DERIVED = 'DERIVED'
 DCM_IMAGE_TYPE_PRIMARY = 'PRIMARY'
 DCM_IMAGE_TYPE_SECONDARY = 'SECONDARY'
+# Value 1 of an Enhanced (multi-frame) image whose frames are ORIGINAL and DERIVED in part (PS3.3
+# C.8.16.1.1, Table C.8-127): some of its pixel data is computed, so readers treat it as non-primary
+DCM_IMAGE_TYPE_MIXED = 'MIXED'
 
 # Derivation Description (General Image module): how a DERIVED image was computed from its sources
 DCMCODE_DERIVATION_DESCRIPTION = ('0008', '2111')
 DCMHEADER_DERIVATION_DESCRIPTION = 'DerivationDescription'
+
+# Separator of the values of a multi-valued attribute in the simplified tags of the imaging server
+# (Orthanc returns `ImageType` as one backslash-separated string); see `imaging.helpers.imagetype`
+DCM_MULTIVALUE_SEPARATOR = '\\'
+
+# What a series classification does with a series whose tags cannot be read (an instance request
+# failed after the retries): stop with an error, leave the series out of the result, or keep it. Used
+# by the Image Type readers (`imaging.helpers.imagetype`), where an unclassified series stops the
+# listing by default so that a derived series is never passed off as primary imaging.
+SERIES_UNKNOWN_ERROR = 'error'
+SERIES_UNKNOWN_SKIP = 'skip'
+SERIES_UNKNOWN_KEEP = 'keep'
+SERIES_UNKNOWN_OPTIONS = (SERIES_UNKNOWN_ERROR, SERIES_UNKNOWN_SKIP, SERIES_UNKNOWN_KEEP)
 
 DCMHEADER_INSTITUTION_NAME = 'InstitutionName'
 DCMHEADER_INSTITUTION_ADDRESS = 'InstitutionAddress'
