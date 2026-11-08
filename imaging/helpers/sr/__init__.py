@@ -263,7 +263,8 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 			@input strict (bool, default=False): raise SRDiagnosticError on the first `warning` or `error`
 				diagnostic
 			@input diagnostics (list, default=new list): list the diagnostics are appended to
-			@input kwargs: constructor arguments of `cls`
+			@input kwargs: constructor arguments of `cls`, and `calibrations` (mapping of
+				`ImageFrameGeometry`, see `sonador.imaging.helpers.sr.parse.srdoc_parse`)
 
 			@returns `cls` instance: the model, with `parsed`, `diagnostics`, `groups`, `report_title`,
 				`report_procedure`, `person_observer`, `template_id` and `extra_items` populated
@@ -535,16 +536,20 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 
 	def _all_extra_items(self):
 		'''	Every preserved content item the model holds: the root items, then those of each group, of
-			each finding and of both display containers of the finding.
+			each finding and measurement, of both display containers of those, and the other NUM items
+			of each measurement.
 
 			@returns iterator of pydicom.Dataset
 		'''
 		yield from self.extra_items
 		for group in getattr(self, 'groups', None) or []:
 			yield from getattr(group, 'extra_items', ())
-			for finding in getattr(group, 'findings', None) or []:
-				yield from getattr(finding, 'extra_items', ())
-				display = getattr(finding, 'display', None)
+			for item in itertools.chain(getattr(group, 'findings', None) or [], getattr(group, 'measurements', None) or []):
+				yield from getattr(item, 'extra_items', ())
+				for entry in getattr(item, 'values', {}).values():
+					if entry.item is not None:
+						yield entry.item
+				display = getattr(item, 'display', None)
 				if display is not None:
 					yield from getattr(display, 'extra_items', ())
 					yield from getattr(display, 'color_extra_items', ())
@@ -569,7 +574,9 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 		@property reference_frames (ImageTransformMatrixCollection): reference frames
 			(encoded as transform matrixes) associated with the report.
-		@property measurements (MeasurementCollection): primary measurement collection for the report.
+		@property measurements (MeasurementCollection): measurements for the report. One with a group
+			identity (a typed measurement) is written as its own TID 1501 measurement group; the others
+			go to the primary group.
 		@property findings (FindingCollection): primary findings collection for the report. A Series
 			Tag finding is written as its own TID 1501 measurement group; the other findings go to the
 			primary group.
@@ -603,8 +610,8 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 				reference frames) associated with the report. Added to the `RegistrationSequence` DICOM header
 				of the encoded SR document. Refer to:
 				https://dicom.nema.org/medical/Dicom/2016c/output/chtml/part03/sect_C.20.2.html
-			@input measurements (iterable of Measurement): measurements of the report, written to the
-				primary group
+			@input measurements (iterable of Measurement): measurements of the report; a typed measurement
+				is written as its own measurement group, the others to the primary group
 			@input findings (iterable of Finding): findings of the report; a Series Tag finding
 				(`Finding.series_tag`) is written as its own measurement group
 			@input groups (iterable of ReportGroup, default=the parsed document's groups): report groups,
@@ -706,13 +713,37 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			found.extend(f for f in (getattr(group, 'findings', None) or []) if f.is_series_tag)
 		return found
 
+	@property
+	def typed_measurements(self):
+		'''	Measurements of the model with a group identity (`Measurement.has_group_identity`): those of
+			`measurements` first, then those of every group, in order.
+
+			@returns list of Measurement
+		'''
+		found = [m for m in (self.measurements or []) if m.has_group_identity]
+		for group in (self.groups or []):
+			found.extend(m for m in (getattr(group, 'measurements', None) or []) if m.has_group_identity)
+		return found
+
+	@property
+	def _image_referencing_items(self):
+		'''	Series Tag findings and image-domain measurements: the items whose image references are
+			recorded in the Image Library and the evidence.
+
+			@returns list of Finding and Measurement
+		'''
+		measurements = [m for m in self.typed_measurements if m.geometry is not None and m.geometry.is_image]
+		return list(self.series_tag_findings) + measurements
+
 	def _imaging_measurement_groups(self, **kwargs):
-		'''	Measurement groups of the report, in writing order. The measurements and the findings of
-			`findings` that are not Series Tags form the "primary" group, placed first. Each Series Tag
-			finding of `findings` becomes one TID 1501 group with the tracking identifier of the Series
-			Tag tool and the finding's tracking UID (generated when the finding has none). The report
-			groups of `groups` follow as they are; the meta groups and the volume point groups among
-			them are written separately (`_meta_groups`, `_volume_measurement_groups`).
+		'''	Measurement groups of the report, in writing order. The measurements without a group identity
+			and the findings of `findings` that are not Series Tags form the "primary" group, placed
+			first. Each Series Tag finding of `findings` and each measurement with a group identity
+			becomes one TID 1501 group with its tracking identifier and tracking UID (generated when
+			absent). The report groups of `groups` follow as they are; the meta groups and the volume
+			point groups among them are written separately (`_meta_groups`,
+			`_volume_measurement_groups`). A report subclass contributes its own measurement groups by
+			extending this hook.
 
 			@input kwargs: options of the primary group, prefixed `primary_group_*`
 
@@ -722,13 +753,16 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 		findings = list(self.findings or [])
 		primary_findings = [f for f in findings if not f.is_series_tag]
 		tag_findings = [f for f in findings if f.is_series_tag]
+		scalar_measurements = [m for m in (self.measurements or []) if not m.has_group_identity]
+		group_measurements = [m for m in (self.measurements or []) if m.has_group_identity]
 
-		if primary_findings or self.measurements:
+		if primary_findings or scalar_measurements:
 			_pgroup_kwargs = {
 				'tracking_id': kwargs.get('primary_group_tacking_id') or TrackingIdentifier(
 					uid=kwargs.get('primary_group_uid') or self.primary_group_uid,
 					identifier=kwargs.get('primary_group_identifier') or self.primary_group_identifier),
-				'findings': FindingCollection(primary_findings) if primary_findings else None, 'measurements': self.measurements,
+				'findings': FindingCollection(primary_findings) if primary_findings else None,
+				'measurements': MeasurementCollection(scalar_measurements) if scalar_measurements else None,
 				'finding_sites': kwargs.get('primary_site_finding_sites') or self.primary_group_finding_sites,
 				'method': kwargs.get('primary_group_method') or self.primary_group_method,
 				'algorithm': kwargs.get('primary_group_algorithm') or self.primary_group_algorithm,
@@ -746,6 +780,12 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			groups.append(ReportGroup(findings=FindingCollection([finding]),
 				tracking_id=finding.tracking_id, tracking_uid=finding.tracking_uid))
 
+		for measurement in group_measurements:
+			if not measurement.tracking_uid:
+				measurement.tracking_uid = generate_uid()
+			groups.append(ReportGroup(measurements=MeasurementCollection([measurement]),
+				tracking_id=measurement.tracking_id, tracking_uid=measurement.tracking_uid))
+
 		groups.extend(g for g in (self.groups or []) if (isinstance(g, ReportGroup) and not isinstance(g, VolumePointCollectionGroup)))
 		return groups
 
@@ -760,13 +800,14 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 		return [g for g in (self.groups or []) if isinstance(g, VolumePointCollectionGroup)]
 
 	def _image_references(self):
-		'''	Distinct image references of the Series Tag findings, in order, for the Image Library.
+		'''	Distinct image references of the Series Tag findings and image-domain measurements, in order,
+			for the Image Library.
 
 			@returns list of ImageReference: one per referenced SOP instance
 		'''
 		references = OrderedDict()
-		for finding in self.series_tag_findings:
-			ref = finding.reference
+		for item in self._image_referencing_items:
+			ref = item.reference
 			if ref is not None and ref.sop_instance_uid and ref.sop_instance_uid not in references:
 				references[ref.sop_instance_uid] = ref
 		return list(references.values())
@@ -793,7 +834,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 	def create_report_sr(self, layout=None, person_observer=None, device_observer_uid=None, strict=False, **kwargs):
 		'''	Create the DICOM-SR report content (TID 1500) from the model data: the observation context,
-			the Image Library of the Series Tag references, the measurement groups, then the preserved
+			the Image Library of the image references, the measurement groups, then the preserved
 			root items of the parsed document.
 
 			A model with no measurement group, meta group, point collection or preserved root item still
@@ -836,7 +877,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 		report = self.dcmsr_report_template(
 			title=self.report_title, procedure_reported=self.report_procedure,
 			observation_context=observation_context,
-			imaging_measurements=[g.create_sr(layout=layout) for g in imaging_groups],
+			imaging_measurements=[g.create_sr(layout=layout, diagnostics=self.diagnostics) for g in imaging_groups],
 			meta_groups=[g.sr for g in meta_groups],
 			volume_measurements=[g.sr for g in volume_groups],
 			**omit(kwargs, tuple(k for k in kwargs.keys() if 'observation_context' in k or 'primary_group' in k)))
@@ -923,11 +964,16 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 	def _assign_references(self):
 		'''	Set the image reference of every Series Tag finding that has none to the reference of its
-			series (`series_reference`). Modifies the findings in place.
+			series (`series_reference`), and the series of every image-domain measurement reference
+			that names none. Modifies the findings and measurements in place.
 		'''
 		for finding in self.series_tag_findings:
 			if finding.reference is None or not finding.reference.sop_instance_uid:
 				finding.reference = self.series_reference(self._series_for_finding(finding))
+		for measurement in self.typed_measurements:
+			reference = measurement.reference
+			if measurement.geometry is not None and measurement.geometry.is_image and reference is not None and not reference.series_uid:
+				measurement.reference = reference._replace(series_uid=self._series_for_finding(measurement).series_uid)
 
 	def _evidence_headers_from_series(self, series):
 		'''	Patient and study attributes for synthesised evidence, read from the cached JSON of the
@@ -961,14 +1007,14 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			of every reference series, downloaded (one `file` request per instance). With
 			`record_instances=False`, the exchange profile: datasets synthesised from the cached patient,
 			study, series and instance JSON for the first instance of each reference series and the
-			instances the Series Tags reference. That costs no request when the cached instance JSON
+			instances the Series Tags and image-domain measurements reference. That costs no request when the cached instance JSON
 			carries the SOP Class and SOP Instance UIDs (a study populated with
 			`bulkpopulate_related(child_instances=True)` on the development Orthanc build); an instance
 			whose cached tags lack them is fetched once (`dcmfile(cache=True)`).
 
 			For a model built from a document and bound to no reference series: datasets synthesised
-			from the parsed document's own evidence and from the Series Tag references, each under the
-			study it was recorded in.
+			from the parsed document's own evidence and from the Series Tag and image-domain measurement
+			references, each under the study it was recorded in.
 
 			@returns list of pydicom.Dataset, or None for a model with neither reference series nor a
 				parsed document
@@ -983,9 +1029,12 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 				for sx in series_list:
 					headers, study_uid = self._evidence_headers_from_series(sx)
 					references = [self.series_reference(sx)]
-					references.extend(f.reference for f in self.series_tag_findings
-						if f.reference is not None and f.reference.series_uid == sx.series_uid
-						and f.reference.sop_instance_uid != references[0].sop_instance_uid)
+					known = set(ref.sop_instance_uid for ref in references)
+					for item in self._image_referencing_items:
+						ref = item.reference
+						if ref is not None and ref.series_uid == sx.series_uid and ref.sop_instance_uid not in known:
+							known.add(ref.sop_instance_uid)
+							references.append(ref)
 					evidence.extend(srdoc_synthetic_evidence(headers, study_uid, references))
 				self._evidence = evidence
 
@@ -995,8 +1044,8 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			study_uid = dcm_header_text(ds, DCMHEADER_STUDY_INSTANCE_UID)
 			references = [ref for ref in self.parsed.evidence.values() if ref.sop_instance_uid]
 			known = set(ref.sop_instance_uid for ref in references)
-			for finding in self.series_tag_findings:
-				ref = finding.reference
+			for item in self._image_referencing_items:
+				ref = item.reference
 				if ref is not None and ref.sop_instance_uid and ref.sop_instance_uid not in known:
 					references.append(ref)
 					known.add(ref.sop_instance_uid)
@@ -1134,7 +1183,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			series_instance_uid=series_uid, sop_instance_uid=dcmsr_instance_uid or generate_uid(),
 			series_number=dcmsr_series_number, instance_number=dcmsr_instance_number,
 			manufacturer=self.dcmsr_document_manufacturer, is_complete=is_complete, is_final=is_final, is_verified=is_verified,
-			record_instances=record_instances or bool(self.series_tag_findings), **verifying,
+			record_instances=record_instances or bool(self._image_referencing_items), **verifying,
 			**omit(kwargs, tuple(k for k in kwargs.keys() if 'report' in k or 'observation_context' in k or 'primary_group' in k)))
 
 		# The image references are written without a concept name, as the Viewer does (the placeholder

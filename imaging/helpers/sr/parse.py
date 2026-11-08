@@ -320,7 +320,8 @@ def _fill_relationship(child, parent_value_type):
 
 def _repair_sequence(parent, parent_value_type, diagnostics, strict, path):
 	'''	Repair the content sequence of `parent` in place, recursively: fill missing Relationship
-		Types, remove by-reference items and items that cannot be modelled. `parent` is the copy
+		Types, remove by-reference items, NUM items without a value (which highdicom cannot read) and
+		items that cannot be modelled. `parent` is the copy
 		`srdoc_repair` made. Every filled Relationship Type is recorded here as a `warning`
 		(`missing-relationship-type`, one per item at any depth, so `strict=True` rejects it); the
 		model parsers (`sonador.apisettings.sr.seriestag`) read the original items and do not record it
@@ -342,6 +343,8 @@ def _repair_sequence(parent, parent_value_type, diagnostics, strict, path):
 			continue
 		if not srcontent_is_valid(child, diagnostics=None, strict=False):
 			continue
+		if dcm_header_value(child, DCMHEADER_SR_VALUE_TYPE) == 'NUM' and not dcm_header_value(child, 'MeasuredValueSequence'):
+			continue
 		if dcm_header_value(child, 'RelationshipType') is None:
 			filled = _fill_relationship(child, parent_value_type)
 			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_MISSING_RELATIONSHIP,
@@ -354,8 +357,8 @@ def _repair_sequence(parent, parent_value_type, diagnostics, strict, path):
 
 
 def srdoc_repair(ds, diagnostics=None, strict=False):
-	'''	Deep copy of a document that highdicom can represent: Relationship Types filled, by-reference
-		and unmodellable items removed, a missing root Value Type set to CONTAINER (`info`
+	'''	Deep copy of a document that highdicom can represent: Relationship Types filled, by-reference,
+		valueless NUM and unmodellable items removed, a missing root Value Type set to CONTAINER (`info`
 		diagnostic), Continuity of Content defaulted to SEPARATE, and root template `Sonador-SR.1500`
 		written as `1500` so that highdicom reads the content as a `MeasurementReport`. The original
 		dataset is not modified.
@@ -452,11 +455,11 @@ def srdoc_synthetic_evidence(headers, study_uid, references):
 
 # Document-level parse
 
-def srdoc_parse(dcmsr, report_class, strict=False, diagnostics=None, **kwargs):
+def srdoc_parse(dcmsr, report_class, strict=False, diagnostics=None, calibrations=None, **kwargs):
 	'''	Parse one DICOM-SR document to a report model: read the root items (title, procedures
 		reported, Person Observer, Device Observer UID; everything else at the root is preserved),
 		the measurement groups (`ReportGroup.from_sr`), the evidence and the predecessors, and hand
-		them to the model class as an `SRParsedDocument`. The series of each finding is resolved from
+		them to the model class as an `SRParsedDocument`. The series of each finding and measurement is resolved from
 		the evidence (`_resolve_reference`).
 
 		@input dcmsr: the document (see `srdoc_read`)
@@ -465,6 +468,10 @@ def srdoc_parse(dcmsr, report_class, strict=False, diagnostics=None, **kwargs):
 			diagnostics
 		@input diagnostics (list, default=new list): list the diagnostics are appended to; also
 			attached to the model as `diagnostics`
+		@input calibrations (mapping, default=None): `ImageFrameGeometry` by SOP Instance UID or
+			`(SOP Instance UID, frame number)`, used to verify the stored values of image-domain
+			measurements; without one a stored value in millimetres is kept unverified, with an `info`
+			diagnostic. Makes no request.
 		@input kwargs: constructor arguments of `report_class`
 
 		@returns instance of `report_class`
@@ -508,9 +515,11 @@ def srdoc_parse(dcmsr, report_class, strict=False, diagnostics=None, **kwargs):
 	evidence = srdoc_evidence(ds)
 	groups = []
 	for group_item in srdoc_measurement_groups(ds):
-		group = ReportGroup.from_sr(group_item, strict=strict, diagnostics=diagnostics, repaired=True)
+		group = ReportGroup.from_sr(group_item, strict=strict, diagnostics=diagnostics, repaired=True, calibrations=calibrations)
 		for finding in (group.findings or []):
 			_resolve_reference(finding, evidence, diagnostics, strict)
+		for measurement in (group.measurements or []):
+			_resolve_reference(measurement, evidence, diagnostics, strict)
 		groups.append(group)
 
 	parsed = SRParsedDocument(
@@ -523,12 +532,12 @@ def srdoc_parse(dcmsr, report_class, strict=False, diagnostics=None, **kwargs):
 
 
 def _resolve_reference(finding, evidence, diagnostics, strict):
-	'''	Resolve the series of a finding from the document evidence: the series its referenced
+	'''	Resolve the series of a finding or measurement from the document evidence: the series its referenced
 		instance is recorded in, with the study and SOP class the evidence records when the reference
 		lacks them. The finding's `reference` is replaced in place. A reference to an instance the
 		evidence does not record is kept as it is, with a `warning` (`unresolved-image-reference`).
 
-		@input finding (Finding): finding whose reference is resolved
+		@input finding (Finding or Measurement): item whose reference is resolved
 		@input evidence (OrderedDict): `srdoc_evidence` of the document
 		@input diagnostics (list): list the diagnostics are appended to
 		@input strict (bool): raise SRDiagnosticError on the `warning`

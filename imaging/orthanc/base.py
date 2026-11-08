@@ -24,7 +24,7 @@ from client.utils.microservices import server_controloperation_json_response, Re
 from client.utils.colors import RGB
 
 from ...apisettings import ImageCoord, ImageSpacing, ImageOrientation, ImageStackShape, \
-	RGBColor, LABColor, XYZColor, EUCLID_COORD_ORIGIN, DicomDatetimePairKey, DicomDatetimePair, DicomMetaKey, DicomMeta, \
+	MeasurementCollection, RGBColor, LABColor, XYZColor, EUCLID_COORD_ORIGIN, DicomDatetimePairKey, DicomDatetimePair, DicomMetaKey, DicomMeta, \
 	IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
 	IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_LAST_UPDATE, IMAGING_SERVER_RECEPTION_DATE, IMAGING_SERVER_DICOMTAGS_SIGNATURE, \
 	IMAGING_SERVER_METADATA, \
@@ -1406,9 +1406,9 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		return self.sr_collection.parse(report_class=report_class, strict=strict, all_revisions=all_revisions, **kwargs)
 
 	def invalidate_findings(self):
-		'''	Drop the parsed reports of the SR series of the study, so that the next `findings` access
-			(or `report` access on an instance) parses the current documents again. The cached files are
-			kept. The default `measurements` reads no report, so it is unaffected.
+		'''	Drop the parsed reports of the SR series of the study, so that the next `findings` or
+			`measurements` access (or `report` access on an instance) parses the current documents again.
+			The cached files are kept.
 		'''
 		if self.__dict__.get('_sr') is not None:
 			self._sr.invalidate()
@@ -1435,10 +1435,13 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 	def measurements(self, series_uid=None, measurement_type=None, **kwargs):
 		'''	Quantitative measurements of the study: the current document of every SR series, keyed by
-			imaging-series UID and measurement type. Arguments as `findings`. The default `DcmSRInstance.measurements` parses no
-			quantitative measurement type and reads neither the report nor the file, so this call makes
-			no `file` request, parses nothing and returns empty shapes until a subclass of `DcmSRInstance`
-			supplies them; an empty result is not evidence that a document holds no quantitative items.
+			imaging-series UID and measurement type. Arguments as `findings`; a patient-domain measurement
+			is keyed by the series of its document. After `bulkpopulate_related(child_instances=True)` on
+			the study collection, the first access costs one `file` GET per SR series, shared with
+			`findings`, and later accesses none. Cache invalidation is `invalidate_findings`.
+
+			@input kwargs: passed to `DcmSRSeriesCollection.measurements`: `frame_of_reference_uid` keeps only
+				the measurements in that Frame of Reference, resolved from what is cached with no request
 
 			@returns
 			  - dict keyed to imaging-series UID: `{series_uid: {measurement_type: MeasurementCollection}}`
@@ -2403,19 +2406,43 @@ class ImagingSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 		'''
 		return self.parent.findings(series_uid=self.series_uid, measurement_type=measurement_type, **kwargs)
 
-	def measurements(self, measurement_type=None, **kwargs):
+	@property
+	def frame_of_reference_uid(self):
+		'''	Frame of Reference UID of the series, from what is cached: its main tags, its cached instances
+			and their cached files. Makes no request.
+
+			@returns str, or None when nothing cached carries it
+		'''
+		from .sr import dcmsr_series_frame_uid
+		return dcmsr_series_frame_uid(self)
+
+	def measurements(self, measurement_type=None, frame_of_reference_uid=None, **kwargs):
 		'''	Quantitative measurements that apply to this series, from the current document of every SR
-			series of the parent study (`ImagingStudy.measurements` narrowed to this series). Arguments
-			as `findings`. The default `DcmSRInstance.measurements` parses no
-			quantitative measurement type and reads neither the report nor the file, so this call makes
-			no `file` request, parses nothing and returns empty shapes until a subclass of `DcmSRInstance`
-			supplies them; an empty result is not evidence that a document holds no quantitative items.
+			series of the parent study (`ImagingStudy.measurements` narrowed to this series). With
+			`frame_of_reference_uid`, the measurements of the study in that Frame of Reference instead,
+			merged whichever series they are keyed by: this reaches the patient-domain measurements,
+			which are keyed by the series of their document. Resolved from what is cached, with no
+			request beyond the shared parse (one `file` GET per SR series on first access).
+
+			@input measurement_type (str, default=None): measurement type to narrow to
+			@input frame_of_reference_uid (str, default=None): Frame of Reference to select by
+			@input kwargs: passed to `DcmSRInstanceCollection.measurements` (`all_revisions`, `diagnostics`,
+				`strict`)
 
 			@returns
 			  - dict keyed to measurement type: `{measurement_type: MeasurementCollection}`
-			  - MeasurementCollection for a measurement type (empty when nothing matches)
+			  - MeasurementCollection for a `measurement_type` (empty when nothing matches)
 		'''
-		return self.parent.measurements(series_uid=self.series_uid, measurement_type=measurement_type, **kwargs)
+		if frame_of_reference_uid is None:
+			return self.parent.measurements(series_uid=self.series_uid, measurement_type=measurement_type, **kwargs)
+		merged = OrderedDict()
+		for by_type in self.parent.measurements(frame_of_reference_uid=frame_of_reference_uid, **kwargs).values():
+			for mtype, collection in by_type.items():
+				merged.setdefault(mtype, []).extend(collection)
+		merged = OrderedDict((mtype, MeasurementCollection(items)) for mtype, items in merged.items())
+		if measurement_type is not None:
+			return merged.get(measurement_type) or MeasurementCollection([])
+		return merged
 
 	@property
 	def m3d_models(self):

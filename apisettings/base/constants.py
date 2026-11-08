@@ -765,6 +765,14 @@ DCMSR_UNITS_MM = dcmcodes.UCUM.Millimeter
 DCMSR_UNITS_ANGLE_DEGREE = dcmcodes.UCUM.Degree
 DCMSR_UNITS_ANGLE_RADIAN = dcmcodes.UCUM.Radian
 
+# Measurement types the tracking identifier of a measurement group routes to
+SONADOR_MEASUREMENT_TYPE_SERIES_TAG = 'series-tag'
+SONADOR_MEASUREMENT_TYPE_LENGTH = 'length'
+SONADOR_MEASUREMENT_TYPE_ANGLE = 'angle'
+SONADOR_MEASUREMENT_TYPE_COBB_ANGLE = 'cobb-angle'
+SONADOR_MEASUREMENT_TYPE_ARROW = 'arrow'			# reserved: routed but not parsed
+SONADOR_MEASUREMENT_TYPE_GENERIC = 'generic'		# a NUM group with an unknown tracking identifier
+
 DCMHEADER_SR_CONTENT_SEQUENCE = 'ContentSequence'
 DCMHEADER_SR_PERTINENT_OTHER_EVIDENCE_SEQUENCE = 'PertinentOtherEvidenceSequence'
 DCMHEADER_SR_CURRENT_REQUESTED_PROCEDURE_EVIDENCE_SEQUENCE = 'CurrentRequestedProcedureEvidenceSequence'

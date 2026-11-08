@@ -94,6 +94,49 @@ sr_series.findings()                             # the study-shaped mapping, fro
 
 Each `Finding` links back to its `ImagingSeries`, `DcmInstance` and `DcmSRInstance`.
 
+### Quantitative Measurements
+Length, Angle and Cobb angle measurements are read from and written to DICOM-SR documents
+(`sonador.apisettings.sr.measurements`) with the coordinates they were made from: one measurement group
+each, in the patient domain (millimetres, in the imaging series' Frame of Reference) or the image domain.
+
+```python
+from sonador.apisettings.base import LengthMeasurement, CobbAngleMeasurement, ImageReference
+from sonador.apisettings.sr.measurements import image_frame_geometry
+
+# A new measurement computes its value when it is written
+length = LengthMeasurement([(0, 0, 0), (3, 4, 0)], frame_of_reference_uid=frame_uid, description='...', views=['coronal'])
+cobb = CobbAngleMeasurement(line1, line2, frame_of_reference_uid=frame_uid)
+
+# Image domain: (column, row) points, with the calibration of the referenced frame
+image_length = LengthMeasurement([(10, 10), (14, 13)], reference=ImageReference(sop_class, sop_instance, None, series_uid),
+	calibration=image_frame_geometry(header))
+
+model = SonadorImagingMeasurementReport(sonador_ref_series=series, measurements=[length, cobb, image_length], report_procedure=code)
+doc = model.create_sr()
+
+study.measurements()                                  # {series_uid: {measurement_type: MeasurementCollection}}
+series.measurements('length')                         # measurements on this imaging series' images
+study.measurements(frame_of_reference_uid=frame_uid)  # the same mapping, narrowed to one Frame of Reference
+series.measurements('length', frame_of_reference_uid=frame_uid)   # also finds patient-domain measurements
+```
+
+An image-domain measurement is keyed by the series of its image. A patient-domain measurement has no
+image reference and is keyed by the series of the SR document, so from an imaging series it is reached by
+Frame of Reference. Loading a report costs one `file` request per SR series on first access, shared with
+`findings`; narrowing what is already loaded adds none.
+
+The stored value of a document is authoritative. A re-save keeps the stored value of a measurement whose
+points and referenced image are unchanged; the properties are written in the current layout, so legacy
+group-level properties and foreign labels are normalised. A measurement whose points or referenced image
+changed recomputes at write. Coincident points and values that are not finite are refused at write.
+
+A new or edited image-domain length in millimetres needs `calibration`, and is refused without one. Given
+the `ImageFrameGeometry` of a frame without Pixel Spacing, a length is written in pixels, never millimetres;
+a parsed length stored in pixels and then edited recomputes in pixels without a calibration. An unusable
+calibration (for example zero spacing) is refused. A parsed length stored in millimetres and left unchanged
+keeps that value even when no calibration is available. Points given in another frame are
+converted at construction with `transform`, a rigid `ImageTransformMatrix`.
+
 ### Coordinate System and Units of M3D Models
 Encapsulated STL instances (M3D modality) carry a Frame of Reference UID (the origin and axes implicit
 in the model data) and a Measurement Units Code Sequence (units of distance of the model coordinates,
