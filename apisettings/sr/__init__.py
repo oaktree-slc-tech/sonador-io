@@ -3,8 +3,8 @@
 
 	`sonador.apisettings.sr` is a package. This module holds the grammar shared by every Sonador-SR
 	document (codes, content items, templates, diagnostics); each measurement profile is a submodule
-	with its own concept registry, encoder and parser, `seriestag` (Series Tags) being the first.
-	Further tools (lengths, annotations, ...) follow the same pattern as they are defined.
+	with its own concept registry, encoder and parser: `seriestag` (Series Tags) and `measurements`
+	(Length, Angle, Cobb angle).
 
 	Besides the encoders of the report templates (`srencode_*`) and the coded concept conversions
 	(`srcode2dataset`, `dataset2srcode`), the module holds:
@@ -199,6 +199,17 @@ SR_CONDITION_UNKNOWN_TRACKING_ID = 'unknown-tracking-identifier'
 SR_CONDITION_UNRESOLVED_REFERENCE = 'unresolved-image-reference'
 SR_CONDITION_ROOT_VALUE_TYPE_MISSING = 'root-value-type-missing'
 SR_CONDITION_EMPTY_REPORT_CONTENT = 'empty-report-content'
+SR_CONDITION_MEASUREMENT_VALUE_MISMATCH = 'measurement-value-mismatch'
+SR_CONDITION_MEASUREMENT_VALUE_UNVERIFIED = 'measurement-value-unverified'
+SR_CONDITION_MEASUREMENT_UNCALIBRATED = 'measurement-uncalibrated'
+SR_CONDITION_MEASUREMENT_NOT_COMPUTABLE = 'measurement-not-computable'
+SR_CONDITION_MEASUREMENT_WITHOUT_VALUE = 'measurement-without-value'
+SR_CONDITION_MEASUREMENT_READ_AS_GENERIC = 'measurement-read-as-generic'
+SR_CONDITION_FOREIGN_MEASUREMENT_LABEL = 'foreign-measurement-label'
+SR_CONDITION_DEGENERATE_GEOMETRY = 'degenerate-geometry'
+SR_CONDITION_INVALID_GEOMETRY = 'invalid-measurement-geometry'
+SR_CONDITION_SCOORD3D_WITHOUT_FRAME = 'scoord3d-without-frame-of-reference'
+SR_CONDITION_ANGLE_MIDDLE_POINTS_DIFFER = 'angle-middle-points-differ'
 
 
 class SRDiagnostic(namedtuple('SRDiagnostic', ('severity', 'condition', 'path', 'value', 'message'))):
@@ -334,10 +345,30 @@ def dataset2srcode(dcm:DcmDataset, codedconcept_mapping=DCM_CODED_CONCEPT_MAPPIN
 	return code_class(**pick(_kwargs, _kwargs.keys()))
 
 
+def _placeholder_num_values(item, found):
+	'''	Give every NUM item of a subtree without a value a placeholder one, which highdicom requires
+		to read the item. Modifies the subtree in place.
+
+		@input item (pydicom.Dataset): root of the subtree
+		@input found (list): list the items changed are appended to
+	'''
+	if item.get('ValueType') == 'NUM' and not item.get('MeasuredValueSequence'):
+		unit = DcmDataset()
+		unit.CodeValue, unit.CodingSchemeDesignator, unit.CodeMeaning = '1', 'UCUM', 'no units'
+		value = DcmDataset()
+		value.NumericValue = 0
+		value.MeasurementUnitsCodeSequence = DcmSequence([unit])
+		item.MeasuredValueSequence = DcmSequence([value])
+		found.append(item)
+	for child in item.get('ContentSequence') or []:
+		_placeholder_num_values(child, found)
+
+
 def srcontent_from_dataset(item):
 	'''	highdicom content item of a raw content item dataset, as a deep copy. Used to re-emit
 		preserved (unmodelled) items; a by-reference item cannot be represented and is refused,
-		wherever it sits in the item's subtree.
+		wherever it sits in the item's subtree. A NUM item without a value is re-emitted with an empty
+		Measured Value Sequence.
 
 		@input item (pydicom.Dataset or highdicom ContentItem): the content item
 
@@ -350,7 +381,13 @@ def srcontent_from_dataset(item):
 			+ 'the content tree would invalidate its target, so the document is not rewritten.'))
 	if isinstance(item, ContentItem):
 		return copy.deepcopy(item)
-	return ContentItem._from_dataset_derived(copy.deepcopy(item))
+	copied = copy.deepcopy(item)
+	without_value = []
+	_placeholder_num_values(copied, without_value)
+	converted = ContentItem._from_dataset_derived(copied)
+	for num in without_value:
+		num.MeasuredValueSequence = DcmSequence()
+	return converted
 
 
 def srcontent_extra_items(items):
@@ -676,21 +713,50 @@ def srencode_coord3d(
 SONADOR_LENGTH = dcmcodes.SCT.Length
 
 
-def srencode_measurement(measurement:Measurement, name_default=SONADOR_LENGTH, sr_template=DcmMeasurement, **kwargs):
-	'''	DICOM-SR encode the provided measurement. Write options of the document, such as the layout of
-		the per-finding properties, are accepted and ignored.
+def srencode_measurement(measurement:Measurement, name_default=SONADOR_LENGTH, sr_template=DcmMeasurement, layout=None, diagnostics=None, **kwargs):
+	'''	DICOM-SR encode the provided measurement: a TID 300 NUM item with its coordinates and per-item
+		properties (`sonador.apisettings.sr.measurements`), followed by the other NUM items of its group.
+		A measurement holding only a value and a unit writes a bare NUM item. Other write options of the
+		document are accepted and ignored.
 
-		@returns highdicom.sr.Measurement
+		@input measurement (Measurement)
+		@input name_default (Code, default=SCT Length): concept name when the measurement names none
+		@input sr_template (class, default=highdicom Measurement): template class instantiated
+		@input layout (str, default=nested): layout of the per-item properties (`DCMSR_LAYOUT_NESTED` or
+			`DCMSR_LAYOUT_FLAT`)
+		@input diagnostics (list, default=None): list the write diagnostics are appended to
+
+		@returns highdicom.sr.Measurement: the NUM item, then any further NUM items of the group
+		@raises ValueError for a missing or invalid concept name
+		@raises SRDiagnosticError for degenerate geometry, or a value that cannot be computed
 	'''
+	from .measurements import srencode_measurement_coordinates, srencode_measurement_children, srencode_measurement_values
 	mname = measurement.name or name_default
 
 	if not mname or not isinstance(mname, (DcmCode, DcmCodedConcept)):
 		raise ValueError(('Unable to DICOM-SR encode measurement instance. Invalid `name` value "%s". '
 			'`name` is required property and must be a Code or `CodedConcept`.') % mname)
 
-	return sr_template(name=mname, tracking_identifier=measurement.uid, algorithm_id=measurement.algorithm,
+	value, unit = measurement.resolve_value(diagnostics=diagnostics)
+	coordinates = srencode_measurement_coordinates(measurement)
+	encoded = sr_template(name=mname, value=value, unit=unit, algorithm_id=measurement.algorithm,
+		tracking_identifier=None if measurement.has_group_identity else measurement.uid,
 		referenced_images=measurement.ref_images, referenced_real_world_value_map=measurement.ref_value,
-		**pick(measurement, ('value', 'unit', 'qualifier', 'derivation', 'finding_sites', 'method', 'properties')))
+		referenced_coordinates=[coordinates] if coordinates is not None else None,
+		**pick(measurement, ('qualifier', 'derivation', 'finding_sites', 'method', 'properties')))
+
+	item = encoded[0]
+	if measurement.keeps_stored_value and measurement.stored_value_item is not None:
+		item.MeasuredValueSequence = DcmSequence([copy.deepcopy(measurement.stored_value_item)])
+	children = srencode_measurement_children(measurement, layout=layout)
+	if children:
+		if not hasattr(item, 'ContentSequence'):
+			item.ContentSequence = ContentSequence()
+		for child in children:
+			item.ContentSequence.append(child)
+	for value_item in srencode_measurement_values(measurement):
+		encoded.append(value_item)
+	return encoded
 
 
 def srencode_finding(finding:Finding, sr_template=DcmQualitativeEvaluation, layout=None, **kwargs):
@@ -733,7 +799,7 @@ DCMSR_REPORT_VOLUME_MEAUREMENTS = DcmCode('%s.Volume-Measurements' % DCMSR_SONAD
 
 def srencode_report_group(tracking_id:Union[TrackingIdentifier,str], 
 		measurements:MeasurementCollection=None, findings:FindingCollection=None,
-		sr_template=MeasurementsAndQualitativeEvaluations, tracking_uid=None, extra_items=None, layout=None, **kwargs):
+		sr_template=MeasurementsAndQualitativeEvaluations, tracking_uid=None, extra_items=None, layout=None, diagnostics=None, **kwargs):
 	'''	DICOM-SR encode the collection of measurements and findings using the provided template
 	
 		@input tracking_id (str or highdicom.sr.TrackingIdentifier): tracking identifier
@@ -747,6 +813,7 @@ def srencode_report_group(tracking_id:Union[TrackingIdentifier,str],
 		@input extra_items (iterable of pydicom.Dataset, default=None): preserved content items of the
 			group, re-emitted after the template-owned items
 		@input layout (str, default=None): layout of the per-finding properties (see `srencode_finding`)
+		@input diagnostics (list, default=None): list the measurement write diagnostics are appended to
 
 		@returns highdicom.sr.templates.MeasurementsAndQualitativeEvaluations (an instance of `sr_template`)
 	'''
@@ -755,7 +822,7 @@ def srencode_report_group(tracking_id:Union[TrackingIdentifier,str],
 		tracking_id = TrackingIdentifier(uid=tracking_uid, identifier=tracking_id)
 
 	group = sr_template(tracking_identifier=tracking_id, 
-		measurements=[m.create_sr(layout=layout) for m in measurements] if measurements else measurements, 
+		measurements=[m.create_sr(layout=layout, diagnostics=diagnostics) for m in measurements] if measurements else measurements, 
 		qualitative_evaluations=[f.create_sr(layout=layout) for f in findings] if findings else findings, **kwargs)
 
 	# Preserved items are re-emitted under the group, after the template-owned items

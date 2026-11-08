@@ -31,19 +31,21 @@
 	* `dcmsr_local_series`: a `DcmSRSeries` built from local documents, for the same API without
 		an imaging server.
 
-	Findings flow upwards from the document. `DcmSRInstance.findings` links each finding of the
-	parsed report to this SR instance and to the imaging series and instance it references (from
-	the cached collections of the parent study) and keys it by imaging-series UID and measurement
-	type. The collections merge these mappings, so `ImagingStudy.findings` returns
-	`{series_uid: {measurement_type: FindingCollection}}` for the whole study and
-	`ImagingSeries.findings` the `{measurement_type: FindingCollection}` of one series. Request
-	budget of the default current-document retrieval: after
-	`bulkpopulate_related(child_instances=True)` on the study collection, the first `findings` access
-	costs one `file` GET per SR series and later accesses none, since the instance JSON, the files and
-	the parsed reports are cached. Without the child instances, the instance collection of each SR
-	series is fetched first; `all_revisions=True` also fetches the superseded revisions, one `file` GET
-	per revision whose file is not cached. The default `measurements` reads neither the reports nor
-	the files, so it makes no `file` request and parses nothing.
+	Findings and measurements flow upwards from the document. `DcmSRInstance.findings` and
+	`DcmSRInstance.measurements` link each item of the parsed report to this SR instance and to the
+	imaging series and instance it references (from the cached collections of the parent study) and
+	key it by imaging-series UID and measurement type. The collections merge these mappings, so
+	`ImagingStudy.findings` returns `{series_uid: {measurement_type: FindingCollection}}` for the
+	whole study and `ImagingSeries.findings` the `{measurement_type: FindingCollection}` of one series;
+	`measurements` has the same shape with `MeasurementCollection`. A patient-domain measurement has
+	no image reference: it is keyed by the document's own series and is also reachable with
+	`measurements(frame_of_reference_uid=...)`, which the series and study accessors resolve from
+	what is cached, without a request. Request budget of the default current-document retrieval: after
+	`bulkpopulate_related(child_instances=True)` on the study collection, the first `findings` or
+	`measurements` access costs one `file` GET per SR series and later accesses none, since the
+	instance JSON, the files and the parsed reports are cached and shared by both. Without the child
+	instances, the instance collection of each SR series is fetched first; `all_revisions=True` also
+	fetches the superseded revisions, one `file` GET per revision whose file is not cached.
 '''
 import functools, datetime, logging, posixpath
 from abc import ABCMeta, abstractmethod
@@ -59,7 +61,8 @@ from ...apisettings import IMAGING_SERVER_RESOURCE_REPORT, DCMHEADER_SERIES_INST
 	DCMHEADER_INSTANCE_CREATION_TIME, DCMHEADER_MODALITY, DCM_MODALITY_SR, DCMHEADER_SERIES_NUMBER, \
 	DCMHEADER_SERIES_DESCRIPTION, DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME, DCMHEADER_STUDY_INSTANCE_UID, \
 	IMAGING_SERVER_PARENT_SERIES, IMAGING_SERVER_SERIES_INDEX, IMAGING_SERVER_MAINDICOM, \
-	DicomDatetimePair, DCMTS_CONTENT, FindingCollection, MeasurementCollection
+	DicomDatetimePair, DCMTS_CONTENT, FindingCollection, MeasurementCollection, DCMHEADER_FRAME_OF_REFERENCE_UID, \
+	SONADOR_MEASUREMENT_TYPE_GENERIC
 from ...apisettings.sr import sr_diagnostic, SR_DIAGNOSTIC_INFO, SR_DIAGNOSTIC_WARNING, \
 	SR_CONDITION_PREDECESSOR_CHAIN_UNVERIFIED, SR_CONDITION_UID_ORDER_TIE_BREAK, SR_CONDITION_SHARED_TRACKING_UID
 from ..helpers.headers import dcm_header_value, dcm_header_uid
@@ -76,14 +79,68 @@ DCMSR_LOCAL_SERIES_HEADERS = (DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_MODALITY,
 	DCMHEADER_SERIES_DESCRIPTION, DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME)
 
 
-def _shape_results(results, series_uid=None, measurement_type=None, collection_class=FindingCollection):
+def dcmsr_series_frame_uid(series):
+	'''	Frame of Reference UID of an imaging series, from what is cached: its main tags, the main tags
+		of its cached instances, then its cached instance files. Makes no request.
+
+		@input series (ImagingSeries): the series
+		@returns str, or None when nothing cached carries it
+	'''
+	uid = dcm_header_uid(series.dicomdata, DCMHEADER_FRAME_OF_REFERENCE_UID)
+	if uid:
+		return uid
+	for instance in series.__dict__.get('_slices') or []:
+		uid = dcm_header_uid(instance.dicomdata, DCMHEADER_FRAME_OF_REFERENCE_UID)
+		if not uid and instance.__dict__.get('_dcmfile') is not None:
+			uid = dcm_header_uid(instance._dcmfile, DCMHEADER_FRAME_OF_REFERENCE_UID)
+		if uid:
+			return uid
+	return None
+
+
+def _measurement_frame_uid(measurement):
+	'''	Frame of Reference UID of a measurement: its own, else that of the imaging series it is linked
+		to, from what is cached. Makes no request.
+
+		@input measurement (Measurement): the measurement
+		@returns str, or None when unknown
+	'''
+	if measurement.frame_of_reference_uid:
+		return measurement.frame_of_reference_uid
+	return dcmsr_series_frame_uid(measurement.series) if measurement.series is not None else None
+
+
+def _filter_frame(results, frame_of_reference_uid, collection_class=MeasurementCollection):
+	'''	Keep the measurements of a `{series_uid: {measurement_type: collection}}` mapping that lie in a
+		Frame of Reference. Series and types left empty are removed. Makes no request.
+
+		@input results (OrderedDict): the mapping
+		@input frame_of_reference_uid (str): the Frame of Reference UID
+		@input collection_class (default=MeasurementCollection): collection type of the results
+
+		@returns OrderedDict: the narrowed mapping
+	'''
+	narrowed = OrderedDict()
+	for uid, by_type in results.items():
+		for mtype, collection in by_type.items():
+			kept = [m for m in collection if _measurement_frame_uid(m) == frame_of_reference_uid]
+			if kept:
+				narrowed.setdefault(uid, OrderedDict())[mtype] = collection_class(kept)
+	return narrowed
+
+
+def _shape_results(results, series_uid=None, measurement_type=None, collection_class=FindingCollection, frame_of_reference_uid=None):
 	'''	Narrow a `{series_uid: {measurement_type: collection}}` mapping by the arguments: both given
 		-> one collection (empty when absent); series only -> `{measurement_type: collection}`; type
 		only -> `{series_uid: collection}`; neither -> the full mapping.
 
 		@input collection_class (default=FindingCollection): type of the empty collection returned when
 			both arguments are given and nothing matches
+		@input frame_of_reference_uid (str, default=None): keep only the measurements in this Frame of
+			Reference (see `_filter_frame`)
 	'''
+	if frame_of_reference_uid is not None:
+		results = _filter_frame(results, frame_of_reference_uid, collection_class=collection_class)
 	if series_uid is not None and measurement_type is not None:
 		return results.get(series_uid, {}).get(measurement_type) or collection_class([])
 	if series_uid is not None:
@@ -237,8 +294,7 @@ class DcmSRSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 
 	def invalidate(self):
 		'''	Drop the parsed reports of the cached instances; the cached files are kept. The next
-			`report` or `findings` access parses again. The default `measurements` reads no report, so it
-			is unaffected.
+			`report`, `findings` or `measurements` access parses again.
 		'''
 		if self.__dict__.get('_instances') is not None:
 			for instance in self._instances:
@@ -258,11 +314,8 @@ class DcmSRSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 
 	def measurements(self, series_uid=None, measurement_type=None, **kwargs):
 		'''	Quantitative measurements of the current document of the series, keyed by imaging-series UID
-			and measurement type. Arguments as `findings`. The default `DcmSRInstance.measurements`
-			parses no quantitative measurement type and reads neither the report nor the file, so this
-			call makes no `file` request, parses nothing and returns empty shapes until a subclass of
-			`DcmSRInstance` supplies them; an empty result is not evidence that a document holds no
-			quantitative items.
+			and measurement type. Arguments as `DcmSRInstanceCollection.measurements`. Costs one `file`
+			request on first access, shared with `findings`; later accesses cost none.
 
 			@returns
 			  - dict keyed to imaging-series UID: `{series_uid: {measurement_type: MeasurementCollection}}`
@@ -310,7 +363,7 @@ class DcmSRSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingServerChildCo
 		for series in self:
 			series.invalidate()
 
-	def _aggregate(self, attr, series_uid=None, measurement_type=None, collection_class=FindingCollection, **kwargs):
+	def _aggregate(self, attr, series_uid=None, measurement_type=None, collection_class=FindingCollection, frame_of_reference_uid=None, **kwargs):
 		'''	Merge the results of `attr` (`findings` or `measurements`) of every SR series. The current
 			document is selected per series; the results of different series are independent and are
 			combined under the identity (SR series, tracking UID). A tracking UID that two series share
@@ -319,6 +372,8 @@ class DcmSRSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingServerChildCo
 			@input attr (str): `findings` or `measurements`
 			@input series_uid, measurement_type: narrowing of the result, as `_shape_results`
 			@input collection_class: collection type the merged results are built with
+			@input frame_of_reference_uid (str, default=None): keep only the measurements in this Frame of
+				Reference, resolved from what is cached
 			@input kwargs: passed to the series method (`all_revisions`, `diagnostics`, `strict`)
 			@returns the narrowed mapping
 		'''
@@ -337,7 +392,8 @@ class DcmSRSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingServerChildCo
 									'tracking UID shared by two SR series; both results are returned',
 									path='series %s and %s' % (other, series.pk), value=tracking_uid)
 			_merge_results(results, per_series, collection_class=collection_class)
-		return _shape_results(results, series_uid=series_uid, measurement_type=measurement_type, collection_class=collection_class)
+		return _shape_results(results, series_uid=series_uid, measurement_type=measurement_type, collection_class=collection_class,
+			frame_of_reference_uid=frame_of_reference_uid)
 
 	def findings(self, series_uid=None, measurement_type=None, **kwargs):
 		'''	Qualitative findings of the current document of every SR series of the study, keyed by
@@ -356,13 +412,13 @@ class DcmSRSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingServerChildCo
 		return self._aggregate('findings', series_uid=series_uid, measurement_type=measurement_type,
 			collection_class=FindingCollection, **kwargs)
 
-	def measurements(self, series_uid=None, measurement_type=None, **kwargs):
+	def measurements(self, series_uid=None, measurement_type=None, frame_of_reference_uid=None, **kwargs):
 		'''	Quantitative measurements of the current document of every SR series of the study, keyed by
-			imaging-series UID and measurement type. Arguments as `findings`. The default `DcmSRInstance.measurements`
-			parses no quantitative measurement type and reads neither the report nor the file, so this
-			call makes no `file` request, parses nothing and returns empty shapes until a subclass of
-			`DcmSRInstance` supplies them; an empty result is not evidence that a document holds no
-			quantitative items.
+			imaging-series UID and measurement type. Arguments as `findings`. Costs one `file` request per
+			SR series on first access, shared with `findings`.
+
+			@input frame_of_reference_uid (str, default=None): keep only the measurements in this Frame of
+				Reference, resolved from what is cached, with no request
 
 			@returns
 			  - dict keyed to imaging-series UID: `{series_uid: {measurement_type: MeasurementCollection}}`
@@ -371,7 +427,7 @@ class DcmSRSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingServerChildCo
 			  - MeasurementCollection for both (empty when nothing matches)
 		'''
 		return self._aggregate('measurements', series_uid=series_uid, measurement_type=measurement_type,
-			collection_class=MeasurementCollection, **kwargs)
+			collection_class=MeasurementCollection, frame_of_reference_uid=frame_of_reference_uid, **kwargs)
 
 
 class DcmStructuredInstance(DcmInstanceCoreResource):
@@ -585,31 +641,44 @@ class DcmSRInstance(DcmStructuredInstance):
 			logger.error('Invalid instance creation timestamp. Error: "%s"' % err)
 			return None
 
-	def _link_finding(self, finding):
-		'''	Attach the model objects a finding describes: this SR instance (`sr_instance`), the imaging
-			series of the parent study whose UID the finding references (`series`) and, from the cached
-			instances of that series, the referenced instance (`instance`). Only cached collections are
-			read; no request is made, and a level that is not cached leaves its attribute unset.
+	def _link_annotation(self, annotation):
+		'''	Attach the model objects a finding or measurement describes: this SR instance
+			(`sr_instance`), the imaging series of the parent study whose UID it references (`series`)
+			and, from the cached instances of that series, the referenced instance (`instance`). A
+			patient-domain measurement without a series UID links to the one cached imaging series in
+			its Frame of Reference, when there is exactly one. Only cached collections are read; no
+			request is made, and a level that is not cached leaves its attribute unset.
 
-			@input finding (Finding): the finding to link, modified in place
+			@input annotation (Finding or Measurement): the item to link, modified in place
 		'''
-		finding.sr_instance = self
+		annotation.sr_instance = self
 		series = self.__dict__.get('_parent')
 		study = series.__dict__.get('_parent') if series is not None else None
 		series_collection = study.__dict__.get('_series') if study is not None else None
-		if series_collection is None or not finding.series_uid:
+		if series_collection is None:
 			return
-		for sx in series_collection:
-			if sx.series_uid != finding.series_uid:
-				continue
-			finding.series = sx
+		if annotation.series_uid:
+			matches = [sx for sx in series_collection if sx.series_uid == annotation.series_uid]
+		else:
+			frame_uid = getattr(annotation, 'frame_of_reference_uid', None)
+			matches = [sx for sx in series_collection if frame_uid and dcmsr_series_frame_uid(sx) == frame_uid]
+			if len(matches) != 1:
+				return
+		for sx in matches[:1]:
+			annotation.series = sx
 			instances = sx.__dict__.get('_slices')
-			if instances is not None and finding.reference is not None:
+			if instances is not None and annotation.reference is not None:
 				for dcm in instances:
-					if dcm.sop_instance_uid == finding.reference.sop_instance_uid:
-						finding.instance = dcm
+					if dcm.sop_instance_uid == annotation.reference.sop_instance_uid:
+						annotation.instance = dcm
 						break
-			break
+
+	def _link_finding(self, finding):
+		'''	Attach the model objects a finding describes (`_link_annotation`).
+
+			@input finding (Finding): the finding to link, modified in place
+		'''
+		self._link_annotation(finding)
 
 	@property
 	def findings(self):
@@ -635,16 +704,24 @@ class DcmSRInstance(DcmStructuredInstance):
 
 	@property
 	def measurements(self):
-		'''	Quantitative measurements of the document, in the shape of `findings`. This default
-			implementation parses no quantitative measurement type to a data class and reads neither
-			`report` nor the file, so it makes no request, parses nothing and the mapping is empty whatever
-			the document holds; a subclass of `DcmSRInstance` that parses them overrides this property. An
-			empty result is not evidence that the document holds no quantitative items.
+		'''	Quantitative measurements of the document, parsed with `report` (one `file` request on first
+			access, shared with `findings`, and none after that): the measurements of every group of the
+			report, each linked to its models (`_link_annotation`) and keyed by the imaging series its
+			image reference resolves to. A measurement without one, such as a patient-domain
+			measurement, is keyed by the identifier of the document's own series. A NUM group with an
+			unknown tracking identifier is listed under `SONADOR_MEASUREMENT_TYPE_GENERIC`.
 
-			@returns OrderedDict: empty (`{series_uid: {measurement_type: MeasurementCollection}}` once
-				a subclass parses measurements)
+			@returns dict keyed to imaging-series UID: `{series_uid: {measurement_type: MeasurementCollection}}`
 		'''
-		return OrderedDict()
+		results = OrderedDict()
+		for group in (self.report.groups or []):
+			for measurement in (getattr(group, 'measurements', None) or []):
+				self._link_annotation(measurement)
+				series_uid = measurement.series_uid or self.series
+				bucket = results.setdefault(series_uid, OrderedDict()).setdefault(measurement.type or SONADOR_MEASUREMENT_TYPE_GENERIC, [])
+				bucket.append(measurement)
+		return OrderedDict((uid, OrderedDict((mtype, MeasurementCollection(items)) for mtype, items in by_type.items()))
+			for uid, by_type in results.items())
 
 
 class DcmSRInstanceCollection(DcmStructuredInstanceCollection):
@@ -722,7 +799,7 @@ class DcmSRInstanceCollection(DcmStructuredInstanceCollection):
 		return first
 
 	def _aggregate(self, attr, series_uid=None, measurement_type=None, all_revisions=False, diagnostics=None,
-			collection_class=FindingCollection, strict=False):
+			collection_class=FindingCollection, strict=False, frame_of_reference_uid=None):
 		'''	Merge the results of `attr` (`findings` or `measurements`) of the current instance, or of
 			every instance with `all_revisions=True`, and narrow them by the arguments (`_shape_results`)
 
@@ -736,7 +813,8 @@ class DcmSRInstanceCollection(DcmStructuredInstanceCollection):
 		results = OrderedDict()
 		for instance in instances:
 			_merge_results(results, getattr(instance, attr), collection_class=collection_class)
-		return _shape_results(results, series_uid=series_uid, measurement_type=measurement_type, collection_class=collection_class)
+		return _shape_results(results, series_uid=series_uid, measurement_type=measurement_type, collection_class=collection_class,
+			frame_of_reference_uid=frame_of_reference_uid)
 
 	def findings(self, series_uid=None, measurement_type=None, all_revisions=False, diagnostics=None, strict=False,
 			collection_class=FindingCollection):
@@ -764,14 +842,14 @@ class DcmSRInstanceCollection(DcmStructuredInstanceCollection):
 			all_revisions=all_revisions, diagnostics=diagnostics, collection_class=collection_class, strict=strict)
 
 	def measurements(self, series_uid=None, measurement_type=None, all_revisions=False, diagnostics=None, strict=False,
-			collection_class=MeasurementCollection):
+			collection_class=MeasurementCollection, frame_of_reference_uid=None):
 		'''	Quantitative measurements of the current document of the series, keyed by imaging-series UID
 			and measurement type. Arguments as `findings`, with `collection_class` defaulting to
-			`MeasurementCollection`. The default `DcmSRInstance.measurements`
-			parses no quantitative measurement type and reads neither the report nor the file, so this
-			call makes no `file` request, parses nothing and returns empty shapes until a subclass of
-			`DcmSRInstance` supplies them; an empty result is not evidence that a document holds no
-			quantitative items.
+			`MeasurementCollection`. Parsing the document costs one `file` request on first access,
+			shared with `findings`; the report is cached on the instance.
+
+			@input frame_of_reference_uid (str, default=None): keep only the measurements in this Frame of
+				Reference, resolved from what is cached, with no request
 
 			@returns
 			  - dict keyed to imaging-series UID: `{series_uid: {measurement_type: MeasurementCollection}}`
@@ -780,5 +858,5 @@ class DcmSRInstanceCollection(DcmStructuredInstanceCollection):
 			  - MeasurementCollection for both (empty when nothing matches)
 		'''
 		return self._aggregate('measurements', series_uid=series_uid, measurement_type=measurement_type,
-			all_revisions=all_revisions, diagnostics=diagnostics, collection_class=collection_class, strict=strict)
-	
+			all_revisions=all_revisions, diagnostics=diagnostics, collection_class=collection_class, strict=strict,
+			frame_of_reference_uid=frame_of_reference_uid)

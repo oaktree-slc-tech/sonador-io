@@ -23,6 +23,9 @@
 	concept whose scheme version is present and is not 0.3 (an undefined scheme version) is read as
 	the registered concept, with the `undefined-scheme-version` warning, and rewritten at version 0.3.
 
+	The quantitative tools (Length, Angle, Cobb angle) are in `sonador.apisettings.sr.measurements`;
+	their tracking identifiers are registered here so that a group routes by one table.
+
 	Contents: the concept registry (`DCMSR_MEASUREMENT_META`, `DCMSR_DISPLAY_ATTRIBUTES`,
 	`DCMSR_DISPLAY_COLOR_ROLES`), the tracking identifier map (`SONADOR_MEASUREMENT_TYPES`), the root
 	templates, document classes and layouts, the colour codec (`color2dcmlab`, `dcmlab2color`), the
@@ -41,7 +44,8 @@ from highdicom.sr.value_types import ContentSequence, ContainerContentItem, Text
 from highdicom.sr.enum import RelationshipTypeValues, ValueTypeValues
 
 from ..base import SONADOR_MANUFACTURER, SONADOR_SR, SONADOR_SCHEME_VERSION_03, Finding, FindingCollection, \
-	ReportGroup, ImageReference, DCMSR_FINDING, RGBColor, \
+	MeasurementCollection, SONADOR_MEASUREMENT_TYPE_SERIES_TAG, SONADOR_MEASUREMENT_TYPE_LENGTH, SONADOR_MEASUREMENT_TYPE_ANGLE, \
+	SONADOR_MEASUREMENT_TYPE_COBB_ANGLE, SONADOR_MEASUREMENT_TYPE_ARROW, SONADOR_MEASUREMENT_TYPE_GENERIC, ReportGroup, ImageReference, DCMSR_FINDING, RGBColor, \
 	DCMHEADER_SR_VALUE_TYPE, DCMHEADER_CONCEPT_CODE_SEQUENCE, DCMHEADER_CODING_SCHEME_VERSION, \
 	DCMHEADER_CODING_SCHEME_DESIGNATOR, DCMHEADER_CODE_MEANING, DCMHEADER_CODE_VALUE, \
 	DCMHEADER_SR_REF_SOP_SEQ, DCMHEADER_SR_SOP_CLASS_UID, DCMHEADER_SR_REF_INSTANCE_UID, DCMHEADER_SERIES_INSTANCE_UID
@@ -98,15 +102,12 @@ DCMSR_DISPLAY_COLOR_ROLES = OrderedDict(
 # dcmjs prefix followed by the Cornerstone tool type name; shared with the Viewer so that documents
 # route to the same tool on both sides.
 CORNERSTONE_TOOLS_SR_TAG = 'cornerstoneTools@^4.0.0'
+CORNERSTONE3D_TOOLS_SR_TAG = 'Cornerstone3DTools@^0.1.0'			# written by the Cornerstone3D adapters; read only
 CORNERSTONE_TOOL_SERIES_TAG = 'DICOMSRSeriesTagTool'
 CORNERSTONE_TOOL_LENGTH = 'Length'
 CORNERSTONE_TOOL_ANGLE = 'Angle'
+CORNERSTONE_TOOL_COBB_ANGLE = 'CobbAngle'
 CORNERSTONE_TOOL_ARROW = 'ArrowAnnotate'
-
-SONADOR_MEASUREMENT_TYPE_SERIES_TAG = 'series-tag'
-SONADOR_MEASUREMENT_TYPE_LENGTH = 'length'			# reserved: quantitative tool, routed but not parsed
-SONADOR_MEASUREMENT_TYPE_ANGLE = 'angle'			# reserved: quantitative tool, routed but not parsed
-SONADOR_MEASUREMENT_TYPE_ARROW = 'arrow'			# reserved: quantitative tool, routed but not parsed
 
 
 def cornerstone_tracking_id(tool):
@@ -120,15 +121,21 @@ def cornerstone_tracking_id(tool):
 
 DCMSR_TRACKING_ID_SERIES_TAG = cornerstone_tracking_id(CORNERSTONE_TOOL_SERIES_TAG)
 
-# Tracking identifier -> measurement type. A group whose identifier is not listed is a generic
-# `ReportGroup`; only `series-tag` is parsed to a data class.
+# Tracking identifier -> measurement type. A group whose identifier is not listed is a generic group.
+# The `cornerstoneTools` form of a tool comes first: it is the one written for a new measurement.
 SONADOR_MEASUREMENT_TYPES = OrderedDict((
 	(DCMSR_TRACKING_ID_SERIES_TAG, SONADOR_MEASUREMENT_TYPE_SERIES_TAG),
 	(cornerstone_tracking_id(CORNERSTONE_TOOL_LENGTH), SONADOR_MEASUREMENT_TYPE_LENGTH),
 	(cornerstone_tracking_id(CORNERSTONE_TOOL_ANGLE), SONADOR_MEASUREMENT_TYPE_ANGLE),
+	(cornerstone_tracking_id(CORNERSTONE_TOOL_COBB_ANGLE), SONADOR_MEASUREMENT_TYPE_COBB_ANGLE),
 	(cornerstone_tracking_id(CORNERSTONE_TOOL_ARROW), SONADOR_MEASUREMENT_TYPE_ARROW),
+	('%s:%s' % (CORNERSTONE3D_TOOLS_SR_TAG, CORNERSTONE_TOOL_LENGTH), SONADOR_MEASUREMENT_TYPE_LENGTH),
+	('%s:%s' % (CORNERSTONE3D_TOOLS_SR_TAG, CORNERSTONE_TOOL_ANGLE), SONADOR_MEASUREMENT_TYPE_ANGLE),
+	('%s:%s' % (CORNERSTONE3D_TOOLS_SR_TAG, CORNERSTONE_TOOL_COBB_ANGLE), SONADOR_MEASUREMENT_TYPE_COBB_ANGLE),
 ))
-SONADOR_FINDING_TYPES = (SONADOR_MEASUREMENT_TYPE_SERIES_TAG,)		# qualitative (findings); the rest are quantitative
+SONADOR_FINDING_TYPES = (SONADOR_MEASUREMENT_TYPE_SERIES_TAG,)		# qualitative (findings)
+# Quantitative tools a measurement group is parsed to a typed measurement for
+SONADOR_QUANTITATIVE_TYPES = (SONADOR_MEASUREMENT_TYPE_LENGTH, SONADOR_MEASUREMENT_TYPE_ANGLE, SONADOR_MEASUREMENT_TYPE_COBB_ANGLE)
 
 
 def measurement_type_for_tracking_id(tracking_id):
@@ -585,6 +592,68 @@ def _parse_display_container(container, diagnostics, strict, path, seen):
 	return DisplayAttributes(color=color, extra_items=extra, color_extra_items=color_extra)
 
 
+def srparse_item_properties(children, group_items, consumed, group_consumed, diagnostics, strict, path, seen, owner='Finding'):
+	'''	Read the extended meta and display attributes of a Finding or NUM item from the three accepted
+		layouts: the item's children (nested display container or flat role items), then the legacy
+		group-level siblings, which raise the `group-level-properties` warning.
+
+		@input children (list of pydicom.Dataset): children of the item
+		@input group_items (list of pydicom.Dataset): children of the group; empty to skip the legacy layout
+		@input consumed (set): indices into `children` already read; those read here are added
+		@input group_consumed (set): indices into `group_items` already read; those read here are added
+		@input diagnostics (list): list the diagnostics are appended to
+		@input strict (bool): raise SRDiagnosticError on a `warning`
+		@input path (str): content tree location, for the diagnostics
+		@input seen (dict): per-item record of the diagnostics already raised
+		@input owner (str, default='Finding'): name of the item in the diagnostic message
+
+		@returns tuple (dict, DisplayAttributes or None): the meta values by attribute, the display attributes
+	'''
+	values, display = {}, None
+	group_level_used = False
+
+	# Extended meta: children first, then the legacy group-level siblings
+	for attr, concept_name in DCMSR_MEASUREMENT_META.items():
+		for idx, child in enumerate(children):
+			if idx not in consumed and srcontent_is_named(child, concept_name) and _value_type(child) == 'TEXT':
+				consumed.add(idx)
+				values[attr] = _text_value(child)
+				break
+		else:
+			for idx, sibling in enumerate(group_items):
+				if idx not in group_consumed and srcontent_is_named(sibling, concept_name) and _value_type(sibling) == 'TEXT':
+					group_consumed.add(idx)
+					group_level_used = True
+					values[attr] = _text_value(sibling)
+					break
+
+	# Display attributes: nested container under the item, flat role items, or the legacy group-level container
+	for idx, child in enumerate(children):
+		if idx not in consumed and srcontent_is_named(child, DCMSR_DISPLAY_ATTRIBUTES) and _value_type(child) == 'CONTAINER':
+			consumed.add(idx)
+			display = _parse_display_container(child, diagnostics, strict, path, seen)
+			break
+	if display is None:
+		candidates = [(idx, child) for idx, child in enumerate(children) if idx not in consumed]
+		color, color_consumed, _ = _parse_color_items([c for _, c in candidates], diagnostics, strict, path, seen)
+		if color_consumed:
+			consumed.update(candidates[i][0] for i in color_consumed)
+			display = DisplayAttributes(color=color)
+	if display is None:
+		for idx, sibling in enumerate(group_items):
+			if idx not in group_consumed and srcontent_is_named(sibling, DCMSR_DISPLAY_ATTRIBUTES) and _value_type(sibling) == 'CONTAINER':
+				group_consumed.add(idx)
+				group_level_used = True
+				display = _parse_display_container(sibling, diagnostics, strict, path, seen)
+				break
+
+	if group_level_used:
+		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_GROUP_LEVEL_PROPERTIES,
+			'per-item properties read from group-level siblings (legacy layout); rewritten under the %s' % owner,
+			path=path, strict=strict)
+	return values, display
+
+
 def srparse_finding(item, group=None, strict=False, diagnostics=None, finding_class=Finding,
 		tracking_id=None, tracking_uid=None, group_consumed=None, allow_group_level=True, repaired=False, **kwargs):
 	'''	Build a finding from a Finding content item (CODE) of a measurement group. The finding code
@@ -650,8 +719,7 @@ def srparse_finding(item, group=None, strict=False, diagnostics=None, finding_cl
 		_note_missing_relationships(item, diagnostics, strict, path)
 	children = _children(item)
 	consumed = set()
-	reference, description_values = None, {}
-	display = None
+	reference = None
 
 	# Image reference: the IMAGE child; INFERRED FROM is the profile's relationship
 	for idx, child in enumerate(children):
@@ -665,47 +733,7 @@ def srparse_finding(item, group=None, strict=False, diagnostics=None, finding_cl
 				'image reference with SELECTED FROM; read as INFERRED FROM', path=path, value=relationship, strict=strict)
 		reference = image_reference_from_dataset(child)
 
-	# Extended meta: children first, then the legacy group-level siblings
-	group_level_used = False
-	for attr, concept_name in DCMSR_MEASUREMENT_META.items():
-		for idx, child in enumerate(children):
-			if idx not in consumed and srcontent_is_named(child, concept_name) and _value_type(child) == 'TEXT':
-				consumed.add(idx)
-				description_values[attr] = _text_value(child)
-				break
-		else:
-			for idx, sibling in enumerate(group_items):
-				if idx not in group_consumed and srcontent_is_named(sibling, concept_name) and _value_type(sibling) == 'TEXT':
-					group_consumed.add(idx)
-					group_level_used = True
-					description_values[attr] = _text_value(sibling)
-					break
-
-	# Display attributes: nested container under the finding, flat role items, or the legacy
-	# group-level container
-	for idx, child in enumerate(children):
-		if idx not in consumed and srcontent_is_named(child, DCMSR_DISPLAY_ATTRIBUTES) and _value_type(child) == 'CONTAINER':
-			consumed.add(idx)
-			display = _parse_display_container(child, diagnostics, strict, path, seen)
-			break
-	if display is None:
-		candidates = [(idx, child) for idx, child in enumerate(children) if idx not in consumed]
-		color, color_consumed, _ = _parse_color_items([c for _, c in candidates], diagnostics, strict, path, seen)
-		if color_consumed:
-			consumed.update(candidates[i][0] for i in color_consumed)
-			display = DisplayAttributes(color=color)
-	if display is None:
-		for idx, sibling in enumerate(group_items):
-			if idx not in group_consumed and srcontent_is_named(sibling, DCMSR_DISPLAY_ATTRIBUTES) and _value_type(sibling) == 'CONTAINER':
-				group_consumed.add(idx)
-				group_level_used = True
-				display = _parse_display_container(sibling, diagnostics, strict, path, seen)
-				break
-
-	if group_level_used:
-		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_GROUP_LEVEL_PROPERTIES,
-			'per-finding properties read from group-level siblings (legacy layout); rewritten under the Finding',
-			path=path, strict=strict)
+	description_values, display = srparse_item_properties(children, group_items, consumed, group_consumed, diagnostics, strict, path, seen, owner='Finding')
 
 	# Everything else under the finding is preserved
 	extra_items = []
@@ -724,11 +752,14 @@ def srparse_finding(item, group=None, strict=False, diagnostics=None, finding_cl
 
 
 def srparse_report_group(group, strict=False, diagnostics=None, group_class=ReportGroup, finding_class=Finding,
-		collection_class=FindingCollection, repaired=False, **kwargs):
+		collection_class=FindingCollection, repaired=False, calibrations=None, **kwargs):
 	'''	Build a report group from a Measurement Group content item (TID 1501): the tracking identifier
-		and UID, one finding per Finding item (`srparse_finding`), and every other child preserved as
-		`extra_items`. A group with exactly one finding reads the legacy group-level properties as
-		that finding's; a group with several keeps them at group level as preserved items.
+		and UID, one finding per Finding item (`srparse_finding`), the measurement of a group that is
+		routed to a quantitative tool or holds NUM items under an unknown identifier
+		(`sonador.apisettings.sr.measurements.srparse_measurement`), and every other child preserved
+		as `extra_items`. A group with exactly one finding and no tool reads the legacy group-level
+		properties as that finding's; a group with several keeps them at group level as preserved
+		items; a quantitative tool's group reads them as the measurement's.
 
 		Diagnostics raised here: `unknown-tracking-identifier` (info, the group stays generic),
 		`series-tag-group-without-finding` (error, a Series Tag group without a Finding code stays
@@ -743,6 +774,8 @@ def srparse_report_group(group, strict=False, diagnostics=None, group_class=Repo
 		@input collection_class (type, default=FindingCollection): class of the findings collection
 		@input repaired (bool, default=False): the document repair pass has already recorded the
 			missing Relationship Types below the group (see `srparse_finding`)
+		@input calibrations (mapping, default=None): `ImageFrameGeometry` by SOP Instance UID or
+			`(SOP Instance UID, frame number)`, used to verify image-domain stored values
 		@input kwargs: further constructor arguments of `group_class`
 
 		@returns ReportGroup (an instance of `group_class`)
@@ -777,12 +810,23 @@ def srparse_report_group(group, strict=False, diagnostics=None, group_class=Repo
 		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_ERROR, SR_CONDITION_GROUP_WITHOUT_FINDING,
 			'Series Tag measurement group without a Finding code kept as a generic report group', path=path, strict=strict)
 
+	# Quantitative content: a group routed to a tool, or any NUM group with an unknown identifier. A
+	# tool group owns its legacy group-level properties; otherwise a single Finding keeps them.
+	measurements = []
+	typed = measurement_type in SONADOR_QUANTITATIVE_TYPES
+	if typed or measurement_type is None:
+		from .measurements import srparse_group_measurement
+		measurement = srparse_group_measurement(group, measurement_type, tracking_id, tracking_uid, consumed, strict=strict,
+			diagnostics=diagnostics, calibrations=calibrations, allow_group_level=(typed or not finding_indices))
+		if measurement is not None:
+			measurements.append(measurement)
+
 	findings = []
 	for idx in finding_indices:
 		consumed.add(idx)
 		findings.append(srparse_finding(children[idx], group=group, strict=strict, diagnostics=diagnostics,
 			finding_class=finding_class, tracking_id=tracking_id, tracking_uid=tracking_uid,
-			group_consumed=consumed, allow_group_level=(len(finding_indices) == 1), repaired=True,
+			group_consumed=consumed, allow_group_level=(len(finding_indices) == 1 and not (typed and measurements)), repaired=True,
 			finding_type=measurement_type if measurement_type in SONADOR_FINDING_TYPES else None))
 
 	extra_items = []
@@ -796,6 +840,7 @@ def srparse_report_group(group, strict=False, diagnostics=None, group_class=Repo
 		extra_items.append(copy.deepcopy(child))
 
 	return group_class(findings=collection_class(findings) if findings else None,
+		measurements=MeasurementCollection(measurements) if measurements else None,
 		tracking_id=tracking_id, tracking_uid=tracking_uid, extra_items=extra_items, **kwargs)
 
 
