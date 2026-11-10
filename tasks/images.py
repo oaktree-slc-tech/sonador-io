@@ -1,10 +1,12 @@
 import os, logging
 from concurrent.futures import ThreadPoolExecutor
 
+from ..imaging.orthanc.base import FILEARCHIVE_TYPE_DICOMDIR, FILEARCHIVE_TYPE_ZIPARCHIVE
+
 logger = logging.getLogger(__name__)
 
 
-def download_imaging_filearchive(r, download_folder, extract=False):
+def download_imaging_filearchive(r, download_folder, extract=False, filearchive_type=FILEARCHIVE_TYPE_DICOMDIR):
 	'''	Download the file archive for the provided resource and write the contents to disk.
 		If extract is True, the contents of the archive rather than the archive itself
 		will be written to disk.
@@ -19,7 +21,7 @@ def download_imaging_filearchive(r, download_folder, extract=False):
 	if not os.path.exists(download_folder):
 		raise ValueError('Download folder "%s" does not exist' % download_folder)
 
-	with r.filearchive() as a:
+	with r.filearchive(filearchive_type=filearchive_type) as a:
 
 		# Extract archive contents
 		if extract:
