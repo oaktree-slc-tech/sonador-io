@@ -65,15 +65,15 @@ DCMSR_ROOT_REGENERATED = (DCMSR_ROOT_LANGUAGE, DCMSR_ROOT_PROCEDURE_REPORTED, DC
 	DCMSR_ROOT_IMAGING_MEASUREMENTS) + DCMSR_ROOT_OBSERVER_CODES
 
 # highdicom document class by SOP class: the class a document is read with (`DCMSR_DOCUMENT_CLASSES`)
-# and the class its re-save is written with (`DCMSR_WRITER_CLASSES`). A Comprehensive SR is
-# rewritten as Comprehensive 3D SR; an Enhanced SR stays Enhanced SR.
+# and the class its re-save is written with (`DCMSR_WRITER_CLASSES`). Every re-save is written as
+# Comprehensive 3D SR: Enhanced SR and Comprehensive SR are read and no longer written.
 DCMSR_DOCUMENT_CLASSES = OrderedDict((
 	(DCMSR_SOP_CLASS_ENHANCED, EnhancedSR),
 	(DCMSR_SOP_CLASS_COMPREHENSIVE, ComprehensiveSR),
 	(DCMSR_SOP_CLASS_COMPREHENSIVE_3D, Comprehensive3DSR),
 ))
 DCMSR_WRITER_CLASSES = OrderedDict((
-	(DCMSR_SOP_CLASS_ENHANCED, EnhancedSR),
+	(DCMSR_SOP_CLASS_ENHANCED, Comprehensive3DSR),
 	(DCMSR_SOP_CLASS_COMPREHENSIVE, Comprehensive3DSR),
 	(DCMSR_SOP_CLASS_COMPREHENSIVE_3D, Comprehensive3DSR),
 ))
@@ -142,10 +142,10 @@ def srdoc_root_template(ds):
 
 
 def srdoc_document_class(ds):
-	'''	highdicom document class a re-save of the document is written with: Enhanced SR stays
-		Enhanced SR, Comprehensive SR and Comprehensive 3D SR are written as Comprehensive 3D SR.
+	'''	highdicom document class a re-save of the document is written with: Comprehensive 3D SR, for
+		an Enhanced SR, Comprehensive SR or Comprehensive 3D SR parent alike.
 
-		@returns highdicom SR class: EnhancedSR or Comprehensive3DSR (the latter for an unknown SOP class)
+		@returns highdicom SR class: Comprehensive3DSR
 	'''
 	return DCMSR_WRITER_CLASSES.get(srdoc_sop_class(ds), Comprehensive3DSR)
 

@@ -616,12 +616,37 @@ DCMSR_GRAPHIC_POLYLINE = 'POLYLINE'
 # Uncalibrated image measurements are stored in pixels, under the unit code dcmjs writes
 DCMSR_UNITS_PIXEL = Code('1', 'UCUM', 'px')
 
-# Concept names written for the quantitative tools
-DCMSR_CONCEPT_LENGTH = Code('G-D7FE', 'SRT', 'Length')
+# Concept names written for the quantitative tools: SCT for every quantitative concept (readers also
+# accept the SRT equivalents, `sonador.apisettings.sr.measurements.DCMSR_MEASUREMENT_CONCEPTS`)
+DCMSR_CONCEPT_LENGTH = Code('410668003', 'SCT', 'Length')
 DCMSR_CONCEPT_COBB_ANGLE = Code('285285000', 'SCT', 'Cobb angle')
 
 # A coordinate difference below this is treated as coincident points
 DCMSR_GEOMETRY_COINCIDENT_TOLERANCE = 1e-6
+
+
+def drawing_plane_vectors(plane):
+	'''	Normalise a drawing plane to two 3-vectors of floats, width direction then height direction.
+		Only the form is checked here; unit length, perpendicularity and the distance of the points
+		are checked when the measurement is written
+		(`sonador.apisettings.sr.measurements.drawing_plane_failed_check`).
+
+		@input plane (pair of 3-sequences of numbers, or 6 numbers in Image Orientation (Patient)
+			order): the drawing plane
+
+		@returns tuple (tuple of 3 float, tuple of 3 float)
+		@raises ValueError for another shape or a value that is not finite
+	'''
+	values = [v for vector in plane for v in (vector if isinstance(vector, (list, tuple, np.ndarray)) else (vector,))]
+	try:
+		values = [float(v) for v in values]
+	except (TypeError, ValueError):
+		raise ValueError('A drawing plane is two 3-vectors (width, height) of numbers: %r' % (plane,))
+	if len(values) != 6:
+		raise ValueError('A drawing plane is two 3-vectors (width, height); got %d values' % len(values))
+	if not all(math.isfinite(v) for v in values):
+		raise ValueError('Drawing plane values must be finite: %r' % (values,))
+	return tuple(values[:3]), tuple(values[3:])
 
 
 class Geometry(namedtuple('Geometry', ('domain', 'graphic_type', 'points', 'reference'))):
@@ -780,6 +805,11 @@ class Measurement(_DisplayAttributesMixin, SRDataCollectionMember):
 		@property description, text, location (str or None): extended meta attributes; `description`
 			is the label
 		@property views (tuple of str): views the measurement was created in
+		@property drawing_plane (tuple of two 3-tuples of float, or None): orientation of the view a
+			patient-domain measurement was drawn in, width direction then height direction in patient
+			coordinates; settable, refused for image-domain geometry. A value read from a document
+			keeps its text (`drawing_plane_text`) and is written back verbatim until it is replaced;
+			a value read that is malformed reads as None and is written back as read.
 		@property display (DisplayAttributes or None): display attributes
 		@property extra_items (tuple of pydicom.Dataset): unmodelled children of the NUM item, re-emitted
 			under it
@@ -793,7 +823,7 @@ class Measurement(_DisplayAttributesMixin, SRDataCollectionMember):
 			qualifier=None, tracking_id=None, algorithm=None, derivation=None,  method=None,
 			finding_sites=None, properties=None, ref_images=None, ref_value=None, tracking_uid=None, reference=None,
 			geometry=None, frame_of_reference_uid=None, series_uid=None, description=None, text=None, location=None,
-			views=None, display=None, extra_items=None, values=None, group_finding_sites=None, **kwargs):
+			views=None, display=None, extra_items=None, values=None, group_finding_sites=None, drawing_plane=None, **kwargs):
 		'''	Initialize measurement
 
 			@input val (numbers.Number): numeric measurement value
@@ -820,13 +850,19 @@ class Measurement(_DisplayAttributesMixin, SRDataCollectionMember):
 			@input geometry (Geometry, default=None): coordinates of the measurement
 			@input frame_of_reference_uid (str, default=None): Frame of Reference of the imaging series
 			@input series_uid (str, default=None): series the measurement belongs to when `reference`
-				carries none
+				carries none; for a patient-domain measurement, the imaging series written as its source
+				series
 			@input description, text, location (str, default=None): extended meta attributes
 			@input views (iterable of str, default=None): views the measurement was created in
 			@input display (DisplayAttributes or colour-role dict, default=None): display attributes
 			@input extra_items (iterable of pydicom.Dataset, default=None): preserved children of the NUM item
 			@input values (mapping, default=None): the other NUM items of the group (`MeasurementValue`)
 			@input group_finding_sites (iterable of CodedConcept, default=None): group-level finding sites read
+			@input drawing_plane (pair of 3-vectors, default=None): orientation of the view a patient-domain
+				measurement was drawn in (width, height)
+
+			@raises ValueError for a `drawing_plane` of another shape, or on geometry that is not in the
+				patient domain
 		'''
 		if measurement_type is None and isinstance(tracking_id, str):
 			from ..sr.seriestag import measurement_type_for_tracking_id
@@ -868,6 +904,12 @@ class Measurement(_DisplayAttributesMixin, SRDataCollectionMember):
 		self._parsed_reference = None
 		self._stored_value_item = None
 		self._source_coordinates = None
+		self._parsed_views = None
+		self._parsed_series_uid = None
+		self._drawing_plane = None
+		self._drawing_plane_text = None
+		if drawing_plane is not None:
+			self.drawing_plane = drawing_plane
 
 		# Links to the model objects of an imaging server (set by the retrieval layer)
 		self.series = None
@@ -967,7 +1009,52 @@ class Measurement(_DisplayAttributesMixin, SRDataCollectionMember):
 	@geometry.setter
 	def geometry(self, val):
 		self._check_geometry(val)
+		if self._drawing_plane is not None and (val is None or not val.is_patient):
+			raise ValueError('A measurement with a drawing plane needs patient-domain geometry; clear `drawing_plane` first')
 		self._geometry = val
+
+	@property
+	def drawing_plane(self):
+		'''	Orientation of the view the measurement was drawn in.
+
+			@returns
+				- tuple (width, height) of two 3-tuples of float
+				- None when absent, or when the value read from the document is malformed
+		'''
+		return self._drawing_plane
+
+	@drawing_plane.setter
+	def drawing_plane(self, val):
+		'''	Set the drawing plane of a patient-domain measurement. The text read from a document, if
+			any, is dropped: the new value is written in the formatted form.
+
+			@raises ValueError for a value of another shape, or for a measurement whose geometry is not
+				in the patient domain
+		'''
+		if val is not None:
+			if self._geometry is None or not self._geometry.is_patient:
+				raise ValueError('A drawing plane applies to patient-domain geometry only')
+			val = drawing_plane_vectors(val)
+		self._drawing_plane = val
+		self._drawing_plane_text = None
+
+	@property
+	def drawing_plane_text(self):
+		'''	Drawing-plane text read from the document, while the value has not been replaced.
+
+			@returns str, or None for a measurement created in Python or a replaced value
+		'''
+		return self._drawing_plane_text
+
+	def _set_parsed_drawing_plane(self, plane, text):
+		'''	Record the drawing plane read from a document: the vectors (None when malformed) and the
+			text, written back verbatim.
+
+			@input plane (tuple of two 3-tuples, or None): the valid value
+			@input text (str): the text as read
+		'''
+		self._drawing_plane = plane
+		self._drawing_plane_text = text
 
 	def _check_geometry(self, geometry):
 		'''	Hook for a class that constrains its geometry. The base class accepts any.
@@ -1025,6 +1112,8 @@ class Measurement(_DisplayAttributesMixin, SRDataCollectionMember):
 		self._parsed_value = self._val
 		self._stored_value_item = stored_value_item
 		self._source_coordinates = source_coordinates
+		self._parsed_views = tuple(self.views)
+		self._parsed_series_uid = self._series_uid
 		if self._geometry is not None:
 			self._parsed_points = self._geometry.points
 			self._parsed_reference = self._reference_key()
@@ -1063,6 +1152,22 @@ class Measurement(_DisplayAttributesMixin, SRDataCollectionMember):
 		if source.get('ValueType') != ('SCOORD3D' if geometry.is_patient else 'SCOORD') or source.get('GraphicType') != geometry.graphic_type:
 			return None
 		return source
+
+	@property
+	def parsed_views(self):
+		'''	View values read from the document.
+
+			@returns tuple of str: empty for a measurement created in Python
+		'''
+		return self._parsed_views or ()
+
+	@property
+	def parsed_series_uid(self):
+		'''	Source series read from the document (`Sonador-Measurement.Source-Series`).
+
+			@returns str, or None
+		'''
+		return self._parsed_series_uid
 
 	@property
 	def reference_changed(self):

@@ -5,8 +5,19 @@
 	the Cornerstone tool. The geometry is a child of the NUM: `INFERRED FROM` SCOORD3D with a Frame
 	of Reference (patient domain) or SCOORD with `SELECTED FROM` IMAGE (image domain). The per-item
 	properties are children of the NUM item as well: flat `HAS PROPERTIES` TEXT meta items, one
-	`Sonador-Measurement.View` per view, and the display container nested (Comprehensive 3D SR) or
-	flat (Enhanced SR). Group-level properties are a read-only legacy layout, with a `warning`.
+	`Sonador-Measurement.View` per view, and the display container. Documents are written as
+	Comprehensive 3D SR with the display container nested under the NUM; the flat form of Enhanced
+	SR documents is read and no longer written. Group-level properties are a read-only legacy
+	layout, with a `warning`.
+
+	View values are registered (`SONADOR_MEASUREMENT_VIEWS`, each with a meaning and a Sonador-SR
+	0.3 `Code` whose value is the text written); the encoding stays TEXT. A patient-domain NUM also
+	carries where it was made: `Sonador-Measurement.Source-Series` (UIDREF, the imaging series) and
+	`Sonador-Measurement.Drawing-Plane` (TEXT, the orientation of the drawing view as six decimals
+	in the layout of Image Orientation (Patient), width direction then height direction). Neither is
+	written for image-domain geometry, whose image reference already says where it was made.
+
+	Quantitative concepts are written with their SCT codes and read in their SRT forms as well.
 
 	The identifier decides the type, the geometry never does: a group with an unknown identifier or
 	an unusable geometry reads as a generic `Measurement` with every NUM item preserved. Children
@@ -17,7 +28,7 @@
 	The model classes are in `sonador.apisettings.base.sr`; the group router is
 	`sonador.apisettings.sr.seriestag.srparse_report_group`.
 '''
-import copy, math
+import copy, math, re
 from collections import OrderedDict
 
 import numpy as np
@@ -28,14 +39,14 @@ from pydicom.valuerep import DS
 
 from highdicom.sr.content import CoordinatesForMeasurement, CoordinatesForMeasurement3D, SourceImageForRegion, FindingSite
 from highdicom.sr.templates import Code, CodedConcept
-from highdicom.sr.value_types import ContentItem, NumContentItem, TextContentItem
+from highdicom.sr.value_types import ContentItem, NumContentItem, TextContentItem, UIDRefContentItem
 from highdicom.sr.enum import RelationshipTypeValues, GraphicTypeValues, GraphicTypeValues3D
 
 from ..base import SONADOR_MANUFACTURER, SONADOR_SR, SONADOR_SCHEME_VERSION_03, Measurement, MeasurementValue, Geometry, \
 	GeometricMeasurement, ImageFrameGeometry, measurement_class_for_type, DCMSR_GEOMETRY_DOMAIN_IMAGE, DCMSR_GEOMETRY_DOMAIN_PATIENT, \
 	DCMSR_UNITS_PIXEL, DCMSR_CONCEPT_LENGTH, DCMSR_CONCEPT_COBB_ANGLE, DCMHEADER_SR_REF_REFERENCE_FRAME, \
 	SONADOR_MEASUREMENT_TYPE_LENGTH, SONADOR_MEASUREMENT_TYPE_ANGLE, SONADOR_MEASUREMENT_TYPE_COBB_ANGLE, \
-	SONADOR_MEASUREMENT_TYPE_GENERIC, DCMHEADER_CODING_SCHEME_DESIGNATOR, DCMHEADER_CODE_MEANING
+	SONADOR_MEASUREMENT_TYPE_GENERIC, DCMHEADER_CODING_SCHEME_DESIGNATOR, DCMHEADER_CODE_MEANING, drawing_plane_vectors
 from . import dcm_code_value, srcontent_is_named, srcontent_extra_items, srcontent_from_dataset, sr_diagnostic, \
 	SR_DIAGNOSTIC_INFO, SR_DIAGNOSTIC_WARNING, SR_DIAGNOSTIC_ERROR, SR_CONDITION_MEASUREMENT_VALUE_MISMATCH, \
 	SR_CONDITION_MEASUREMENT_VALUE_UNVERIFIED, SR_CONDITION_MEASUREMENT_UNCALIBRATED, SR_CONDITION_MEASUREMENT_WITHOUT_VALUE, \
@@ -44,6 +55,7 @@ from . import dcm_code_value, srcontent_is_named, srcontent_extra_items, srconte
 from .seriestag import srparse_item_properties, srencode_meta_items, srencode_display_items, srcontent_is_valid, \
 	image_reference_from_dataset, measurement_type_for_tracking_id, DCMSR_LAYOUT_NESTED, DCMSR_LAYOUTS_WRITTEN, \
 	_children, _value_type, _text_value, _relationship, _path, _note_by_reference, _note_missing_relationships, _UNNAMED_MARKER, DCMSR_IMAGE_REFERENCE_NAME
+from . import srcontent_name, SR_CONDITION_UNREGISTERED_VIEW, SR_CONDITION_INVALID_DRAWING_PLANE, SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN
 
 # Concepts
 
@@ -51,11 +63,61 @@ SONADOR_MEASUREMENT_VIEW = '%s-Measurement.View' % SONADOR_MANUFACTURER
 SONADOR_MEASUREMENT_VIEW_MEANING = 'View a measurement was created in. Descriptive measurement attribute.'
 DCMSR_MEASUREMENT_VIEW = Code(SONADOR_MEASUREMENT_VIEW, SONADOR_SR, SONADOR_MEASUREMENT_VIEW_MEANING,
 	scheme_version=SONADOR_SCHEME_VERSION_03)
-SONADOR_MEASUREMENT_VIEWS = ('coronal', 'sagittal', 'axial', '3d')
+
+# View values. The string is the text written into the View item and the value of its code; the
+# codes are the formal registry of the values and are not written into documents as CODE items.
+# The Sonador Viewer declares the same table.
+SONADOR_MEASUREMENT_VIEW_AXIAL = 'axial'
+SONADOR_MEASUREMENT_VIEW_AXIAL_MEANING = 'Axial view. Cross-sections, dividing head from feet.'
+DCMSR_MEASUREMENT_VIEW_AXIAL = Code(SONADOR_MEASUREMENT_VIEW_AXIAL, SONADOR_SR, SONADOR_MEASUREMENT_VIEW_AXIAL_MEANING,
+	scheme_version=SONADOR_SCHEME_VERSION_03)
+
+SONADOR_MEASUREMENT_VIEW_SAGITTAL = 'sagittal'
+SONADOR_MEASUREMENT_VIEW_SAGITTAL_MEANING = 'Sagittal view. Side-on slices, dividing left from right.'
+DCMSR_MEASUREMENT_VIEW_SAGITTAL = Code(SONADOR_MEASUREMENT_VIEW_SAGITTAL, SONADOR_SR, SONADOR_MEASUREMENT_VIEW_SAGITTAL_MEANING,
+	scheme_version=SONADOR_SCHEME_VERSION_03)
+
+SONADOR_MEASUREMENT_VIEW_CORONAL = 'coronal'
+SONADOR_MEASUREMENT_VIEW_CORONAL_MEANING = 'Coronal view. Front-on slices, dividing front from back.'
+DCMSR_MEASUREMENT_VIEW_CORONAL = Code(SONADOR_MEASUREMENT_VIEW_CORONAL, SONADOR_SR, SONADOR_MEASUREMENT_VIEW_CORONAL_MEANING,
+	scheme_version=SONADOR_SCHEME_VERSION_03)
+
+SONADOR_MEASUREMENT_VIEW_OBLIQUE = 'oblique'
+SONADOR_MEASUREMENT_VIEW_OBLIQUE_MEANING = 'Oblique view. A slice tilted away from the standard views.'
+DCMSR_MEASUREMENT_VIEW_OBLIQUE = Code(SONADOR_MEASUREMENT_VIEW_OBLIQUE, SONADOR_SR, SONADOR_MEASUREMENT_VIEW_OBLIQUE_MEANING,
+	scheme_version=SONADOR_SCHEME_VERSION_03)
+
+SONADOR_MEASUREMENT_VIEW_3D = '3d'
+SONADOR_MEASUREMENT_VIEW_3D_MEANING = '3D view. The whole volume, seen from any direction.'
+DCMSR_MEASUREMENT_VIEW_3D = Code(SONADOR_MEASUREMENT_VIEW_3D, SONADOR_SR, SONADOR_MEASUREMENT_VIEW_3D_MEANING,
+	scheme_version=SONADOR_SCHEME_VERSION_03)
+
+DCMSR_MEASUREMENT_VIEW_CODES = OrderedDict((code.value, code) for code in (DCMSR_MEASUREMENT_VIEW_AXIAL,
+	DCMSR_MEASUREMENT_VIEW_SAGITTAL, DCMSR_MEASUREMENT_VIEW_CORONAL, DCMSR_MEASUREMENT_VIEW_OBLIQUE, DCMSR_MEASUREMENT_VIEW_3D))
+SONADOR_MEASUREMENT_VIEWS = (SONADOR_MEASUREMENT_VIEW_AXIAL, SONADOR_MEASUREMENT_VIEW_SAGITTAL, SONADOR_MEASUREMENT_VIEW_CORONAL,
+	SONADOR_MEASUREMENT_VIEW_OBLIQUE, SONADOR_MEASUREMENT_VIEW_3D)
+
+# Where a patient-domain measurement was made: the imaging series, and the orientation of the view
+SONADOR_MEASUREMENT_SOURCE_SERIES = '%s-Measurement.Source-Series' % SONADOR_MANUFACTURER
+SONADOR_MEASUREMENT_SOURCE_SERIES_MEANING = 'Imaging series a patient-domain measurement was made on.'
+DCMSR_MEASUREMENT_SOURCE_SERIES = Code(SONADOR_MEASUREMENT_SOURCE_SERIES, SONADOR_SR, SONADOR_MEASUREMENT_SOURCE_SERIES_MEANING,
+	scheme_version=SONADOR_SCHEME_VERSION_03)
+
+SONADOR_MEASUREMENT_DRAWING_PLANE = '%s-Measurement.Drawing-Plane' % SONADOR_MANUFACTURER
+SONADOR_MEASUREMENT_DRAWING_PLANE_MEANING = 'Orientation of the view a measurement was drawn in.'
+DCMSR_MEASUREMENT_DRAWING_PLANE = Code(SONADOR_MEASUREMENT_DRAWING_PLANE, SONADOR_SR, SONADOR_MEASUREMENT_DRAWING_PLANE_MEANING,
+	scheme_version=SONADOR_SCHEME_VERSION_03)
+
+# Drawing-plane validation: unit length and perpendicularity of the directions, distance of the points
+# from the plane through the first point (millimetres)
+DCMSR_DRAWING_PLANE_DIRECTION_TOLERANCE = 1e-4
+DCMSR_DRAWING_PLANE_DISTANCE_TOLERANCE = 1.0
+DCMSR_DRAWING_PLANE_DECIMALS = 6
+DCMSR_DRAWING_PLANE_NUMBER_RE = re.compile(r'^[+-]?(\d+(\.\d*)?|\.\d+)$')
 
 # Concepts accepted for the primary NUM item of each tool; the first is the one written
 DCMSR_MEASUREMENT_CONCEPTS = {
-	SONADOR_MEASUREMENT_TYPE_LENGTH: (DCMSR_CONCEPT_LENGTH, Code('410668003', 'SCT', 'Length')),
+	SONADOR_MEASUREMENT_TYPE_LENGTH: (DCMSR_CONCEPT_LENGTH, Code('G-D7FE', 'SRT', 'Length')),
 	SONADOR_MEASUREMENT_TYPE_ANGLE: (DCMSR_CONCEPT_COBB_ANGLE, Code('1483009', 'SCT', 'Angle')),
 	SONADOR_MEASUREMENT_TYPE_COBB_ANGLE: (DCMSR_CONCEPT_COBB_ANGLE, Code('1483009', 'SCT', 'Angle')),
 }
@@ -135,6 +197,75 @@ def image_frame_geometry(ds, frame_number=None):
 		elif imager is not None and imager[1]:
 			aspect = imager[0] / imager[1]
 	return ImageFrameGeometry(position, orientation, spacing, aspect)
+
+
+# Drawing plane
+
+def drawing_plane_to_text(plane):
+	'''	Text of a drawing plane: six decimals separated by commas, width x, y, z then height x, y, z,
+		with no exponent, at most six decimal places and no spaces (`0,1,0,0,0,-1`).
+
+		@input plane (pair of 3-vectors): the drawing plane
+		@returns str
+		@raises ValueError for a value of another shape or not finite
+	'''
+	width, height = drawing_plane_vectors(plane)
+	numbers = []
+	for value in width + height:
+		text = ('%.*f' % (DCMSR_DRAWING_PLANE_DECIMALS, value)).rstrip('0').rstrip('.')
+		numbers.append('0' if text in ('-0', '') else text)
+	return ','.join(numbers)
+
+
+def drawing_plane_from_text(text):
+	'''	Drawing plane of a Drawing-Plane text: six decimal numbers separated by commas, with any spaces
+		around them trimmed. Only the form is checked here (`drawing_plane_failed_check` checks the rest).
+
+		@input text (str): the text read
+		@returns
+			- tuple (width, height) of two 3-tuples of float
+			- None when the text is not six finite decimal numbers
+	'''
+	parts = [part.strip() for part in str(text or '').split(',')]
+	if len(parts) != 6 or not all(DCMSR_DRAWING_PLANE_NUMBER_RE.match(part) for part in parts):
+		return None
+	try:
+		return drawing_plane_vectors([float(part) for part in parts])
+	except ValueError:
+		return None
+
+
+def drawing_plane_failed_check(plane, points):
+	'''	The first validation check a drawing plane fails for the points of a measurement: each
+		direction of unit length within 1e-4, the two directions perpendicular within 1e-4 (their dot
+		product), every point within 1 mm of the plane through the first point. Makes no request.
+
+		@input plane (pair of 3-vectors, or None): the drawing plane
+		@input points (sequence of 3-sequences): patient-domain points of the measurement
+
+		@returns
+			- None when the plane is valid
+			- str naming the failed check: `six-finite-numbers`, `unit-width`, `unit-height`,
+				`perpendicular` or `points-within-1mm`
+	'''
+	try:
+		width, height = (np.asarray(v, dtype=float) for v in drawing_plane_vectors(plane))
+	except (TypeError, ValueError):
+		return 'six-finite-numbers'
+	if abs(np.linalg.norm(width) - 1.0) > DCMSR_DRAWING_PLANE_DIRECTION_TOLERANCE:
+		return 'unit-width'
+	if abs(np.linalg.norm(height) - 1.0) > DCMSR_DRAWING_PLANE_DIRECTION_TOLERANCE:
+		return 'unit-height'
+	if abs(float(np.dot(width, height))) > DCMSR_DRAWING_PLANE_DIRECTION_TOLERANCE:
+		return 'perpendicular'
+	normal = np.cross(width, height)
+	normal = normal / np.linalg.norm(normal)
+	if points:
+		origin = np.asarray(points[0], dtype=float)
+		for point in points[1:]:
+			if abs(float(np.dot(np.asarray(point, dtype=float) - origin, normal))) > DCMSR_DRAWING_PLANE_DISTANCE_TOLERANCE:
+				return 'points-within-1mm'
+	return None
 
 
 # Encoder
@@ -239,23 +370,86 @@ def srencode_measurement_coordinates(measurement):
 	return _mark_unnamed(CoordinatesForMeasurement(geometry.graphic_type, data, source_image))
 
 
-def srencode_measurement_children(measurement, layout=None):
-	'''	Children of the NUM item after the coordinates, in writing order: the extended meta items, one
-		View item per view, the display attributes in the layout of the document class, the preserved
-		extra items.
+def srencode_measurement_views(measurement, diagnostics=None, strict=False):
+	'''	View items of a measurement, one `HAS PROPERTIES` TEXT item per view, written as given. A value
+		outside the registry (`SONADOR_MEASUREMENT_VIEWS`) that was not read from the document is
+		recorded as the `warning` `unregistered-view-value`; values read are written back unchanged
+		without a diagnostic.
 
 		@input measurement (Measurement)
-		@input layout (str, default=`DCMSR_LAYOUT_NESTED`): `DCMSR_LAYOUT_NESTED` or `DCMSR_LAYOUT_FLAT`
+		@input diagnostics (list, default=None): list the diagnostics are appended to
+		@input strict (bool, default=False): refuse an unregistered value instead of writing it
+
+		@returns list of highdicom TextContentItem
+		@raises SRDiagnosticError under `strict` for an unregistered value
+	'''
+	parsed = set(measurement.parsed_views)
+	items = []
+	for view in measurement.views:
+		view = str(view)
+		if view not in DCMSR_MEASUREMENT_VIEW_CODES and view not in parsed:
+			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_UNREGISTERED_VIEW,
+				'View value "%s" is not a registered value; written as given' % view, path=_path(measurement.tracking_uid),
+				value=view, strict=strict)
+		items.append(TextContentItem(name=DCMSR_MEASUREMENT_VIEW, value=view, relationship_type=RelationshipTypeValues.HAS_PROPERTIES))
+	return items
+
+
+def srencode_measurement_provenance(measurement):
+	'''	Source-Series and Drawing-Plane items of a patient-domain measurement; none for any other.
+		Source-Series is written from `series_uid`. Drawing-Plane is written from the text read from
+		the document while the value is untouched, else formatted from `drawing_plane`. A plane that
+		is new or set by the caller, or a valid plane read from the document whose measurement points
+		have changed since, is validated first. Makes no request.
+
+		@input measurement (Measurement)
+
+		@returns list of highdicom content items (UIDRefContentItem, TextContentItem)
+		@raises ValueError naming the failed check for a drawing plane that is not valid for the points
+	'''
+	geometry = measurement.geometry
+	if geometry is None or not geometry.is_patient:
+		return []
+	items = []
+	if measurement.series_uid:
+		items.append(UIDRefContentItem(name=DCMSR_MEASUREMENT_SOURCE_SERIES, value=measurement.series_uid,
+			relationship_type=RelationshipTypeValues.HAS_PROPERTIES))
+
+	text, plane = measurement.drawing_plane_text, measurement.drawing_plane
+	points_changed = getattr(measurement, 'points_changed', False)
+	if plane is not None and (text is None or points_changed):
+		failed = drawing_plane_failed_check(plane, geometry.points)
+		if failed is not None:
+			raise ValueError('Drawing plane of measurement %s fails the check "%s" and cannot be written'
+				% (measurement.tracking_uid, failed))
+	if text is not None:
+		items.append(TextContentItem(name=DCMSR_MEASUREMENT_DRAWING_PLANE, value=text, relationship_type=RelationshipTypeValues.HAS_PROPERTIES))
+	elif plane is not None:
+		items.append(TextContentItem(name=DCMSR_MEASUREMENT_DRAWING_PLANE, value=drawing_plane_to_text(plane),
+			relationship_type=RelationshipTypeValues.HAS_PROPERTIES))
+	return items
+
+
+def srencode_measurement_children(measurement, layout=None, diagnostics=None, strict=False):
+	'''	Children of the NUM item after the coordinates, in writing order: the extended meta items, one
+		View item per view, Source-Series and Drawing-Plane (patient domain), the nested display
+		container, the preserved extra items.
+
+		@input measurement (Measurement)
+		@input layout (str, default=`DCMSR_LAYOUT_NESTED`): the only layout written
+		@input diagnostics (list, default=None): list the write diagnostics are appended to
+		@input strict (bool, default=False): refuse an unregistered View value
 
 		@returns list of highdicom content items: empty for a measurement without properties
-		@raises ValueError for any other layout
+		@raises ValueError for any other layout, or a drawing plane that fails validation
+		@raises SRDiagnosticError under `strict` for an unregistered View value
 	'''
 	layout = layout or DCMSR_LAYOUT_NESTED
 	if layout not in DCMSR_LAYOUTS_WRITTEN:
 		raise ValueError('Unsupported per-item property layout: %s' % layout)
 	children = srencode_meta_items(measurement)
-	children.extend(TextContentItem(name=DCMSR_MEASUREMENT_VIEW, value=str(view), relationship_type=RelationshipTypeValues.HAS_PROPERTIES)
-		for view in measurement.views)
+	children.extend(srencode_measurement_views(measurement, diagnostics=diagnostics, strict=strict))
+	children.extend(srencode_measurement_provenance(measurement))
 	children.extend(srencode_display_items(measurement.display, layout=layout))
 	children.extend(srcontent_extra_items(measurement.extra_items))
 	return children
@@ -553,8 +747,14 @@ def srparse_measurement(item, group=None, strict=False, diagnostics=None, measur
 		with an unknown identifier, a concept the tool does not accept, or geometry the tool cannot use
 		reads as a generic `Measurement`.
 
+		A patient-domain NUM's `Sonador-Measurement.Source-Series` is read into `series_uid` and its
+		`Sonador-Measurement.Drawing-Plane` into `drawing_plane`, keeping the text for write-back.
+
 		Diagnostics raised here: `foreign-measurement-label` (info, a dcmjs Comment or
-		`CORNERSTONEFREETEXT` finding site became the description), `measurement-read-as-generic`,
+		`CORNERSTONEFREETEXT` finding site became the description), `patient-provenance-on-image-domain`
+		(info, Source-Series or Drawing-Plane under a NUM without patient-domain geometry; the item is
+		preserved, not read), `invalid-drawing-plane` (warning, the plane reads as None and its text is
+		written back), `measurement-read-as-generic`,
 		`angle-middle-points-differ` and those of `srparse_item_properties` (warning),
 		`measurement-without-value` (warning, or `error` when there is no geometry either), those of
 		`_note_value_checks` and `content-item-dropped` (error). `strict` raises on `warning` and `error`.
@@ -650,6 +850,33 @@ def srparse_measurement(item, group=None, strict=False, diagnostics=None, measur
 				if (_text_value(sibling) or '').strip():
 					views.append(_text_value(sibling).strip())
 
+	# Where a patient-domain measurement was made; under an image-domain NUM the items are reported and
+	# left in place, so that they are preserved with the other unmodelled children
+	source_series, plane, plane_text = None, None, None
+	for idx, child in enumerate(children):
+		if idx in consumed:
+			continue
+		is_series = srcontent_is_named(child, DCMSR_MEASUREMENT_SOURCE_SERIES) and _value_type(child) == 'UIDREF'
+		is_plane = srcontent_is_named(child, DCMSR_MEASUREMENT_DRAWING_PLANE) and _value_type(child) == 'TEXT'
+		if not (is_series or is_plane):
+			continue
+		if geometry is None or not geometry.is_patient:
+			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN,
+				'%s under a NUM item without patient-domain geometry; ignored and preserved' % dcm_code_value(srcontent_name(child)), path=path)
+		elif is_series and source_series is None:
+			consumed.add(idx)
+			source_series = str(child.get('UID') or '').strip() or None
+		elif is_plane and plane_text is None:
+			consumed.add(idx)
+			plane_text = _text_value(child) or ''
+			plane = drawing_plane_from_text(plane_text)
+			failed = 'six-finite-numbers' if plane is None else drawing_plane_failed_check(plane, geometry.points)
+			if failed is not None:
+				plane = None
+				sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_INVALID_DRAWING_PLANE,
+					'Drawing-Plane "%s" fails the check "%s"; read as absent and written back as read' % (plane_text, failed),
+					path=path, value=tracking_uid, strict=strict)
+
 	# A dcmjs label becomes the description; it is written back only in that form
 	if meta.get('description') is None:
 		label = None
@@ -706,10 +933,13 @@ def srparse_measurement(item, group=None, strict=False, diagnostics=None, measur
 			group_sites.append(CodedConcept.from_dataset(sibling.ConceptCodeSequence[0], copy=True))
 
 	fields = dict(tracking_id=tracking_id, tracking_uid=tracking_uid, frame_of_reference_uid=frame_uid, display=display, views=views,
+		series_uid=source_series,
 		extra_items=extra_items, values=values, group_finding_sites=group_sites, finding_sites=finding_sites or None, qualifier=qualifier, **meta)
 	if typed:
 		calibration = _calibration_for(calibrations, geometry.reference)
 		measurement = measurement_class(geometry=geometry, name=name, unit=unit, value=value, calibration=calibration, **fields)
+		if plane_text is not None:
+			measurement._set_parsed_drawing_plane(plane, plane_text)
 		measurement._mark_parsed(copy.deepcopy(stored_item) if stored_item is not None else None, source_coordinates)
 		if measurement_type == SONADOR_MEASUREMENT_TYPE_ANGLE and geometry.points[1] != geometry.points[2]:
 			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_ANGLE_MIDDLE_POINTS_DIFFER,
@@ -718,6 +948,8 @@ def srparse_measurement(item, group=None, strict=False, diagnostics=None, measur
 	else:
 		measurement = Measurement(value, unit=unit, name=name, measurement_type=measurement_type or SONADOR_MEASUREMENT_TYPE_GENERIC,
 			geometry=geometry, **fields)
+		if plane_text is not None:
+			measurement._set_parsed_drawing_plane(plane, plane_text)
 		measurement._mark_parsed(copy.deepcopy(stored_item) if stored_item is not None else None, source_coordinates)
 	return measurement
 

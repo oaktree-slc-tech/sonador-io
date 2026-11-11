@@ -16,12 +16,10 @@
 	* `SonadorBaseSR.parse(documents)` parses one or more documents, or an imaging server series or
 		instance, and returns a `DcmSRSeries` whose instances carry the models.
 	* `create_sr()` encodes the model as a DICOM-SR document (highdicom) with the equipment profile
-		and Device Observer of the class, a document class and the per-finding layout that class
-		permits. A new document is a Comprehensive 3D SR. On a re-save the class is selected from the
-		parsed document's class and the content: an Enhanced SR stays Enhanced SR unless the content
-		needs Comprehensive 3D SR, a Comprehensive SR is written as Comprehensive 3D SR, a
-		Comprehensive 3D SR stays as it is (the transitions are stated on `SonadorComprehensiveSR3D`
-		and `SonadorComprehensiveSR3D.create_sr`). A re-save names the parsed document as its
+		and Device Observer of the class. Every document written is a Comprehensive 3D SR with the
+		per-item properties nested under their item; Enhanced SR and Comprehensive SR documents are
+		read, and a re-save of one is written as Comprehensive 3D SR (an Enhanced SR parent with the
+		`info` diagnostic `document-class-upgraded`). A re-save names the parsed document as its
 		predecessor.
 
 	The documents follow the Sonador-SR 0.3 exchange profile shared with the Sonador Viewer, which is
@@ -54,18 +52,17 @@ from ....apisettings.base import ImageTransformMatrix, ImageTransformMatrixColle
 	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_STUDY_INSTANCE_UID
 from ....apisettings.sr import dcm_encode_reference_frame_transform_matrix, srencode_observation_context, \
 	DCMSR_SONADOR_DATA_REPORT, sr_diagnostic, SRDiagnostic, SRDiagnosticError, srcontent_extra_items, \
-	srcontent_is_by_reference, srcontent_holds_by_reference, SR_DIAGNOSTIC_WARNING, SR_DIAGNOSTIC_ERROR, \
+	srcontent_is_by_reference, srcontent_holds_by_reference, SR_DIAGNOSTIC_INFO, SR_DIAGNOSTIC_WARNING, SR_DIAGNOSTIC_ERROR, \
 	SR_CONDITION_DOCUMENT_CLASS_UPGRADED, SR_CONDITION_BY_REFERENCE_ITEM, SR_CONDITION_EMPTY_REPORT_CONTENT
 from ....apisettings.sr.seriestag import DCMSR_SUPPORTED_TEMPLATE_IDS, SONADOR_SR_TEMPLATE_ID, DCMR_TEMPLATE_ID, \
-	mapping_resource_for_template, layout_for_sop_class, DCMSR_LAYOUT_NESTED, DCMSR_LAYOUT_FLAT, \
-	DCMSR_SOP_CLASS_ENHANCED, srcontent_strip_unnamed, srencode_image_reference
+	mapping_resource_for_template, DCMSR_LAYOUT_NESTED, DCMSR_SOP_CLASS_ENHANCED, srcontent_strip_unnamed, srencode_image_reference
 from ....serialization import ISO8601_DATETIME_FORMAT, DATETIME_FORMAT3, sonador_encode2str
 from ...orthanc import ImagingSeries
 from ...orthanc.base import ImagingResourceBaseCollection
 from ...orthanc.sr import DcmSRSeries, DcmSRInstance
 
 from .encoding import SonadorSRMeasurementReport
-from .parse import srdoc_parse, srdoc_read, srdoc_document_class, srdoc_evidence_headers, srdoc_synthetic_evidence, srdoc_set_study, \
+from .parse import srdoc_parse, srdoc_read, srdoc_document_class, srdoc_sop_class, srdoc_evidence_headers, srdoc_synthetic_evidence, srdoc_set_study, \
 	srdoc_predecessor_items, srdoc_predecessors, SRPredecessor, SRParsedDocument, DCMSR_WRITER_CLASSES
 from ....dcmcompat import require_oaktree_highdicom
 
@@ -144,9 +141,8 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 			from a document (`from_sr`); None for a model built in Python
 		@attr template_id, mapping_resource (str): root template of the document the model writes:
 			the parsed document's on a re-save, the class default otherwise
-		@attr dcmsr_document_template (highdicom SR class): document class written. On a re-save the
-			parsed document's class, with Comprehensive SR mapped to Comprehensive 3D SR
-			(`DCMSR_WRITER_CLASSES`)
+		@attr dcmsr_document_template (highdicom SR class): document class written: Comprehensive 3D SR,
+			on a re-save of any parent class as well (`DCMSR_WRITER_CLASSES`)
 		@attr person_observer (str or None): Person Observer Name written at the root: the parsed
 			document's name on a re-save, the caller's otherwise
 		@attr extra_items (tuple of pydicom.Dataset): root-level content items preserved from the parsed
@@ -318,7 +314,8 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 	def create_sr(self):
 		'''	Create an SR document from the data associated with the model using the document template
 
-			@returns highdicom SR document (EnhancedSR, ComprehensiveSR or Comprehensive3DSR instance)
+			@returns highdicom SR document (the class of the report model; Comprehensive3DSR for the
+				Sonador report models)
 		'''
 
 	@abc.abstractmethod
@@ -561,10 +558,13 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 		A new document is a Comprehensive 3D SR with the Sonador root template (`Sonador-SR.1500`,
 		mapping resource `Sonador-SR`). A model built from a document (`from_sr`) re-saves with the
-		parsed document's template and in its document class: an Enhanced SR stays Enhanced SR, in the
-		flat per-finding layout, unless its content needs Comprehensive 3D SR, in which case the
-		document is upgraded with a `warning` diagnostic; a Comprehensive SR is written as
-		Comprehensive 3D SR; a Comprehensive 3D SR stays Comprehensive 3D SR.
+		parsed document's template as Comprehensive 3D SR with the nested per-item layout, whatever
+		the parent's class: an Enhanced SR parent is upgraded with the `info` diagnostic
+		`document-class-upgraded`, a Comprehensive SR parent without one. Enhanced SR is not written.
+
+		A patient-domain measurement with a `series_uid` is written with
+		`Sonador-Measurement.Source-Series`, and the first instance of that series is recorded in the
+		evidence (`source_series_references`).
 
 		Equipment profile and Device Observer: Manufacturer `Sonador`, model name `Sonador-IO`,
 		software version the installed client version (`dev` from a source checkout), mirrored by a
@@ -735,6 +735,101 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 		measurements = [m for m in self.typed_measurements if m.geometry is not None and m.geometry.is_image]
 		return list(self.series_tag_findings) + measurements
 
+	@property
+	def _source_series_measurements(self):
+		'''	Patient-domain measurements that name their imaging series, among every measurement the
+			report writes: those of `measurements` (typed, or generic ones written to the primary group)
+			and those of every report group. These are the measurements written with
+			`Sonador-Measurement.Source-Series`.
+
+			@returns list of Measurement
+		'''
+		found = list(self.measurements or [])
+		for group in (self.groups or []):
+			found.extend(getattr(group, 'measurements', None) or [])
+		return [m for m in found if m.geometry is not None and m.geometry.is_patient and m.series_uid]
+
+	def _known_series(self):
+		'''	Imaging series the report can resolve a source series against, without a request: the
+			reference series, then the cached series collection of their study.
+
+			@returns OrderedDict: Series Instance UID -> ImagingSeries
+		'''
+		known = OrderedDict()
+		for sx in self.ref_series_list:
+			known.setdefault(sx.series_uid, sx)
+		for sx in self.ref_series_list:
+			study = sx.__dict__.get('_parent')
+			for other in ((study.__dict__.get('_series') if study is not None else None) or []):
+				if other.series_uid:
+					known.setdefault(other.series_uid, other)
+		return known
+
+	def _recorded_references(self):
+		'''	Instances the report's own evidence records, by series: the first SOP instance of each series
+			in the supplied evidence (`dcm_evidence`), in the evidence built from the reference series, or
+			in the parsed document's evidence on a re-save. A series recorded without an instance does not
+			count. Makes the requests of `_base_evidence` when it has not been built yet.
+
+			@returns OrderedDict: Series Instance UID -> ImageReference
+		'''
+		recorded = OrderedDict()
+		for ds in (self._base_evidence() or []):
+			series_uid, sop_uid = dcm_header_text(ds, DCMHEADER_SERIES_INSTANCE_UID), dcm_header_text(ds, DCMHEADER_SOP_INSTANCE_UID)
+			if series_uid and sop_uid and series_uid not in recorded:
+				recorded[series_uid] = ImageReference(dcm_header_text(ds, DCMHEADER_SOP_CLASS_UID), sop_uid, None, series_uid,
+					dcm_header_text(ds, DCMHEADER_STUDY_INSTANCE_UID))
+		return recorded
+
+	def _source_series_resolution(self):
+		'''	Resolve the source series of the patient-domain measurements (`_source_series_measurements`):
+			against the reference series and the cached series collection of their study first, whose
+			first instance (`dcm0`) is the evidence entry by the Series Tag convention, then against the
+			instances the report's own evidence records (`_recorded_references`). No request is made
+			after `bulkpopulate_related(child_instances=True)`; `series_reference` otherwise reads the
+			instance collection of a series once.
+
+			@returns tuple (OrderedDict, list)
+				- Series Instance UID -> (ImageReference, ImagingSeries or None): one evidence entry per
+					resolved series; the series is None for an entry the evidence already records
+				- (Measurement, Series Instance UID) for each source series that could not be resolved
+		'''
+		known, recorded = self._known_series(), None
+		entries, unresolved = OrderedDict(), []
+		for measurement in self._source_series_measurements:
+			uid = measurement.series_uid
+			if uid in entries:
+				continue
+			if uid in known:
+				entries[uid] = (self.series_reference(known[uid]), known[uid])
+				continue
+			if recorded is None:
+				recorded = self._recorded_references()
+			if uid in recorded:
+				entries[uid] = (recorded[uid], None)
+			else:
+				unresolved.append((measurement, uid))
+		return entries, unresolved
+
+	def source_series_references(self):
+		'''	Evidence entries of the source series of the patient-domain measurements: one SOP instance
+			per series, recorded at instance level in every document that holds one, whatever
+			`record_instances` is (see `_source_series_resolution`). Computed from the current
+			measurements on every call, so an edited `series_uid` is reflected in the next write.
+
+			A source series read from the document and unchanged is written back even when it cannot
+			be resolved; a new or changed one that cannot be resolved is refused.
+
+			@returns list of ImageReference: one per resolved source series, in order of first use
+			@raises ValueError for a new or changed `series_uid` the report cannot resolve
+		'''
+		entries, unresolved = self._source_series_resolution()
+		for measurement, uid in unresolved:
+			if uid != measurement.parsed_series_uid:
+				raise ValueError('Measurement %s names source series %s, which the report cannot resolve: it is neither a reference '
+					'series, nor a cached series of their study, nor recorded in the evidence' % (measurement.tracking_uid, uid))
+		return [reference for reference, _ in entries.values()]
+
 	def _imaging_measurement_groups(self, **kwargs):
 		'''	Measurement groups of the report, in writing order. The measurements without a group identity
 			and the findings of `findings` that are not Series Tags form the "primary" group, placed
@@ -843,18 +938,20 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			`warning` `empty-report-content` is recorded on `diagnostics`, so that a caller for whom an
 			empty content tree is a mistake can refuse it with `strict=True`.
 
-			@input layout (str, default=`DCMSR_LAYOUT_NESTED`): per-finding property layout the document
-				class permits (`DCMSR_LAYOUT_FLAT` for Enhanced SR)
+			@input layout (str, default=`DCMSR_LAYOUT_NESTED`): per-item property layout, the only one written
 			@input person_observer (str, default=self.person_observer): Person Observer Name
 			@input device_observer_uid (str, default=new UID): Device Observer UID
 			@input strict (bool, default=False): raise SRDiagnosticError on the `empty-report-content`
-				warning instead of writing the report
+				warning, and on a measurement View value outside the registry, instead of writing the
+				report
 			@input kwargs: report template arguments (a `report_` prefix is stripped), observation context
 				arguments (`observation_context_*`) and primary group options (`primary_group_*`)
 
 			@returns highdicom.sr.templates.Template: the report content, a sequence holding the root
 				CONTAINER item
-			@raises SRDiagnosticError under `strict` for a report without content
+			@raises SRDiagnosticError under `strict` for a report without content or an unregistered View
+				value
+			@raises ValueError for a drawing plane that fails validation
 		'''
 		layout = layout or DCMSR_LAYOUT_NESTED
 
@@ -877,7 +974,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 		report = self.dcmsr_report_template(
 			title=self.report_title, procedure_reported=self.report_procedure,
 			observation_context=observation_context,
-			imaging_measurements=[g.create_sr(layout=layout, diagnostics=self.diagnostics) for g in imaging_groups],
+			imaging_measurements=[g.create_sr(layout=layout, diagnostics=self.diagnostics, strict=strict) for g in imaging_groups],
 			meta_groups=[g.sr for g in meta_groups],
 			volume_measurements=[g.sr for g in volume_groups],
 			**omit(kwargs, tuple(k for k in kwargs.keys() if 'observation_context' in k or 'primary_group' in k)))
@@ -893,23 +990,6 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			root.ContentSequence.append(item)
 
 		return report
-
-	@staticmethod
-	def _requires_comprehensive(item, parent=None):
-		'''	Whether a content tree holds an SCOORD3D item, or a CONTAINER under a CODE or NUM item,
-			neither of which an Enhanced SR document can hold (PS3.3 Table A.35.2-2).
-
-			@input item (content item): root of the tree checked
-			@input parent (content item, default=None): parent of `item`
-
-			@returns bool
-		'''
-		value_type = item.get('ValueType')
-		if value_type == 'SCOORD3D':
-			return True
-		if value_type == 'CONTAINER' and parent is not None and parent.get('ValueType') in ('CODE', 'NUM'):
-			return True
-		return any(SonadorComprehensiveSR3D._requires_comprehensive(child, item) for child in (item.get('ContentSequence') or []))
 
 	# ---- evidence ----
 
@@ -997,18 +1077,16 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 					headers[name] = value
 		return headers, study.study_uid
 
-	@property
-	def evidence(self):
-		'''	Evidence datasets highdicom records in the document (Current Requested Procedure Evidence
-			Sequence for the document's study, Pertinent Other Evidence Sequence for other studies).
-			Built on first access and cached.
+	def _base_evidence(self):
+		'''	Evidence datasets of the report before the source-series entries, built on first access and
+			cached (`_evidence`; evidence supplied with `dcm_evidence` is used as given).
 
 			For reference series of an imaging server with `record_instances=True`: the instance files
 			of every reference series, downloaded (one `file` request per instance). With
 			`record_instances=False`, the exchange profile: datasets synthesised from the cached patient,
 			study, series and instance JSON for the first instance of each reference series and the
-			instances the Series Tags and image-domain measurements reference. That costs no request when the cached instance JSON
-			carries the SOP Class and SOP Instance UIDs (a study populated with
+			instances the Series Tags and image-domain measurements reference. That costs no request when
+			the cached instance JSON carries the SOP Class and SOP Instance UIDs (a study populated with
 			`bulkpopulate_related(child_instances=True)` on the development Orthanc build); an instance
 			whose cached tags lack them is fetched once (`dcmfile(cache=True)`).
 
@@ -1053,6 +1131,33 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 		return getattr(self, '_evidence', None)
 
+	@property
+	def evidence(self):
+		'''	Evidence datasets highdicom records in the document (Current Requested Procedure Evidence
+			Sequence for the document's study, Pertinent Other Evidence Sequence for other studies): the
+			cached evidence of `_base_evidence`, plus one dataset per source series of the current
+			patient-domain measurements that it does not already record (`_source_series_resolution`),
+			synthesised from the cached JSON of that series' study. The source-series part is computed on
+			every access, so a measurement added or a `series_uid` changed after an earlier access or
+			write is reflected; the cached part is not rebuilt.
+
+			@returns list of pydicom.Dataset, or None for a model with neither reference series, supplied
+				evidence nor a parsed document
+		'''
+		base = self._base_evidence()
+		if base is None:
+			return None
+		recorded = set(dcm_header_text(ds, DCMHEADER_SOP_INSTANCE_UID) for ds in base)
+		extra = []
+		entries, _ = self._source_series_resolution()
+		for reference, series in entries.values():
+			if series is None or reference.sop_instance_uid in recorded:
+				continue
+			headers, study_uid = self._evidence_headers_from_series(series)
+			extra.extend(srdoc_synthetic_evidence(headers, study_uid, [reference]))
+			recorded.add(reference.sop_instance_uid)
+		return list(base) + extra
+
 	# ---- document ----
 
 	def create_sr(self, dcmsr_series_uid=None, dcmsr_instance_uid=None,
@@ -1075,14 +1180,15 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 				True, False, False): Completion, Preliminary and Verification flags; a verified parsed
 				document carries its first verifying observer through
 			@input series_headers_kwargs (dict, default=None): arguments of `dcmsr_series_headers`
-			@input record_instances (bool, default=self.record_instances): download every instance of the
-				reference series as evidence and record them all (one `file` request per instance). When
-				False the evidence is synthesised from the cached JSON (the first instance of each
-				reference series and the instances the Series Tags reference), which costs no request
-				when the cached instance JSON carries the SOP identifiers and one `file` request per
-				instance whose tags lack them (see `evidence`). The referenced instances are always
-				recorded in the evidence when the document holds Series Tags, because readers resolve the
-				series of a tag from them.
+			@input record_instances (bool, default=self.record_instances): record the evidence at
+				instance level. Instance-level evidence is always recorded when the document holds Series
+				Tags, image-domain measurements or a Source-Series, because readers resolve those series
+				from the recorded instances. What the evidence holds is set by the model's own
+				`record_instances` (see `evidence`): every instance of the reference series, downloaded
+				(one `file` request per instance), or, when False, datasets synthesised from the cached
+				JSON (the first instance of each reference series, the instances the Series Tags and
+				image-domain measurements reference, and the first instance of each source series), which
+				costs no request when the cached instance JSON carries the SOP identifiers.
 			@input person_observer (str, default=self.person_observer): Person Observer Name
 			@input device_observer_uid (str, default=new UID): Device Observer UID
 			@input template_id (str, default=self.template_id): root template identifier; `1500` pairs
@@ -1091,21 +1197,23 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 				dataset, a `DcmSRInstance` or a list of those; their own predecessors are carried through.
 				None writes no predecessor link.
 			@input document_template (highdicom SR class, default=self.dcmsr_document_template): document
-				class. An Enhanced SR whose content Enhanced SR cannot hold is written as Comprehensive
-				3D SR with a `warning` diagnostic (`document-class-upgraded`).
-			@input strict (bool, default=False): refuse a report without content (`create_report_sr`)
-				instead of writing it with the `empty-report-content` warning
+				class; Comprehensive 3D SR (`Comprehensive3DSR` or a subclass) is the only class written, the
+				same rule applying to a class set on the model. A re-save of an Enhanced SR parent is
+				written as Comprehensive 3D SR with the `info` diagnostic `document-class-upgraded`.
+			@input strict (bool, default=False): refuse a report without content, or a measurement View
+				value outside the registry (`create_report_sr`), instead of writing it with a `warning`
 			@input kwargs: further document class, report template, observation context and primary
 				group arguments (see `create_report_sr`)
 
-			@returns highdicom SR document (EnhancedSR or Comprehensive3DSR instance), also kept as the
-				model's last document (`sr`)
+			@returns highdicom.sr.Comprehensive3DSR, also kept as the model's last document (`sr`)
 
 			@raises SRDiagnosticError when the model holds a by-reference content item (such a document is
 				never rewritten), or under `strict` for a report without content
 			@raises ConfigurationError when no procedure reported is set
 			@raises ValueError when a Series Tag finding has no image reference and no reference series
-				to take one from, or when the model has no evidence source at all
+				to take one from, when the model has no evidence source at all, when a document class
+				other than Comprehensive 3D SR is requested, when a patient-domain measurement names a source series the report cannot
+				resolve (`source_series_references`), or for a drawing plane that fails validation
 		'''
 		if self.has_by_reference_items():
 			raise SRDiagnosticError(SRDiagnostic(SR_DIAGNOSTIC_ERROR, SR_CONDITION_BY_REFERENCE_ITEM, None, None,
@@ -1129,20 +1237,20 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 		ts = ts or datetime.datetime.utcnow()
 		parsed = self.parsed.dataset if self.parsed is not None else None
 
-		# Document class and the layout it permits; an Enhanced SR save whose content needs
-		# Comprehensive 3D SR is upgraded with a warning
+		# Document class: Comprehensive 3D SR only, with the nested layout; an Enhanced SR parent is upgraded
 		document_class = document_template or self.dcmsr_document_template or Comprehensive3DSR
-		layout = DCMSR_LAYOUT_FLAT if document_class is EnhancedSR else DCMSR_LAYOUT_NESTED
+		if not (isinstance(document_class, type) and issubclass(document_class, Comprehensive3DSR)):
+			raise ValueError('Documents are written as Comprehensive 3D SR only; %s is read and not written'
+				% getattr(document_class, '__name__', document_class))
+		if parsed is not None and srdoc_sop_class(parsed) == DCMSR_SOP_CLASS_ENHANCED:
+			sr_diagnostic(self.diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_DOCUMENT_CLASS_UPGRADED,
+				'Enhanced SR parent written as Comprehensive 3D SR', value=EnhancedSR.__name__)
+
+		# Source series resolved before the content is built, so that an unresolvable one writes nothing
+		source_references = self.source_series_references()
 		report_kwargs = pick(kwargs, tuple(k for k in kwargs.keys() if 'report' in k or 'observation_context' in k or 'primary_group' in k))
-		content = self.create_report_sr(layout=layout, person_observer=person_observer,
+		content = self.create_report_sr(layout=DCMSR_LAYOUT_NESTED, person_observer=person_observer,
 			device_observer_uid=device_observer_uid, strict=strict, **report_kwargs)
-		if document_class is EnhancedSR and self._requires_comprehensive(content[0]):
-			sr_diagnostic(self.diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_DOCUMENT_CLASS_UPGRADED,
-				'the content holds items an Enhanced SR document cannot carry; written as Comprehensive 3D SR',
-				value=EnhancedSR.__name__)
-			document_class = Comprehensive3DSR
-			content = self.create_report_sr(layout=DCMSR_LAYOUT_NESTED, person_observer=person_observer,
-				device_observer_uid=device_observer_uid, **report_kwargs)
 
 		# Flags: the parsed document's, unless given
 		if is_complete is None:
@@ -1183,7 +1291,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			series_instance_uid=series_uid, sop_instance_uid=dcmsr_instance_uid or generate_uid(),
 			series_number=dcmsr_series_number, instance_number=dcmsr_instance_number,
 			manufacturer=self.dcmsr_document_manufacturer, is_complete=is_complete, is_final=is_final, is_verified=is_verified,
-			record_instances=record_instances or bool(self._image_referencing_items), **verifying,
+			record_instances=record_instances or bool(self._image_referencing_items) or bool(source_references), **verifying,
 			**omit(kwargs, tuple(k for k in kwargs.keys() if 'report' in k or 'observation_context' in k or 'primary_group' in k)))
 
 		# The image references are written without a concept name, as the Viewer does (the placeholder

@@ -210,6 +210,10 @@ SR_CONDITION_DEGENERATE_GEOMETRY = 'degenerate-geometry'
 SR_CONDITION_INVALID_GEOMETRY = 'invalid-measurement-geometry'
 SR_CONDITION_SCOORD3D_WITHOUT_FRAME = 'scoord3d-without-frame-of-reference'
 SR_CONDITION_ANGLE_MIDDLE_POINTS_DIFFER = 'angle-middle-points-differ'
+SR_CONDITION_UNREGISTERED_VIEW = 'unregistered-view-value'
+SR_CONDITION_INVALID_DRAWING_PLANE = 'invalid-drawing-plane'
+SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN = 'patient-provenance-on-image-domain'
+SR_CONDITION_UNKNOWN_SOURCE_SERIES = 'unknown-source-series'
 
 
 class SRDiagnostic(namedtuple('SRDiagnostic', ('severity', 'condition', 'path', 'value', 'message'))):
@@ -713,7 +717,8 @@ def srencode_coord3d(
 SONADOR_LENGTH = dcmcodes.SCT.Length
 
 
-def srencode_measurement(measurement:Measurement, name_default=SONADOR_LENGTH, sr_template=DcmMeasurement, layout=None, diagnostics=None, **kwargs):
+def srencode_measurement(measurement:Measurement, name_default=SONADOR_LENGTH, sr_template=DcmMeasurement, layout=None, diagnostics=None,
+		strict=False, **kwargs):
 	'''	DICOM-SR encode the provided measurement: a TID 300 NUM item with its coordinates and per-item
 		properties (`sonador.apisettings.sr.measurements`), followed by the other NUM items of its group.
 		A measurement holding only a value and a unit writes a bare NUM item. Other write options of the
@@ -722,13 +727,16 @@ def srencode_measurement(measurement:Measurement, name_default=SONADOR_LENGTH, s
 		@input measurement (Measurement)
 		@input name_default (Code, default=SCT Length): concept name when the measurement names none
 		@input sr_template (class, default=highdicom Measurement): template class instantiated
-		@input layout (str, default=nested): layout of the per-item properties (`DCMSR_LAYOUT_NESTED` or
-			`DCMSR_LAYOUT_FLAT`)
+		@input layout (str, default=nested): layout of the per-item properties; `DCMSR_LAYOUT_NESTED` is the
+			only layout written
 		@input diagnostics (list, default=None): list the write diagnostics are appended to
+		@input strict (bool, default=False): refuse a View value outside the registry instead of writing
+			it with a `warning`
 
 		@returns highdicom.sr.Measurement: the NUM item, then any further NUM items of the group
-		@raises ValueError for a missing or invalid concept name
-		@raises SRDiagnosticError for degenerate geometry, or a value that cannot be computed
+		@raises ValueError for a missing or invalid concept name, or a drawing plane that fails validation
+		@raises SRDiagnosticError for degenerate geometry, a value that cannot be computed, or under
+			`strict` an unregistered View value
 	'''
 	from .measurements import srencode_measurement_coordinates, srencode_measurement_children, srencode_measurement_values
 	mname = measurement.name or name_default
@@ -748,7 +756,7 @@ def srencode_measurement(measurement:Measurement, name_default=SONADOR_LENGTH, s
 	item = encoded[0]
 	if measurement.keeps_stored_value and measurement.stored_value_item is not None:
 		item.MeasuredValueSequence = DcmSequence([copy.deepcopy(measurement.stored_value_item)])
-	children = srencode_measurement_children(measurement, layout=layout)
+	children = srencode_measurement_children(measurement, layout=layout, diagnostics=diagnostics, strict=strict)
 	if children:
 		if not hasattr(item, 'ContentSequence'):
 			item.ContentSequence = ContentSequence()
@@ -762,12 +770,12 @@ def srencode_measurement(measurement:Measurement, name_default=SONADOR_LENGTH, s
 def srencode_finding(finding:Finding, sr_template=DcmQualitativeEvaluation, layout=None, **kwargs):
 	'''	DICOM-SR encode the provided finding: a CODE content item (TID 1501 "Finding" for Series Tags)
 		with the per-finding children of the Sonador-SR 0.3 profile (image reference, extended meta,
-		display attributes, preserved extra items) in the layout of the document class being written.
+		display attributes, preserved extra items) in the nested layout.
 
 		@input finding (Finding)
 		@input sr_template (class, default=QualitativeEvaluation): template class instantiated
-		@input layout (str, default=nested): `sonador.apisettings.sr.seriestag.DCMSR_LAYOUT_NESTED` or
-			`DCMSR_LAYOUT_FLAT`
+		@input layout (str, default=nested): `sonador.apisettings.sr.seriestag.DCMSR_LAYOUT_NESTED`, the only
+			layout written
 
 		@returns highdicom.sr.QualitativeEvaluation: a one-item content sequence
 	'''
@@ -799,7 +807,8 @@ DCMSR_REPORT_VOLUME_MEAUREMENTS = DcmCode('%s.Volume-Measurements' % DCMSR_SONAD
 
 def srencode_report_group(tracking_id:Union[TrackingIdentifier,str], 
 		measurements:MeasurementCollection=None, findings:FindingCollection=None,
-		sr_template=MeasurementsAndQualitativeEvaluations, tracking_uid=None, extra_items=None, layout=None, diagnostics=None, **kwargs):
+		sr_template=MeasurementsAndQualitativeEvaluations, tracking_uid=None, extra_items=None, layout=None, diagnostics=None,
+		strict=False, **kwargs):
 	'''	DICOM-SR encode the collection of measurements and findings using the provided template
 	
 		@input tracking_id (str or highdicom.sr.TrackingIdentifier): tracking identifier
@@ -814,6 +823,7 @@ def srencode_report_group(tracking_id:Union[TrackingIdentifier,str],
 			group, re-emitted after the template-owned items
 		@input layout (str, default=None): layout of the per-finding properties (see `srencode_finding`)
 		@input diagnostics (list, default=None): list the measurement write diagnostics are appended to
+		@input strict (bool, default=False): refuse a measurement View value outside the registry
 
 		@returns highdicom.sr.templates.MeasurementsAndQualitativeEvaluations (an instance of `sr_template`)
 	'''
@@ -822,7 +832,7 @@ def srencode_report_group(tracking_id:Union[TrackingIdentifier,str],
 		tracking_id = TrackingIdentifier(uid=tracking_uid, identifier=tracking_id)
 
 	group = sr_template(tracking_identifier=tracking_id, 
-		measurements=[m.create_sr(layout=layout, diagnostics=diagnostics) for m in measurements] if measurements else measurements, 
+		measurements=[m.create_sr(layout=layout, diagnostics=diagnostics, strict=strict) for m in measurements] if measurements else measurements, 
 		qualitative_evaluations=[f.create_sr(layout=layout) for f in findings] if findings else findings, **kwargs)
 
 	# Preserved items are re-emitted under the group, after the template-owned items
