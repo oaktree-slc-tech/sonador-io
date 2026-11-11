@@ -38,9 +38,10 @@
 	`ImagingStudy.findings` returns `{series_uid: {measurement_type: FindingCollection}}` for the
 	whole study and `ImagingSeries.findings` the `{measurement_type: FindingCollection}` of one series;
 	`measurements` has the same shape with `MeasurementCollection`. A patient-domain measurement has
-	no image reference: it is keyed by the document's own series and is also reachable with
-	`measurements(frame_of_reference_uid=...)`, which the series and study accessors resolve from
-	what is cached, without a request. Request budget of the default current-document retrieval: after
+	no image reference: it is keyed by its source series (`Sonador-Measurement.Source-Series`) when
+	it names one the study holds, else by the document's own series, and in both cases is also
+	reachable with `measurements(frame_of_reference_uid=...)`, which the series and study accessors
+	resolve from what is cached, without a request. Request budget of the default current-document retrieval: after
 	`bulkpopulate_related(child_instances=True)` on the study collection, the first `findings` or
 	`measurements` access costs one `file` GET per SR series and later accesses none, since the
 	instance JSON, the files and the parsed reports are cached and shared by both. Without the child
@@ -64,7 +65,8 @@ from ...apisettings import IMAGING_SERVER_RESOURCE_REPORT, DCMHEADER_SERIES_INST
 	DicomDatetimePair, DCMTS_CONTENT, FindingCollection, MeasurementCollection, DCMHEADER_FRAME_OF_REFERENCE_UID, \
 	SONADOR_MEASUREMENT_TYPE_GENERIC
 from ...apisettings.sr import sr_diagnostic, SR_DIAGNOSTIC_INFO, SR_DIAGNOSTIC_WARNING, \
-	SR_CONDITION_PREDECESSOR_CHAIN_UNVERIFIED, SR_CONDITION_UID_ORDER_TIE_BREAK, SR_CONDITION_SHARED_TRACKING_UID
+	SR_CONDITION_PREDECESSOR_CHAIN_UNVERIFIED, SR_CONDITION_UID_ORDER_TIE_BREAK, SR_CONDITION_SHARED_TRACKING_UID, \
+	SR_CONDITION_UNKNOWN_SOURCE_SERIES
 from ..helpers.headers import dcm_header_value, dcm_header_uid
 from .base import ImagingSeriesCoreResource, ImagingSeriesDcm0Mixin, ImagingSeriesCollection, ImagingServerChildCollection, \
 	DcmInstanceCoreResource, DcmInstanceCoreCollection, ImagingSeriesBulkPopulateMixin
@@ -641,25 +643,34 @@ class DcmSRInstance(DcmStructuredInstance):
 			logger.error('Invalid instance creation timestamp. Error: "%s"' % err)
 			return None
 
+	def _study_series(self):
+		'''	Cached imaging series collection of the study the document belongs to. Makes no request.
+
+			@returns the series collection, or None when it is not cached
+		'''
+		series = self.__dict__.get('_parent')
+		study = series.__dict__.get('_parent') if series is not None else None
+		return study.__dict__.get('_series') if study is not None else None
+
 	def _link_annotation(self, annotation):
 		'''	Attach the model objects a finding or measurement describes: this SR instance
 			(`sr_instance`), the imaging series of the parent study whose UID it references (`series`)
 			and, from the cached instances of that series, the referenced instance (`instance`). A
-			patient-domain measurement without a series UID links to the one cached imaging series in
-			its Frame of Reference, when there is exactly one. Only cached collections are read; no
-			request is made, and a level that is not cached leaves its attribute unset.
+			patient-domain measurement without a series UID, or naming a source series the study does
+			not hold, links to the one cached imaging series in its Frame of Reference, when there is
+			exactly one. Only cached collections are read; no request is made, and a level that is not
+			cached leaves its attribute unset.
 
 			@input annotation (Finding or Measurement): the item to link, modified in place
 		'''
 		annotation.sr_instance = self
-		series = self.__dict__.get('_parent')
-		study = series.__dict__.get('_parent') if series is not None else None
-		series_collection = study.__dict__.get('_series') if study is not None else None
+		series_collection = self._study_series()
 		if series_collection is None:
 			return
+		matches = []
 		if annotation.series_uid:
 			matches = [sx for sx in series_collection if sx.series_uid == annotation.series_uid]
-		else:
+		if not matches:
 			frame_uid = getattr(annotation, 'frame_of_reference_uid', None)
 			matches = [sx for sx in series_collection if frame_uid and dcmsr_series_frame_uid(sx) == frame_uid]
 			if len(matches) != 1:
@@ -707,17 +718,31 @@ class DcmSRInstance(DcmStructuredInstance):
 		'''	Quantitative measurements of the document, parsed with `report` (one `file` request on first
 			access, shared with `findings`, and none after that): the measurements of every group of the
 			report, each linked to its models (`_link_annotation`) and keyed by the imaging series its
-			image reference resolves to. A measurement without one, such as a patient-domain
-			measurement, is keyed by the identifier of the document's own series. A NUM group with an
-			unknown tracking identifier is listed under `SONADOR_MEASUREMENT_TYPE_GENERIC`.
+			image reference resolves to. A patient-domain measurement is keyed by its source series
+			(`Sonador-Measurement.Source-Series`); without one, by the identifier of the document's own
+			series. A source series the study does not hold, when the study's series collection is
+			cached, keys the measurement by the document's series with the `warning`
+			`unknown-source-series`, recorded once on the report's diagnostics (`diagnostics`) and never
+			raised. A NUM group with an unknown tracking identifier is listed under
+			`SONADOR_MEASUREMENT_TYPE_GENERIC`.
 
 			@returns dict keyed to imaging-series UID: `{series_uid: {measurement_type: MeasurementCollection}}`
 		'''
 		results = OrderedDict()
+		series_collection = self._study_series()
+		held = set(sx.series_uid for sx in series_collection) if series_collection is not None else None
 		for group in (self.report.groups or []):
 			for measurement in (getattr(group, 'measurements', None) or []):
 				self._link_annotation(measurement)
 				series_uid = measurement.series_uid or self.series
+				patient = measurement.geometry is not None and measurement.geometry.is_patient
+				if patient and measurement.series_uid and held is not None and measurement.series_uid not in held:
+					series_uid = self.series
+					if not any(d.condition == SR_CONDITION_UNKNOWN_SOURCE_SERIES and d.value == measurement.series_uid
+							and d.path == 'group %s' % measurement.tracking_uid for d in self.report.diagnostics):
+						sr_diagnostic(self.report.diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_UNKNOWN_SOURCE_SERIES,
+							'source series is not a series of the study; keyed by the series of the document',
+							path='group %s' % measurement.tracking_uid, value=measurement.series_uid)
 				bucket = results.setdefault(series_uid, OrderedDict()).setdefault(measurement.type or SONADOR_MEASUREMENT_TYPE_GENERIC, [])
 				bucket.append(measurement)
 		return OrderedDict((uid, OrderedDict((mtype, MeasurementCollection(items)) for mtype, items in by_type.items()))

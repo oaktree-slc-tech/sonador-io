@@ -65,9 +65,8 @@ model = SonadorImagingMeasurementReport(sonador_ref_series=series, findings=[Fin
 	report_procedure=procedure, person_observer='Family^Given', record_instances=False)
 document = model.create_sr()                     # evidence synthesised from the cached JSON
 
-# Re-save: same template, predecessor linked; Enhanced SR parent -> Enhanced SR (flat layout; upgraded
-# to Comprehensive 3D SR with a warning when the content needs it), Comprehensive SR parent ->
-# Comprehensive 3D SR, Comprehensive 3D SR parent -> Comprehensive 3D SR
+# Re-save: same template, predecessor linked, always written as Comprehensive 3D SR with the nested
+# layout; an Enhanced SR parent is upgraded with an `info` diagnostic (`document-class-upgraded`)
 report.create_sr()
 ```
 
@@ -103,8 +102,11 @@ each, in the patient domain (millimetres, in the imaging series' Frame of Refere
 from sonador.apisettings.base import LengthMeasurement, CobbAngleMeasurement, ImageReference
 from sonador.apisettings.sr.measurements import image_frame_geometry
 
-# A new measurement computes its value when it is written
-length = LengthMeasurement([(0, 0, 0), (3, 4, 0)], frame_of_reference_uid=frame_uid, description='...', views=['coronal'])
+# A new measurement computes its value when it is written. A patient-domain measurement can record the
+# imaging series it was made on (`series_uid`) and the orientation of the view it was drawn in
+# (`drawing_plane`: width direction, then height direction, in patient coordinates)
+length = LengthMeasurement([(0, 0, 0), (0, 3, -4)], frame_of_reference_uid=frame_uid, description='...',
+	views=['sagittal'], series_uid=series.series_uid, drawing_plane=((0, 1, 0), (0, 0, -1)))
 cobb = CobbAngleMeasurement(line1, line2, frame_of_reference_uid=frame_uid)
 
 # Image domain: (column, row) points, with the calibration of the referenced frame
@@ -120,10 +122,29 @@ study.measurements(frame_of_reference_uid=frame_uid)  # the same mapping, narrow
 series.measurements('length', frame_of_reference_uid=frame_uid)   # also finds patient-domain measurements
 ```
 
-An image-domain measurement is keyed by the series of its image. A patient-domain measurement has no
-image reference and is keyed by the series of the SR document, so from an imaging series it is reached by
-Frame of Reference. Loading a report costs one `file` request per SR series on first access, shared with
-`findings`; narrowing what is already loaded adds none.
+View values are registered in `sonador.apisettings.sr.measurements` (`SONADOR_MEASUREMENT_VIEWS`: `axial`,
+`sagittal`, `coronal`, `oblique`, `3d`, each with a meaning and a code in `DCMSR_MEASUREMENT_VIEW_CODES`). A
+value outside the registry is written as given with a `warning`, and refused with `strict=True`; values read
+from a document are kept as they are. View and drawing plane are independent: neither is derived from the
+other.
+
+For a patient-domain measurement, `series_uid` is written as `Sonador-Measurement.Source-Series` and the
+first instance of that series is recorded in the evidence. The series must be one the report can resolve
+without a request (a reference series, a cached series of their study, or a series the evidence records);
+any other is refused. `drawing_plane` is written as `Sonador-Measurement.Drawing-Plane` (six decimals,
+`0,1,0,0,0,-1` for a sagittal view) and is checked first: unit directions, perpendicular, every point within
+1 mm of the plane through the first point; a failure is refused with an error naming the check. Neither
+property is written for image-domain geometry. A drawing plane read from a document is written back as
+read; one that is malformed reads as `None` with a `warning` and is still written back unchanged.
+
+An image-domain measurement is keyed by the series of its image. A patient-domain measurement is keyed by
+its source series when it names one the study holds, otherwise by the series of the SR document (with a
+`warning` when the source series is not in the study); from an imaging series every patient-domain
+measurement is also reached by Frame of Reference. Loading a report costs one `file` request per SR series
+on first access, shared with `findings`; narrowing what is already loaded adds none.
+
+Every document is written as Comprehensive 3D SR. Lengths are written with the SCT concept
+`(410668003, SCT, "Length")`, and the SRT form is read as well.
 
 The stored value of a document is authoritative. A re-save keeps the stored value of a measurement whose
 points and referenced image are unchanged; the properties are written in the current layout, so legacy

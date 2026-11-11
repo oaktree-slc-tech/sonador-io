@@ -3,9 +3,18 @@
 	domain, property layouts and preservation, mixed documents, and the retrieval budget against a
 	mocked imaging server.
 
+	Also the patient-domain provenance (`Sonador-Measurement.Source-Series`, `.Drawing-Plane`), the
+	View value registry, the SCT concept codes and the document class written.
+
 	Fixtures (`ftests/test_sr/fixtures`, synthetic study, regenerated with `UPDATE_SR_FIXTURES=1`):
-	`sonador-io.length.2026-1108.dcm` (patient domain), `sonador-io.length-image.2026-1108.dcm`
-	(image domain), `sonador-io.angle.2026-1108.dcm` and `sonador-io.cobb-angle.2026-1108.dcm`.
+	`sonador-io.length.2026-1111.dcm`, `sonador-io.angle.2026-1111.dcm` and
+	`sonador-io.cobb-angle.2026-1111.dcm` (patient domain, drawn in the plane x = 0 with a sagittal
+	Drawing-Plane, Source-Series and View), `sonador-io.length-image.2026-1111.dcm` (image domain),
+	`sonador-io.length-oblique.2026-1111.dcm` (patient domain, oblique Drawing-Plane and View) and
+	`sonador-io.two-series.2026-1111.dcm` (patient-domain measurements from two series sharing one
+	Frame of Reference). `sonador-viewer.out-of-plane.2026-1110.dcm` is the Viewer's out-of-plane report
+	(oak-tree/medical-imaging/ohif-viewers!122): Length, Angle and Cobb angle drawn in a sagittal view and a
+	Length on an oblique plane, with Source-Series, View and Drawing-Plane, on the Viewer's synthetic CT.
 	`sonador-viewer.length-image.2026-1108.dcm` is written by the other side: an image-domain Length
 	produced by the Sonador Viewer's classic SR writer (oak-tree/medical-imaging/ohif-viewers `master`
 	revision 0fae4bdc, version recorded in Software Versions) from a synthetic tool state, with the
@@ -38,7 +47,12 @@ from ...apisettings.sr import dcm_code_value, SRDiagnosticError, sr_diagnostics_
 	SR_CONDITION_BY_REFERENCE_ITEM
 from ...apisettings.sr.seriestag import DCMSR_MEASUREMENT_DESCRIPTION, DCMSR_MEASUREMENT_TEXT, DCMSR_MEASUREMENT_LOCATION, DCMSR_DISPLAY_ATTRIBUTES, \
 	DCMSR_SOP_CLASS_ENHANCED, DCMSR_SOP_CLASS_COMPREHENSIVE_3D, measurement_type_for_tracking_id, tracking_id_for_measurement_type
-from ...apisettings.sr.measurements import DCMSR_MEASUREMENT_VIEW, image_frame_geometry
+from ...apisettings.sr.measurements import DCMSR_MEASUREMENT_VIEW, image_frame_geometry, SONADOR_MEASUREMENT_VIEWS, \
+	DCMSR_MEASUREMENT_VIEW_CODES, DCMSR_MEASUREMENT_SOURCE_SERIES, DCMSR_MEASUREMENT_DRAWING_PLANE, drawing_plane_to_text, \
+	drawing_plane_from_text, drawing_plane_failed_check
+from ...apisettings.sr import SR_CONDITION_UNREGISTERED_VIEW, SR_CONDITION_INVALID_DRAWING_PLANE, SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN, \
+	SR_CONDITION_UNKNOWN_SOURCE_SERIES
+from ...apisettings.base import SONADOR_SR, SONADOR_SCHEME_VERSION_03
 from ...imaging.helpers.sr import SonadorComprehensiveSR3D, SonadorImagingMeasurementReport
 from ...imaging.helpers.sr.parse import srdoc_measurement_groups, srdoc_children
 from ...imaging.orthanc import ImagingStudyCollection, ImagingSeries
@@ -49,7 +63,9 @@ from .sr_retrieval import MockPacs, CT_SERIES_UID
 
 
 __all__ = ['ViewerWrittenLengthTestCase', 'InvalidGeometryTestCase', 'SpatialEditTestCase', 'SecondaryValueEditTestCase', 'RegistryAndModelTestCase', 'FrameConversionTestCase', 'CalibrationTestCase', 'LengthRoundTripTestCase', 'AngleTestCase',
-	'PropertyLayoutTestCase', 'ValueRuleTestCase', 'DocumentTestCase', 'MeasurementRetrievalTestCase', 'MeasurementFixtureTestCase']
+	'PropertyLayoutTestCase', 'ValueRuleTestCase', 'DocumentTestCase', 'MeasurementRetrievalTestCase', 'MeasurementFixtureTestCase',
+	'ViewRegistryTestCase', 'DrawingPlaneTestCase', 'SourceSeriesTestCase', 'SourceSeriesRetrievalTestCase', 'DocumentClassTestCase',
+	'SourceSeriesEvidenceTestCase', 'SourceSeriesCachedEvidenceTestCase', 'ViewerOutOfPlaneTestCase']
 
 
 FOR_UID = '2.25.7001'
@@ -369,7 +385,7 @@ class LengthRoundTripTestCase(unittest.TestCase):
 		self.assertEqual(srdoc_children(group)[0].TextValue, LENGTH_ID)
 		self.assertEqual(srdoc_children(group)[1].UID, TRACKING)
 		num = num_of(group)
-		self.assertEqual((num.RelationshipType, num.ConceptNameCodeSequence[0].CodeValue, num.ConceptNameCodeSequence[0].CodingSchemeDesignator), ('CONTAINS', 'G-D7FE', 'SRT'))
+		self.assertEqual((num.RelationshipType, num.ConceptNameCodeSequence[0].CodeValue, num.ConceptNameCodeSequence[0].CodingSchemeDesignator), ('CONTAINS', '410668003', 'SCT'))
 		self.assertAlmostEqual(float(num.MeasuredValueSequence[0].NumericValue), 5.0)
 		self.assertEqual(num.MeasuredValueSequence[0].MeasurementUnitsCodeSequence[0].CodeValue, 'mm')
 		scoord = srdoc_children(num)[0]
@@ -438,10 +454,18 @@ class LengthRoundTripTestCase(unittest.TestCase):
 		rewritten = roundtrip(reparse(doc).create_sr())
 		self.assertEqual(srdoc_children(group_of(rewritten))[0].TextValue, LENGTH_ID_3D)
 
-	def test_sct_length_concept_accepted(self):
+	def test_srt_length_concept_read_and_kept_on_resave(self):
 		doc = written([length_patient()])
-		set_concept(doc, '410668003', 'SCT', 'Length')
-		self.assertIsInstance(measurements_of(reparse(doc))[0], LengthMeasurement)
+		set_concept(doc, 'G-D7FE', 'SRT', 'Length')
+		model = reparse(doc)
+		self.assertIsInstance(measurements_of(model)[0], LengthMeasurement)
+		num = num_of(group_of(roundtrip(model.create_sr())))
+		self.assertEqual((num.ConceptNameCodeSequence[0].CodeValue, num.ConceptNameCodeSequence[0].CodingSchemeDesignator), ('G-D7FE', 'SRT'))
+
+	def test_new_length_written_with_the_sct_concept(self):
+		for m in (length_patient(), length_image()):
+			name = num_of(group_of(written([m]))).ConceptNameCodeSequence[0]
+			self.assertEqual((name.CodeValue, name.CodingSchemeDesignator, name.CodeMeaning), ('410668003', 'SCT', 'Length'))
 
 	def test_tracking_uid_generated_when_absent(self):
 		m = LengthMeasurement([(0, 0, 0), (1, 0, 0)], frame_of_reference_uid=FOR_UID)
@@ -632,7 +656,7 @@ class PropertyLayoutTestCase(unittest.TestCase):
 		group = group_of(written([self.measurement()]))
 		self.assertEqual([c.ValueType for c in srdoc_children(group)], ['TEXT', 'UIDREF', 'NUM'])
 
-	def test_flat_layout_for_enhanced_sr(self):
+	def test_flat_layout_read_and_rewritten_nested(self):
 		doc = written([self.measurement()])
 		doc.SOPClassUID = DCMSR_SOP_CLASS_ENHANCED
 		doc.file_meta.MediaStorageSOPClassUID = DCMSR_SOP_CLASS_ENHANCED
@@ -647,11 +671,14 @@ class PropertyLayoutTestCase(unittest.TestCase):
 		model = reparse(doc)
 		self.assert_properties(measurements_of(model)[0])
 
+		# Enhanced SR is read and written back as Comprehensive 3D SR, nested, with an `info`
 		again = roundtrip(model.create_sr())
-		self.assertEqual(str(again.SOPClassUID), DCMSR_SOP_CLASS_ENHANCED)
+		self.assertEqual(str(again.SOPClassUID), DCMSR_SOP_CLASS_COMPREHENSIVE_3D)
+		self.assertEqual([d.severity for d in sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_DOCUMENT_CLASS_UPGRADED)], ['info'])
 		children = srdoc_children(num_of(group_of(again)))
-		self.assertFalse(named(children, DCMSR_DISPLAY_ATTRIBUTES.value))
-		self.assertEqual(len([c for c in children if 'ConceptNameCodeSequence' in c and dcm_code_value(c.ConceptNameCodeSequence[0]).startswith('Sonador-DisplayAttributes.Color.')]), 4)
+		self.assertEqual(len(named(children, DCMSR_DISPLAY_ATTRIBUTES.value)), 1)
+		self.assertFalse([c for c in children if 'ConceptNameCodeSequence' in c and dcm_code_value(c.ConceptNameCodeSequence[0]).startswith('Sonador-DisplayAttributes.Color.')])
+		self.assert_properties(measurements_of(reparse(again))[0])
 
 	def test_enhanced_parent_upgraded_for_patient_domain(self):
 		doc = written([self.measurement()])
@@ -1009,7 +1036,7 @@ class DocumentTestCase(unittest.TestCase):
 		group.ContentSequence = Sequence(srdoc_children(group) + [second])
 		again = group_of(roundtrip(reparse(doc).create_sr()))
 		self.assertEqual(srdoc_children(again)[0].TextValue, 'vendor:tool')
-		self.assertEqual([dcm_code_value(c.ConceptNameCodeSequence[0]) for c in srdoc_children(again) if c.get('ValueType') == 'NUM'], ['G-D7FE', 'x2'])
+		self.assertEqual([dcm_code_value(c.ConceptNameCodeSequence[0]) for c in srdoc_children(again) if c.get('ValueType') == 'NUM'], ['410668003', 'x2'])
 
 	def test_collection_and_item_readers(self):
 		group = group_of(written([length_patient(description='Leg')]))
@@ -1474,44 +1501,667 @@ class MeasurementRetrievalTestCase(unittest.TestCase):
 		self.assertAlmostEqual(float(num_of(srdoc_measurement_groups(doc)[0]).MeasuredValueSequence[0].NumericValue), math.sqrt(3), places=5)
 
 
-FIXTURE_DATE = '2026-1108'
+# Patient-domain provenance
+
+SAGITTAL = ((0.0, 1.0, 0.0), (0.0, 0.0, -1.0))
+SAGITTAL_TEXT = '0,1,0,0,0,-1'
+SECOND_SERIES_UID, SECOND_SOP_UID = '2.25.1102', '2.25.1103'
+
+# An oblique view: normal (1, 1, 1) / sqrt(3), more than 15 degrees from every patient axis
+OBLIQUE_WIDTH = tuple(np.array((1.0, -1.0, 0.0)) / math.sqrt(2.0))
+OBLIQUE_HEIGHT = tuple(np.array((1.0, 1.0, -2.0)) / math.sqrt(6.0))
+OBLIQUE_TEXT = '0.707107,-0.707107,0,0.408248,0.408248,-0.816497'
+OBLIQUE_ORIGIN = (10.0, 20.0, 30.0)
+
+
+def sagittal_length(**kwargs):
+	'''	Patient-domain Length of 5 mm in the plane x = 0
+	'''
+	kwargs.setdefault('frame_of_reference_uid', FOR_UID)
+	kwargs.setdefault('tracking_uid', TRACKING)
+	return LengthMeasurement([(0.0, 0.0, 0.0), (0.0, 3.0, -4.0)], **kwargs)
+
+
+def sagittal_angle(**kwargs):
+	'''	Patient-domain Angle of 90 degrees in the plane x = 0
+	'''
+	kwargs.setdefault('frame_of_reference_uid', FOR_UID)
+	kwargs.setdefault('tracking_uid', TRACKING)
+	return AngleMeasurement((0.0, 10.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, -10.0), **kwargs)
+
+
+def sagittal_cobb(**kwargs):
+	'''	Patient-domain Cobb angle of 135 degrees in the plane x = 0
+	'''
+	kwargs.setdefault('frame_of_reference_uid', FOR_UID)
+	kwargs.setdefault('tracking_uid', TRACKING)
+	return CobbAngleMeasurement(((0.0, 0.0, 0.0), (0.0, 10.0, 0.0)), ((0.0, 0.0, -10.0), (0.0, 10.0, -20.0)), **kwargs)
+
+
+def oblique_length(**kwargs):
+	'''	Patient-domain Length of 20 mm along the width direction of the oblique view
+	'''
+	kwargs.setdefault('frame_of_reference_uid', FOR_UID)
+	kwargs.setdefault('tracking_uid', TRACKING)
+	end = tuple(np.array(OBLIQUE_ORIGIN) + 20.0 * np.array(OBLIQUE_WIDTH))
+	return LengthMeasurement([OBLIQUE_ORIGIN, end], **kwargs)
+
+
+def two_series_evidence():
+	return [evidence_dataset(), evidence_dataset(SeriesInstanceUID=SECOND_SERIES_UID, SOPInstanceUID=SECOND_SOP_UID)]
+
+
+def provenance_written(measurements, **kwargs):
+	'''	Serialised document of a new report whose evidence records both synthetic series
+	'''
+	kwargs.setdefault('dcm_evidence', two_series_evidence())
+	return roundtrip(new_model([], measurements=list(measurements), **kwargs).create_sr(record_instances=True))
+
+
+def children_named(item, concept):
+	return named(srdoc_children(item), concept.value)
+
+
+def set_drawing_plane_text(doc, text, index=0):
+	num = num_of(group_of(doc, index))
+	item = children_named(num, DCMSR_MEASUREMENT_DRAWING_PLANE)[0]
+	item.TextValue = text
+
+
+class ViewRegistryTestCase(unittest.TestCase):
+	TABLE = (
+		('axial', 'Axial view. Cross-sections, dividing head from feet.'),
+		('sagittal', 'Sagittal view. Side-on slices, dividing left from right.'),
+		('coronal', 'Coronal view. Front-on slices, dividing front from back.'),
+		('oblique', 'Oblique view. A slice tilted away from the standard views.'),
+		('3d', '3D view. The whole volume, seen from any direction.'),
+	)
+
+	def test_registry_table(self):
+		'''	The table the Viewer mirrors: five values, their meanings, a Sonador-SR 0.3 code each
+		'''
+		self.assertEqual(SONADOR_MEASUREMENT_VIEWS, tuple(value for value, _ in self.TABLE))
+		self.assertEqual(list(DCMSR_MEASUREMENT_VIEW_CODES.keys()), list(SONADOR_MEASUREMENT_VIEWS))
+		for value, meaning in self.TABLE:
+			code = DCMSR_MEASUREMENT_VIEW_CODES[value]
+			self.assertEqual((code.value, code.scheme_designator, code.scheme_version, code.meaning), (value, SONADOR_SR, SONADOR_SCHEME_VERSION_03, meaning))
+			self.assertLessEqual(len(meaning), 64)
+
+	def test_constants(self):
+		from ...apisettings.sr import measurements as registry
+		for name in ('AXIAL', 'SAGITTAL', 'CORONAL', 'OBLIQUE', '3D'):
+			value = getattr(registry, 'SONADOR_MEASUREMENT_VIEW_%s' % name)
+			self.assertIs(getattr(registry, 'DCMSR_MEASUREMENT_VIEW_%s' % name), DCMSR_MEASUREMENT_VIEW_CODES[value])
+
+	def test_registered_values_written_as_text_without_diagnostic(self):
+		model = model_of([sagittal_length(views=['sagittal', 'oblique'])])
+		doc = roundtrip(model.create_sr(record_instances=True))
+		items = children_named(num_of(group_of(doc)), DCMSR_MEASUREMENT_VIEW)
+		self.assertEqual([(i.ValueType, i.RelationshipType, i.TextValue) for i in items], [('TEXT', 'HAS PROPERTIES', 'sagittal'), ('TEXT', 'HAS PROPERTIES', 'oblique')])
+		self.assertNotIn(SR_CONDITION_UNREGISTERED_VIEW, conditions(model.diagnostics))
+
+	def test_unregistered_value_written_with_a_warning_refused_in_strict(self):
+		model = model_of([sagittal_length(views=['Sagittal-ish'])])
+		doc = roundtrip(model.create_sr(record_instances=True))
+		self.assertEqual([i.TextValue for i in children_named(num_of(group_of(doc)), DCMSR_MEASUREMENT_VIEW)], ['Sagittal-ish'])
+		self.assertEqual([d.severity for d in sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_UNREGISTERED_VIEW)], ['warning'])
+		with self.assertRaises(SRDiagnosticError):
+			model_of([sagittal_length(views=['Sagittal-ish'])]).create_sr(record_instances=True, strict=True)
+
+	def test_unknown_value_read_verbatim_and_written_back_without_diagnostic(self):
+		doc = written([sagittal_length(views=['legacy-view'])])
+		model = reparse(doc)
+		self.assertEqual(measurements_of(model)[0].views, ('legacy-view',))
+		again = roundtrip(model.create_sr(strict=True))
+		self.assertEqual([i.TextValue for i in children_named(num_of(group_of(again)), DCMSR_MEASUREMENT_VIEW)], ['legacy-view'])
+		self.assertNotIn(SR_CONDITION_UNREGISTERED_VIEW, conditions(model.diagnostics))
+
+	def test_view_and_drawing_plane_are_independent(self):
+		'''	Neither is derived from the other: a plane without a view, a view without a plane
+		'''
+		doc = provenance_written([sagittal_length(drawing_plane=SAGITTAL, series_uid=SYNTHETIC['SeriesInstanceUID'])])
+		num = num_of(group_of(doc))
+		self.assertEqual(children_named(num, DCMSR_MEASUREMENT_VIEW), [])
+		self.assertEqual(len(children_named(num, DCMSR_MEASUREMENT_DRAWING_PLANE)), 1)
+		doc = provenance_written([sagittal_length(views=['sagittal'])])
+		self.assertEqual(children_named(num_of(group_of(doc)), DCMSR_MEASUREMENT_DRAWING_PLANE), [])
+
+
+class DrawingPlaneTestCase(unittest.TestCase):
+	def test_concepts_registered_at_0_3(self):
+		for code, value in ((DCMSR_MEASUREMENT_SOURCE_SERIES, 'Sonador-Measurement.Source-Series'),
+				(DCMSR_MEASUREMENT_DRAWING_PLANE, 'Sonador-Measurement.Drawing-Plane')):
+			self.assertEqual((code.value, code.scheme_designator, code.scheme_version), (value, SONADOR_SR, SONADOR_SCHEME_VERSION_03))
+			self.assertTrue(code.meaning)
+
+	def test_text_format(self):
+		self.assertEqual(drawing_plane_to_text(SAGITTAL), SAGITTAL_TEXT)
+		self.assertEqual(drawing_plane_to_text((OBLIQUE_WIDTH, OBLIQUE_HEIGHT)), OBLIQUE_TEXT)
+		self.assertEqual(drawing_plane_to_text(((1e-9, -1e-9, 1.0), (-0.0, 1.0, 0.0))), '0,0,1,0,1,0')
+		self.assertEqual(drawing_plane_to_text(((0.12345678, 0, 0), (0, 0, 0))), '0.123457,0,0,0,0,0')
+		self.assertNotIn('e', drawing_plane_to_text(((1e-20, 1e20, 0), (0, 0, 0))))
+
+	def test_text_read(self):
+		self.assertEqual(drawing_plane_from_text(' 0, 1 ,0,0,0 , -1 '), SAGITTAL)
+		for malformed in ('0,1,0,0,0', '0,1,0,0,0,-1,0', '0,1,0,0,0,x', '0,1,0,0,0,nan', '0,1,0,0,0,1e0', ''):
+			self.assertIsNone(drawing_plane_from_text(malformed), malformed)
+
+	def test_validation_names_the_check(self):
+		points = [(0.0, 0.0, 0.0), (0.0, 3.0, -4.0)]
+		self.assertIsNone(drawing_plane_failed_check(SAGITTAL, points))
+		self.assertEqual(drawing_plane_failed_check(((0, 2, 0), (0, 0, -1)), points), 'unit-width')
+		self.assertEqual(drawing_plane_failed_check(((0, 1, 0), (0, 0, -1.01)), points), 'unit-height')
+		self.assertEqual(drawing_plane_failed_check(((0, 1, 0), (0, 1, 0)), points), 'perpendicular')
+		self.assertEqual(drawing_plane_failed_check(SAGITTAL, [(0, 0, 0), (1.5, 3, -4)]), 'points-within-1mm')
+		self.assertIsNone(drawing_plane_failed_check(SAGITTAL, [(0, 0, 0), (0.9, 3, -4)]))
+
+	def test_model(self):
+		m = sagittal_length(drawing_plane=[0, 1, 0, 0, 0, -1])
+		self.assertEqual(m.drawing_plane, SAGITTAL)
+		self.assertIsNone(m.drawing_plane_text)
+		with self.assertRaises(ValueError):
+			length_image(drawing_plane=SAGITTAL)
+		with self.assertRaises(ValueError):
+			sagittal_length(drawing_plane=((0, 1, 0), (0, 0)))
+		with self.assertRaises(ValueError):
+			sagittal_length(drawing_plane=((0, 1, 0), (0, 0, float('nan'))))
+		with self.assertRaises(ValueError):
+			m.geometry = Geometry('image', 'POLYLINE', [(0, 0), (1, 1)], synthetic_reference())
+
+	def test_absent_reads_without_diagnostic(self):
+		model = reparse(provenance_written([sagittal_length()]))
+		self.assertIsNone(measurements_of(model)[0].drawing_plane)
+		self.assertNotIn(SR_CONDITION_INVALID_DRAWING_PLANE, conditions(model.diagnostics))
+
+	def test_valid_plane_on_a_length_in_x_0(self):
+		doc = provenance_written([sagittal_length(drawing_plane=SAGITTAL)])
+		item = children_named(num_of(group_of(doc)), DCMSR_MEASUREMENT_DRAWING_PLANE)[0]
+		self.assertEqual((item.ValueType, item.RelationshipType, item.TextValue), ('TEXT', 'HAS PROPERTIES', SAGITTAL_TEXT))
+		model = reparse(doc)
+		m = measurements_of(model)[0]
+		self.assertEqual(m.drawing_plane, ((0.0, 1.0, 0.0), (0.0, 0.0, -1.0)))
+		self.assertEqual(model.diagnostics and [d for d in model.diagnostics if d.condition == SR_CONDITION_INVALID_DRAWING_PLANE], [])
+
+	def test_malformed_values_warn_read_absent_and_written_back_as_read(self):
+		for text in ('0,1,0,0,0', '0,2,0,0,0,-1', ' 0, 2,0,0,0,-1'):
+			doc = provenance_written([sagittal_length(drawing_plane=SAGITTAL)])
+			set_drawing_plane_text(doc, text)
+			model = reparse(doc)
+			m = measurements_of(model)[0]
+			self.assertIsNone(m.drawing_plane, text)
+			warnings_ = sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_INVALID_DRAWING_PLANE)
+			self.assertEqual([(d.severity, d.value) for d in warnings_], [('warning', TRACKING)], text)
+			again = roundtrip(model.create_sr())
+			self.assertEqual([i.TextValue for i in children_named(num_of(group_of(again)), DCMSR_MEASUREMENT_DRAWING_PLANE)], [text])
+			with self.assertRaises(SRDiagnosticError):
+				reparse(doc, strict=True)
+
+	def test_plane_off_the_points_is_malformed_on_read(self):
+		doc = provenance_written([sagittal_length(drawing_plane=SAGITTAL)])
+		set_drawing_plane_text(doc, '1,0,0,0,1,0')
+		model = reparse(doc)
+		self.assertIsNone(measurements_of(model)[0].drawing_plane)
+		self.assertIn(SR_CONDITION_INVALID_DRAWING_PLANE, conditions(model.diagnostics))
+
+	def test_parsed_text_written_back_verbatim(self):
+		doc = provenance_written([sagittal_length(drawing_plane=SAGITTAL)])
+		set_drawing_plane_text(doc, ' 0.0, 1.000 ,0,0,0,-1')
+		model = reparse(doc)
+		m = measurements_of(model)[0]
+		self.assertEqual(m.drawing_plane, SAGITTAL)
+		again = roundtrip(model.create_sr())
+		self.assertEqual([i.TextValue for i in children_named(num_of(group_of(again)), DCMSR_MEASUREMENT_DRAWING_PLANE)], [' 0.0, 1.000 ,0,0,0,-1'])
+		m.drawing_plane = SAGITTAL
+		again = roundtrip(model.create_sr())
+		self.assertEqual([i.TextValue for i in children_named(num_of(group_of(again)), DCMSR_MEASUREMENT_DRAWING_PLANE)], [SAGITTAL_TEXT])
+		m.drawing_plane = None
+		again = roundtrip(model.create_sr())
+		self.assertEqual(children_named(num_of(group_of(again)), DCMSR_MEASUREMENT_DRAWING_PLANE), [])
+
+	def test_write_refuses_an_invalid_plane_naming_the_check(self):
+		for plane, check in ((((0, 2, 0), (0, 0, -1)), 'unit-width'), (((0, 1, 0), (0, 1, 0)), 'perpendicular'), (((1, 0, 0), (0, 1, 0)), 'points-within-1mm')):
+			with self.assertRaises(ValueError) as ctx:
+				provenance_written([sagittal_length(drawing_plane=plane)])
+			self.assertIn(check, str(ctx.exception))
+
+	def test_edited_points_are_checked_against_a_parsed_plane(self):
+		model = reparse(provenance_written([sagittal_length(drawing_plane=SAGITTAL)]))
+		m = measurements_of(model)[0]
+		m.p2 = (5.0, 3.0, -4.0)
+		with self.assertRaises(ValueError) as ctx:
+			model.create_sr()
+		self.assertIn('points-within-1mm', str(ctx.exception))
+		m.p2 = (0.5, 6.0, -8.0)
+		again = roundtrip(model.create_sr())
+		self.assertEqual([i.TextValue for i in children_named(num_of(group_of(again)), DCMSR_MEASUREMENT_DRAWING_PLANE)], [SAGITTAL_TEXT])
+
+	def test_collinear_angle_of_180_degrees_read_and_written_as_stored(self):
+		angle = AngleMeasurement((0.0, -10.0, 0.0), (0.0, 0.0, 0.0), (0.0, 10.0, 0.0), frame_of_reference_uid=FOR_UID, tracking_uid=TRACKING)
+		doc = provenance_written([angle])
+		model = reparse(doc)
+		m = measurements_of(model)[0]
+		self.assertAlmostEqual(m.value, 180.0, places=6)
+		self.assertIsNone(m.drawing_plane)
+		again = roundtrip(model.create_sr())
+		scoord = srdoc_children(num_of(group_of(again)))[0]
+		self.assertEqual(list(scoord.GraphicData), list(srdoc_children(num_of(group_of(doc)))[0].GraphicData))
+		self.assertEqual(num_of(group_of(again)).MeasuredValueSequence[0].NumericValue, num_of(group_of(doc)).MeasuredValueSequence[0].NumericValue)
+
+	def test_skew_cobb_angle_is_90_degrees_and_never_flattened(self):
+		cobb = CobbAngleMeasurement(((0.0, 0.0, 0.0), (10.0, 0.0, 0.0)), ((0.0, 10.0, 10.0), (0.0, 20.0, 10.0)), frame_of_reference_uid=FOR_UID, tracking_uid=TRACKING)
+		self.assertAlmostEqual(cobb.value, 90.0, places=6)
+		doc = provenance_written([cobb])
+		points = [0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0, 10.0, 0.0, 20.0, 10.0]
+		self.assertEqual(list(srdoc_children(num_of(group_of(doc)))[0].GraphicData), points)
+		# No common plane: no drawing plane holds the four points
+		for plane in (((1, 0, 0), (0, 1, 0)), ((1, 0, 0), (0, 0, 1)), ((0, 1, 0), (0, 0, 1))):
+			self.assertEqual(drawing_plane_failed_check(plane, cobb.points), 'points-within-1mm')
+		model = reparse(doc)
+		m = measurements_of(model)[0]
+		self.assertAlmostEqual(m.value, 90.0, places=6)
+		again = roundtrip(model.create_sr())
+		self.assertEqual(list(srdoc_children(num_of(group_of(again)))[0].GraphicData), points)
+
+
+class SourceSeriesTestCase(unittest.TestCase):
+	def test_written_under_the_num_with_its_evidence(self):
+		doc = provenance_written([sagittal_length(series_uid=SECOND_SERIES_UID)], dcm_evidence=two_series_evidence())
+		items = children_named(num_of(group_of(doc)), DCMSR_MEASUREMENT_SOURCE_SERIES)
+		self.assertEqual([(i.ValueType, i.RelationshipType, i.UID) for i in items], [('UIDREF', 'HAS PROPERTIES', SECOND_SERIES_UID)])
+		recorded = [(s.SeriesInstanceUID, [i.ReferencedSOPInstanceUID for i in s.ReferencedSOPSequence])
+			for study in doc.CurrentRequestedProcedureEvidenceSequence for s in study.ReferencedSeriesSequence]
+		self.assertIn((SECOND_SERIES_UID, [SECOND_SOP_UID]), recorded)
+
+	def test_read_into_series_uid_and_written_back(self):
+		model = reparse(provenance_written([sagittal_length(series_uid=SECOND_SERIES_UID)]))
+		m = measurements_of(model)[0]
+		self.assertEqual((m.series_uid, m.parsed_series_uid), (SECOND_SERIES_UID, SECOND_SERIES_UID))
+		again = roundtrip(model.create_sr())
+		self.assertEqual([i.UID for i in children_named(num_of(group_of(again)), DCMSR_MEASUREMENT_SOURCE_SERIES)], [SECOND_SERIES_UID])
+
+	def test_without_series_uid_no_property(self):
+		doc = provenance_written([sagittal_length()])
+		self.assertEqual(children_named(num_of(group_of(doc)), DCMSR_MEASUREMENT_SOURCE_SERIES), [])
+
+	def test_unresolvable_series_refused(self):
+		with self.assertRaises(ValueError) as ctx:
+			provenance_written([sagittal_length(series_uid='2.25.404')], dcm_evidence=[evidence_dataset()])
+		self.assertIn('2.25.404', str(ctx.exception))
+
+	def test_parsed_unresolvable_series_carried_new_one_refused(self):
+		doc = provenance_written([sagittal_length(series_uid=SECOND_SERIES_UID)])
+		children_named(num_of(group_of(doc)), DCMSR_MEASUREMENT_SOURCE_SERIES)[0].UID = '2.25.404'
+		model = reparse(doc)
+		again = roundtrip(model.create_sr())
+		self.assertEqual([i.UID for i in children_named(num_of(group_of(again)), DCMSR_MEASUREMENT_SOURCE_SERIES)], ['2.25.404'])
+		measurements_of(model)[0].series_uid = '2.25.405'
+		with self.assertRaises(ValueError):
+			model.create_sr()
+
+	def test_image_domain_writes_none_and_ignores_one_read(self):
+		doc = written([length_image(series_uid=SECOND_SERIES_UID)])
+		num = num_of(group_of(doc))
+		self.assertEqual(children_named(num, DCMSR_MEASUREMENT_SOURCE_SERIES), [])
+		item = Dataset()
+		item.RelationshipType, item.ValueType, item.UID = 'HAS PROPERTIES', 'UIDREF', SECOND_SERIES_UID
+		item.ConceptNameCodeSequence = Sequence([code_item(DCMSR_MEASUREMENT_SOURCE_SERIES.value, 'Sonador-SR', 'x', 'a', 'b', 'c').ConceptNameCodeSequence[0]])
+		num.ContentSequence = Sequence(srdoc_children(num) + [item])
+		model = reparse(doc)
+		m = measurements_of(model)[0]
+		self.assertEqual(m.series_uid, SYNTHETIC['SeriesInstanceUID'])
+		self.assertEqual([d.severity for d in sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN)], ['info'])
+		self.assertEqual(len(m.extra_items), 1)
+
+	def test_two_series_in_one_frame_of_reference(self):
+		doc = provenance_written([
+			sagittal_length(series_uid=SYNTHETIC['SeriesInstanceUID'], tracking_uid='2.25.9601'),
+			sagittal_cobb(series_uid=SECOND_SERIES_UID, tracking_uid='2.25.9602'),
+			sagittal_length(tracking_uid='2.25.9603'),
+		])
+		ms = measurements_of(reparse(doc))
+		self.assertEqual([(m.tracking_uid, m.series_uid, m.frame_of_reference_uid) for m in ms],
+			[('2.25.9601', SYNTHETIC['SeriesInstanceUID'], FOR_UID), ('2.25.9602', SECOND_SERIES_UID, FOR_UID), ('2.25.9603', None, FOR_UID)])
+
+
+class SourceSeriesPacs(MeasurementRetrievalPacs):
+	'''	The mocked study with a second image series in the same Frame of Reference and an SR series D
+		whose document holds patient-domain measurements from both series and one naming a series the
+		study does not hold
+	'''
+	def __init__(self, iserver):
+		super().__init__(iserver)
+		self.add('Series', 'sx-mr2', {'SeriesInstanceUID': SECOND_SERIES_UID, 'Modality': 'MR', 'SeriesNumber': '2',
+			'FrameOfReferenceUID': FOR_UID}, ParentStudy='study-1', Instances=['dcm-mr2-1'])
+		self.add('Instance', 'dcm-mr2-1', {'SOPInstanceUID': SECOND_SOP_UID, 'SOPClassUID': SYNTHETIC['SOPClassUID'], 'InstanceNumber': '1'},
+			ParentSeries='sx-mr2', IndexInSeries=1)
+		self.resources['study-1']['Series'].insert(1, 'sx-mr2')
+		doc = new_model([], measurements=[sagittal_length(series_uid=SECOND_SERIES_UID, tracking_uid='2.25.9701'),
+			sagittal_angle(series_uid=SYNTHETIC['SeriesInstanceUID'], tracking_uid='2.25.9702'),
+			sagittal_length(series_uid=SECOND_SERIES_UID, tracking_uid='2.25.9703')],
+			dcm_evidence=two_series_evidence()).create_sr(record_instances=True, dcmsr_series_uid='2.25.710', dcmsr_instance_uid='2.25.7101', previous=None)
+		children_named(num_of(group_of(doc, 2)), DCMSR_MEASUREMENT_SOURCE_SERIES)[0].UID = '2.25.404'
+		doc.ContentDate, doc.ContentTime = '20260101', '100000'
+		doc = roundtrip(doc)
+		self.add('Series', 'sx-srd', {'SeriesInstanceUID': '2.25.710', 'Modality': 'SR', 'SeriesNumber': '47'}, ParentStudy='study-1', Instances=['sr-d1'])
+		self.add('Instance', 'sr-d1', {'SOPInstanceUID': str(doc.SOPInstanceUID), 'SOPClassUID': str(doc.SOPClassUID),
+			'ContentDate': doc.ContentDate, 'ContentTime': doc.ContentTime, 'InstanceNumber': '1'}, ParentSeries='sx-srd', IndexInSeries=1)
+		self.files['sr-d1'] = tobytes(doc)
+		self.resources['study-1']['Series'].append('sx-srd')
+
+
+class SourceSeriesRetrievalTestCase(unittest.TestCase):
+	def setUp(self):
+		self.server = SonadorServer('https://sonador.invalid', apitoken='token', verify=False)
+		self.iserver = self.server.imageserver_modelinstance_from_json(dict(IMAGESERVER_JSON))
+		self.pacs = SourceSeriesPacs(self.iserver)
+		studies = self.server._init_dataclass_from_json(ImagingStudyCollection, [dict(self.pacs.resources['study-1'])], pacs=self.iserver)
+		studies.bulkpopulate_related(child_instances=True)
+		self.study = studies[0]
+
+	def series(self, pk):
+		return next(sx for sx in self.study.series_collection if sx.pk == pk)
+
+	def test_keyed_by_source_series_with_one_file_request_per_sr_series(self):
+		by_series = self.study.measurements()
+		self.assertEqual(sorted(self.pacs.file_requests()), ['sr-a2', 'sr-b1', 'sr-c1', 'sr-d1'])
+		self.assertEqual(self.pacs.count('GET'), 4)
+		self.assertEqual([m.tracking_uid for m in by_series[SECOND_SERIES_UID]['length']], ['2.25.9701'])
+		self.assertEqual([m.tracking_uid for m in by_series[CT_SERIES_UID]['angle']], ['2.25.9702'])
+		self.assertEqual(by_series[SECOND_SERIES_UID]['length'][0].series.pk, 'sx-mr2')
+		# A source series the study does not hold: the document's series, with a warning
+		self.assertEqual([m.tracking_uid for m in by_series['sx-srd']['length']], ['2.25.9703'])
+		instance = next(sx for sx in self.study.sr_collection if sx.pk == 'sx-srd').instances_collection.current_instance()
+		warnings_ = sr_diagnostics_with(instance.diagnostics, condition=SR_CONDITION_UNKNOWN_SOURCE_SERIES)
+		self.assertEqual([(d.severity, d.value) for d in warnings_], [('warning', '2.25.404')])
+		self.study.measurements()
+		self.assertEqual(len(sr_diagnostics_with(instance.diagnostics, condition=SR_CONDITION_UNKNOWN_SOURCE_SERIES)), 1)
+
+	def test_series_and_frame_of_reference_accessors(self):
+		self.study.measurements()
+		before = len(self.pacs.requests)
+		self.assertEqual([m.tracking_uid for m in self.series('sx-mr2').measurements('length')], ['2.25.9701'])
+		found = self.series('sx-mr2').measurements('length', frame_of_reference_uid=FOR_UID)
+		self.assertEqual(sorted(m.tracking_uid for m in found), sorted(['2.25.9701', '2.25.9703', TRACKING, '2.25.9301']))
+		self.assertEqual(len(self.pacs.requests), before)
+
+	def test_writer_resolves_against_the_cached_study_series_without_a_request(self):
+		ct = self.series('sx-ct')
+		before = self.pacs.count('GET')
+		report = SonadorImagingMeasurementReport(sonador_ref_series=ct, report_procedure=PROCEDURE, record_instances=False,
+			measurements=[sagittal_length(series_uid=SECOND_SERIES_UID, tracking_uid='2.25.9801')])
+		doc = roundtrip(report.create_sr())
+		self.assertEqual(self.pacs.count('GET'), before)
+		recorded = dict((s.SeriesInstanceUID, [i.ReferencedSOPInstanceUID for i in s.ReferencedSOPSequence])
+			for study in doc.CurrentRequestedProcedureEvidenceSequence for s in study.ReferencedSeriesSequence)
+		self.assertEqual(recorded[SECOND_SERIES_UID], [SECOND_SOP_UID])
+		self.assertIn(CT_SERIES_UID, recorded)
+
+		with self.assertRaises(ValueError):
+			SonadorImagingMeasurementReport(sonador_ref_series=ct, report_procedure=PROCEDURE, record_instances=False,
+				measurements=[sagittal_length(series_uid='2.25.404')]).create_sr()
+
+
+class DocumentClassTestCase(unittest.TestCase):
+	def test_only_comprehensive_3d_written(self):
+		from highdicom.sr import EnhancedSR
+		from ...imaging.helpers.sr.parse import DCMSR_WRITER_CLASSES
+		from ...apisettings.sr.seriestag import DCMSR_LAYOUTS_WRITTEN, DCMSR_LAYOUT_NESTED
+		self.assertEqual(DCMSR_LAYOUTS_WRITTEN, (DCMSR_LAYOUT_NESTED,))
+		self.assertNotIn(EnhancedSR, DCMSR_WRITER_CLASSES.values())
+		for cls in (SonadorComprehensiveSR3D, SonadorImagingMeasurementReport):
+			model = new_model([], measurements=[length_image()])
+			doc = cls(measurements=[length_image()], report_procedure=PROCEDURE, dcm_evidence=[evidence_dataset()]).create_sr(record_instances=True)
+			self.assertEqual(str(doc.SOPClassUID), DCMSR_SOP_CLASS_COMPREHENSIVE_3D)
+			with self.assertRaises(ValueError):
+				model.create_sr(document_template=EnhancedSR)
+
+	def test_comprehensive_3d_parent_has_no_upgrade_diagnostic(self):
+		model = reparse(written([length_image()]))
+		model.create_sr()
+		self.assertNotIn(SR_CONDITION_DOCUMENT_CLASS_UPGRADED, conditions(model.diagnostics))
+
+
+FIXTURE_DATE = '2026-1111'
+FIXTURE_SERIES = (SYNTHETIC['SeriesInstanceUID'], SECOND_SERIES_UID)
 
 
 def fixture_path(topic):
 	return os.path.join(FIXTURES, 'sonador-io.%s.%s.dcm' % (topic, FIXTURE_DATE))
 
 
-def fixture_measurement(topic):
-	'''	The measurement of a Python-written fixture
+def fixture_measurements(topic):
+	'''	The measurements of a Python-written fixture
 	'''
-	properties = dict(description='%s measurement' % topic, text='Synthetic', location='Synthetic location', views=['coronal'],
-		display=DisplayAttributes.from_color(COLORS), tracking_uid='2.25.8100')
-	return {'length': length_patient, 'length-image': length_image, 'angle': angle_patient, 'cobb-angle': cobb_patient}[topic](**properties)
+	def properties(view, series_uid=SYNTHETIC['SeriesInstanceUID'], plane=SAGITTAL, **kwargs):
+		values = dict(description='%s measurement' % topic, text='Synthetic', location='Synthetic location', views=[view],
+			display=DisplayAttributes.from_color(COLORS), tracking_uid='2.25.8100', series_uid=series_uid, drawing_plane=plane)
+		values.update(kwargs)
+		return values
+	if topic == 'length-image':
+		return [length_image(**properties('axial', series_uid=None, plane=None))]
+	if topic == 'length-oblique':
+		return [oblique_length(**properties('oblique', plane=(OBLIQUE_WIDTH, OBLIQUE_HEIGHT)))]
+	if topic == 'two-series':
+		return [sagittal_length(**properties('sagittal', tracking_uid='2.25.8101')),
+			sagittal_cobb(**properties('sagittal', series_uid=SECOND_SERIES_UID, tracking_uid='2.25.8102')),
+			sagittal_angle(**properties('sagittal', series_uid=SECOND_SERIES_UID, tracking_uid='2.25.8103'))]
+	return [{'length': sagittal_length, 'angle': sagittal_angle, 'cobb-angle': sagittal_cobb}[topic](**properties('sagittal'))]
 
 
 def write_measurement_fixture(topic):
-	doc = model_of([fixture_measurement(topic)]).create_sr(record_instances=True, dcmsr_series_uid='2.25.8000', dcmsr_instance_uid='2.25.8001')
+	doc = new_model([], measurements=fixture_measurements(topic), dcm_evidence=two_series_evidence() if topic == 'two-series' else [evidence_dataset()]).create_sr(
+		record_instances=True, dcmsr_series_uid='2.25.8000', dcmsr_instance_uid='2.25.8001')
 	doc.save_as(fixture_path(topic))
 
 
 class MeasurementFixtureTestCase(unittest.TestCase):
-	EXPECTED = (('length', LengthMeasurement, 'SCOORD3D', 5.0, 'mm'), ('length-image', LengthMeasurement, 'SCOORD', math.hypot(2.0, 6.0), 'mm'),
-		('angle', AngleMeasurement, 'SCOORD3D', 90.0, 'deg'), ('cobb-angle', CobbAngleMeasurement, 'SCOORD3D', 135.0, 'deg'))
+	# topic -> [(class, value type, value, unit, source series, drawing-plane text, view)]
+	EXPECTED = OrderedDict((
+		('length', [(LengthMeasurement, 'SCOORD3D', 5.0, 'mm', FIXTURE_SERIES[0], SAGITTAL_TEXT, 'sagittal')]),
+		('length-image', [(LengthMeasurement, 'SCOORD', math.hypot(2.0, 6.0), 'mm', FIXTURE_SERIES[0], None, 'axial')]),
+		('angle', [(AngleMeasurement, 'SCOORD3D', 90.0, 'deg', FIXTURE_SERIES[0], SAGITTAL_TEXT, 'sagittal')]),
+		('cobb-angle', [(CobbAngleMeasurement, 'SCOORD3D', 135.0, 'deg', FIXTURE_SERIES[0], SAGITTAL_TEXT, 'sagittal')]),
+		('length-oblique', [(LengthMeasurement, 'SCOORD3D', 20.0, 'mm', FIXTURE_SERIES[0], OBLIQUE_TEXT, 'oblique')]),
+		('two-series', [(LengthMeasurement, 'SCOORD3D', 5.0, 'mm', FIXTURE_SERIES[0], SAGITTAL_TEXT, 'sagittal'),
+			(CobbAngleMeasurement, 'SCOORD3D', 135.0, 'deg', FIXTURE_SERIES[1], SAGITTAL_TEXT, 'sagittal'),
+			(AngleMeasurement, 'SCOORD3D', 90.0, 'deg', FIXTURE_SERIES[1], SAGITTAL_TEXT, 'sagittal')]),
+	))
 
 	def test_committed_fixtures(self):
-		for topic, cls, value_type, value, unit in self.EXPECTED:
+		for topic, expected in self.EXPECTED.items():
 			if os.environ.get('UPDATE_SR_FIXTURES'):
 				write_measurement_fixture(topic)
 			doc = read(fixture_path(topic))
-			self.assertEqual((doc.PatientID, str(doc.StudyInstanceUID)), ('ANONYMOUS', '2.25.1001'))
-			model = reparse(doc, strict=False)
-			m = measurements_of(model)[0]
-			self.assertIsInstance(m, cls)
-			self.assertAlmostEqual(m.value, value, places=3)
-			self.assertEqual(m.unit.value, unit)
-			self.assertEqual(m.description, '%s measurement' % topic)
-			num = num_of(group_of(doc))
-			self.assertEqual(srdoc_children(num)[0].ValueType, value_type)
+			self.assertEqual((doc.PatientID, str(doc.StudyInstanceUID), str(doc.SOPClassUID)), ('ANONYMOUS', '2.25.1001', DCMSR_SOP_CLASS_COMPREHENSIVE_3D))
+			model = reparse(doc, strict=True)
+			ms = measurements_of(model)
+			self.assertEqual(len(ms), len(expected), topic)
+			for index, (m, (cls, value_type, value, unit, series_uid, plane_text, view)) in enumerate(zip(ms, expected)):
+				self.assertIsInstance(m, cls)
+				self.assertAlmostEqual(m.value, value, places=3)
+				self.assertEqual(m.unit.value, unit)
+				self.assertEqual(m.description, '%s measurement' % topic)
+				self.assertEqual((m.series_uid, m.drawing_plane_text, m.views), (series_uid, plane_text, (view,)), topic)
+				num = num_of(group_of(doc, index))
+				self.assertEqual(srdoc_children(num)[0].ValueType, value_type)
+				self.assertEqual((num.ConceptNameCodeSequence[0].CodeValue, num.ConceptNameCodeSequence[0].CodingSchemeDesignator),
+					('410668003', 'SCT') if cls is LengthMeasurement else ('285285000', 'SCT'))
+				if value_type == 'SCOORD3D':
+					self.assertEqual(srdoc_children(num)[0].ReferencedFrameOfReferenceUID, FOR_UID)
+			recorded = set(s.SeriesInstanceUID for study in doc.CurrentRequestedProcedureEvidenceSequence for s in study.ReferencedSeriesSequence)
+			self.assertEqual(recorded, set(e[4] for e in expected))
 			again = roundtrip(reparse(doc).create_sr())
 			self.assertEqual(str(again.SOPClassUID), DCMSR_SOP_CLASS_COMPREHENSIVE_3D)
-			self.assertEqual(measurements_of(reparse(again))[0].tracking_uid, '2.25.8100')
+			self.assertEqual([m.tracking_uid for m in measurements_of(reparse(again))], [m.tracking_uid for m in ms])
+			self.assertEqual([m.drawing_plane_text for m in measurements_of(reparse(again))], [e[5] for e in expected])
+
+
+# Evidence of the source series, the writer class, the Viewer-authored out-of-plane fixture
+
+def recorded_evidence(doc):
+	'''	`{series_uid: [SOP Instance UID, ...]}` of both evidence sequences of a document
+	'''
+	recorded = OrderedDict()
+	for name in ('CurrentRequestedProcedureEvidenceSequence', 'PertinentOtherEvidenceSequence'):
+		for study in doc.get(name) or []:
+			for series in study.ReferencedSeriesSequence:
+				recorded.setdefault(series.SeriesInstanceUID, []).extend(i.ReferencedSOPInstanceUID for i in series.get('ReferencedSOPSequence') or [])
+	return recorded
+
+
+def generic_patient_length(series_uid, **kwargs):
+	'''	Generic `Measurement` in the patient domain, written to the report's primary group
+	'''
+	return Measurement(5.0, name=codes.SCT.Length, unit=codes.UCUM.Millimeter,
+		geometry=Geometry('patient', 'POLYLINE', [(0.0, 0.0, 0.0), (0.0, 3.0, -4.0)]),
+		frame_of_reference_uid=FOR_UID, series_uid=series_uid, **kwargs)
+
+
+class SourceSeriesEvidenceTestCase(unittest.TestCase):
+	'''	Instance-level evidence for every source series, without `record_instances`
+	'''
+	def test_supplied_evidence_records_the_source_instance(self):
+		model = model_of([sagittal_length(series_uid=SYNTHETIC['SeriesInstanceUID'])])
+		self.assertEqual(model.source_series_references()[0].sop_instance_uid, SYNTHETIC['SOPInstanceUID'])
+		doc = roundtrip(model.create_sr(record_instances=False))
+		self.assertEqual(recorded_evidence(doc), {SYNTHETIC['SeriesInstanceUID']: [SYNTHETIC['SOPInstanceUID']]})
+		again = roundtrip(reparse(doc).create_sr(record_instances=False))
+		self.assertEqual(recorded_evidence(again), {SYNTHETIC['SeriesInstanceUID']: [SYNTHETIC['SOPInstanceUID']]})
+		self.assertEqual(measurements_of(reparse(again))[0].series_uid, SYNTHETIC['SeriesInstanceUID'])
+
+	def test_generic_measurement_in_the_primary_group_is_resolved(self):
+		doc = roundtrip(model_of([generic_patient_length(SECOND_SERIES_UID)], dcm_evidence=two_series_evidence()).create_sr(record_instances=False))
+		self.assertEqual(recorded_evidence(doc)[SECOND_SERIES_UID], [SECOND_SOP_UID])
+		with self.assertRaises(ValueError) as ctx:
+			model_of([generic_patient_length('2.25.404')]).create_sr()
+		self.assertIn('2.25.404', str(ctx.exception))
+
+	def test_measurement_of_an_explicit_group_is_resolved(self):
+		from ...apisettings.base import ReportGroup
+		group = ReportGroup(measurements=MeasurementCollection([generic_patient_length('2.25.404')]), tracking_id='consumer-group')
+		with self.assertRaises(ValueError):
+			model_of([], groups=[group]).create_sr()
+
+	def test_only_comprehensive_3d_classes_written(self):
+		from highdicom.sr import ComprehensiveSR, Comprehensive3DSR, EnhancedSR
+		for cls in (ComprehensiveSR, EnhancedSR):
+			with self.assertRaises(ValueError):
+				model_of([length_image()]).create_sr(document_template=cls)
+			model = model_of([length_image()])
+			model.dcmsr_document_template = cls
+			with self.assertRaises(ValueError):
+				model.create_sr()
+
+		class Extended3DSR(Comprehensive3DSR):
+			pass
+		doc = model_of([length_image()]).create_sr(document_template=Extended3DSR)
+		self.assertEqual(str(doc.SOPClassUID), DCMSR_SOP_CLASS_COMPREHENSIVE_3D)
+
+
+class SourceSeriesCachedEvidenceTestCase(unittest.TestCase):
+	'''	Source-series evidence against a cached study: reference series, changes after a first write
+	'''
+	def setUp(self):
+		SourceSeriesRetrievalTestCase.setUp(self)
+
+	def series(self, pk):
+		return next(sx for sx in self.study.series_collection if sx.pk == pk)
+
+	def report(self, *measurements):
+		return SonadorImagingMeasurementReport(sonador_ref_series=self.series('sx-ct'), report_procedure=PROCEDURE,
+			record_instances=False, measurements=list(measurements))
+
+	def test_source_equal_to_the_reference_series(self):
+		before = self.pacs.count('GET')
+		doc = roundtrip(self.report(sagittal_length(series_uid=CT_SERIES_UID)).create_sr(record_instances=False))
+		self.assertEqual(recorded_evidence(doc), {CT_SERIES_UID: [SYNTHETIC['SOPInstanceUID']]})
+		again = roundtrip(reparse(doc).create_sr(record_instances=False))
+		self.assertEqual(recorded_evidence(again), {CT_SERIES_UID: [SYNTHETIC['SOPInstanceUID']]})
+		self.assertEqual(self.pacs.count('GET'), before)
+
+	def test_changed_source_after_a_write(self):
+		m = sagittal_length(series_uid=CT_SERIES_UID)
+		report = self.report(m)
+		before = self.pacs.count('GET')
+		first = roundtrip(report.create_sr())
+		self.assertNotIn(SECOND_SERIES_UID, recorded_evidence(first))
+		m.series_uid = SECOND_SERIES_UID
+		second = roundtrip(report.create_sr())
+		self.assertEqual([i.UID for i in children_named(num_of(group_of(second)), DCMSR_MEASUREMENT_SOURCE_SERIES)], [SECOND_SERIES_UID])
+		self.assertEqual(recorded_evidence(second)[SECOND_SERIES_UID], [SECOND_SOP_UID])
+		self.assertEqual(self.pacs.count('GET'), before)
+
+	def test_measurement_added_after_the_evidence_was_read(self):
+		report = self.report(sagittal_length(series_uid=CT_SERIES_UID, tracking_uid='2.25.9811'))
+		before = self.pacs.count('GET')
+		self.assertEqual(set(ds.SeriesInstanceUID for ds in report.evidence), {CT_SERIES_UID})
+		report.measurements = list(report.measurements) + [sagittal_cobb(series_uid=SECOND_SERIES_UID, tracking_uid='2.25.9812')]
+		self.assertEqual(set(ds.SeriesInstanceUID for ds in report.evidence), {CT_SERIES_UID, SECOND_SERIES_UID})
+		doc = roundtrip(report.create_sr())
+		self.assertEqual(recorded_evidence(doc), {CT_SERIES_UID: [SYNTHETIC['SOPInstanceUID']], SECOND_SERIES_UID: [SECOND_SOP_UID]})
+		self.assertEqual(self.pacs.count('GET'), before)
+
+
+class ViewerOutOfPlaneTestCase(unittest.TestCase):
+	'''	The out-of-plane report written by the Sonador Viewer (oak-tree/medical-imaging/ohif-viewers!122):
+		Length, Angle and Cobb angle drawn in a sagittal Inspector and a Length on an oblique plane,
+		on the Viewer's synthetic CT series
+	'''
+	FIXTURE = os.path.join(FIXTURES, 'sonador-viewer.out-of-plane.2026-1110.dcm')
+	SOURCE = '2.25.316170002'
+	FRAME = '2.25.316170003'
+	# tracking UID -> (class, value, unit, view, drawing-plane text)
+	EXPECTED = OrderedDict((
+		('2.25.900000', (LengthMeasurement, 27.6586333718786, 'mm', 'sagittal', '0,1,0,0,0,-1')),
+		('2.25.900001', (LengthMeasurement, 28.7228132326901, 'mm', 'oblique', '0.707107,0,-0.707107,0,-1,0')),
+		('2.25.900002', (AngleMeasurement, 90.0, 'deg', 'sagittal', '0,1,0,0,0,-1')),
+		('2.25.900003', (CobbAngleMeasurement, 90.0, 'deg', 'sagittal', '0,1,0,0,0,-1')),
+	))
+
+	def assert_measurements(self, model):
+		ms = measurements_of(model)
+		self.assertEqual([m.tracking_uid for m in ms], list(self.EXPECTED))
+		for m in ms:
+			cls, value, unit, view, plane = self.EXPECTED[m.tracking_uid]
+			self.assertIsInstance(m, cls)
+			self.assertTrue(m.geometry.is_patient)
+			self.assertEqual((m.frame_of_reference_uid, m.series_uid, m.views, m.drawing_plane_text), (self.FRAME, self.SOURCE, (view,), plane))
+			self.assertIsNotNone(m.drawing_plane)
+			self.assertAlmostEqual(m.value, value, places=6)
+			self.assertEqual(m.unit.value, unit)
+		return ms
+
+	def test_reader(self):
+		doc = read(self.FIXTURE)
+		self.assertEqual(str(doc.SOPClassUID), DCMSR_SOP_CLASS_COMPREHENSIVE_3D)
+		model = reparse(doc, strict=True)
+		self.assert_measurements(model)
+		self.assertFalse(sr_diagnostics_with(model.diagnostics, severity=SR_DIAGNOSTIC_WARNING))
+
+	def test_unchanged_resave(self):
+		doc = read(self.FIXTURE)
+		ms = self.assert_measurements(reparse(doc))
+		again = roundtrip(reparse(doc).create_sr(record_instances=False))
+		self.assertEqual(str(again.SOPClassUID), DCMSR_SOP_CLASS_COMPREHENSIVE_3D)
+		out = self.assert_measurements(reparse(again, strict=True))
+		for source, written_ in zip(ms, out):
+			self.assertEqual(written_.points, source.points)
+		for index in range(len(self.EXPECTED)):
+			src, dst = num_of(group_of(doc, index)), num_of(group_of(again, index))
+			self.assertEqual(dst.MeasuredValueSequence[0].NumericValue, src.MeasuredValueSequence[0].NumericValue)
+			self.assertEqual(dcm_code_value(dst.ConceptNameCodeSequence[0]), dcm_code_value(src.ConceptNameCodeSequence[0]))
+		self.assertEqual(recorded_evidence(again), recorded_evidence(doc))
+		self.assertIn(str(doc.SOPInstanceUID), [p.ReferencedSOPSequence[0].ReferencedSOPInstanceUID
+			for study in again.PredecessorDocumentsSequence for p in study.ReferencedSeriesSequence])
+
+	def test_parse_edit_write_reparse(self):
+		model = reparse(read(self.FIXTURE))
+		length = measurements_of(model)[0]
+		length.p2 = (6.0, 8.0, 30.0)
+		again = reparse(roundtrip(model.create_sr()), strict=True)
+		edited = measurements_of(again)[0]
+		self.assertAlmostEqual(edited.value, math.dist((6.0, -10.0, 4.0), (6.0, 8.0, 30.0)), places=4)
+		self.assertEqual(edited.drawing_plane_text, '0,1,0,0,0,-1')
+		length.p2 = (9.0, 8.0, 30.0)
+		with self.assertRaises(ValueError):
+			model.create_sr()

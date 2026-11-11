@@ -10,7 +10,7 @@ from highdicom.sr.templates import Template, Code as DcmCode, CodedConcept as Dc
 	LanguageOfContentItemAndDescendants, AlgorithmIdentification, RealWorldValueMap, \
 	TimePointContext, _MeasurementsAndQualitativeEvaluations as DcmMeasurementAndQualitativeEvaluationsBase, \
 	MeasurementReport as SRMeasurementReport, ImageLibrary
-from highdicom.sr import EnhancedSR, Scoord3DContentItem, QualitativeEvaluation as DcmQualitativeEvaluation, \
+from highdicom.sr import Scoord3DContentItem, QualitativeEvaluation as DcmQualitativeEvaluation, \
 	Measurement as DcmMeasurement
 from highdicom.sr.enum import RelationshipTypeValues
 from highdicom.sr.value_types import ContainerContentItem, CodeContentItem, TextContentItem, NumContentItem

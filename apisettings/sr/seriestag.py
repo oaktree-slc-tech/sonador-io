@@ -10,11 +10,11 @@
 	* `HAS PROPERTIES` TEXT: the extended meta attributes (`Sonador-Measurement.Description`, `.Text`,
 		`.Location`), flat in every document class;
 	* the display colours, one TEXT item per colour role with a CIELab `L\\a\\b` value (0-65535):
-		- nested form (Comprehensive 3D SR, the default): a `HAS PROPERTIES` CONTAINER
+		- nested form (Comprehensive 3D SR, the only form written): a `HAS PROPERTIES` CONTAINER
 			`Sonador-DisplayAttributes` holding a `CONTAINS` CONTAINER `Sonador-DisplayAttributes.Color`
 			holding the role items;
-		- flat form (Enhanced SR, which permits no CONTAINER under a CODE item): the role items are
-			`HAS PROPERTIES` children of the Finding, named by their dotted concepts.
+		- flat form (Enhanced SR, which permits no CONTAINER under a CODE item; read only): the role
+			items are `HAS PROPERTIES` children of the Finding, named by their dotted concepts.
 
 	Readers accept three layouts: the nested and flat forms above and the legacy layout of the
 	pre-0.3 Viewer documents, in which the meta and display items are group-level siblings of the
@@ -201,15 +201,17 @@ DCMSR_SOP_CLASS_COMPREHENSIVE = '1.2.840.10008.5.1.4.1.1.88.33'
 DCMSR_SOP_CLASS_COMPREHENSIVE_3D = '1.2.840.10008.5.1.4.1.1.88.34'
 DCMSR_SOP_CLASSES_SUPPORTED = (DCMSR_SOP_CLASS_ENHANCED, DCMSR_SOP_CLASS_COMPREHENSIVE, DCMSR_SOP_CLASS_COMPREHENSIVE_3D)
 
-DCMSR_LAYOUT_NESTED = 'nested'		# display container under the Finding (Comprehensive / Comprehensive 3D SR)
-DCMSR_LAYOUT_FLAT = 'flat'			# dotted role items under the Finding (Enhanced SR)
+DCMSR_LAYOUT_NESTED = 'nested'		# display container under the item (Comprehensive / Comprehensive 3D SR; written)
+DCMSR_LAYOUT_FLAT = 'flat'			# dotted role items under the item (Enhanced SR; read only)
 DCMSR_LAYOUT_GROUP = 'group'		# legacy: meta and display items as group-level siblings (read only)
-DCMSR_LAYOUTS_WRITTEN = (DCMSR_LAYOUT_NESTED, DCMSR_LAYOUT_FLAT)
+
+# Documents are written as Comprehensive 3D SR with the nested layout; the others are read
+DCMSR_LAYOUTS_WRITTEN = (DCMSR_LAYOUT_NESTED,)
 
 
 def layout_for_sop_class(sop_class_uid):
-	'''	Layout of the per-finding properties written for a document class: flat for Enhanced SR,
-		nested otherwise.
+	'''	Layout of the per-item properties a document of a class carries when written by its own class:
+		flat for Enhanced SR, nested otherwise. Readers accept both; this client writes the nested one.
 
 		@input sop_class_uid (str): SOP Class UID of the document class
 		@returns str: `DCMSR_LAYOUT_FLAT` or `DCMSR_LAYOUT_NESTED`
@@ -363,31 +365,27 @@ def srencode_meta_items(finding, relationship_type=RelationshipTypeValues.HAS_PR
 
 
 def srencode_display_items(display, layout=DCMSR_LAYOUT_NESTED):
-	'''	Content items of a finding's display attributes in the requested layout: the colour role TEXT
-		items as `HAS PROPERTIES` children (flat), or one `HAS PROPERTIES` display container holding a
-		`CONTAINS` colour container holding the role items (nested). Preserved items are re-emitted
-		under the container they were read from: the colour container's (`color_extra_items`) after
-		the role items, the display container's (`extra_items`) after the colour container. In the
-		flat form there is no container, so both follow the role items under the Finding.
+	'''	Content items of a finding's or measurement's display attributes: one `HAS PROPERTIES` display
+		container holding a `CONTAINS` colour container holding the role items (the nested layout, the
+		only one written). Preserved items are re-emitted under the container they were read from: the
+		colour container's (`color_extra_items`) after the role items, the display container's
+		(`extra_items`) after the colour container. A display read in the flat layout is written in
+		this form.
 
 		@input display (DisplayAttributes, colour-role dict or None): the display attributes
-		@input layout (str, default=`DCMSR_LAYOUT_NESTED`): `DCMSR_LAYOUT_NESTED` or `DCMSR_LAYOUT_FLAT`
+		@input layout (str, default=`DCMSR_LAYOUT_NESTED`): `DCMSR_LAYOUT_NESTED`
 
 		@returns list of highdicom content items: empty for no display attributes
 		@raises ValueError for any other layout
 	'''
 	from . import srcontent_extra_items
+	if layout not in DCMSR_LAYOUTS_WRITTEN:
+		raise ValueError('Unsupported display-attribute layout: %s' % layout)
 	if not display:
 		return []
 	display = DisplayAttributes.from_color(display)
 	preserved = srcontent_extra_items(display.extra_items)
 	color_preserved = srcontent_extra_items(display.color_extra_items)
-	if layout == DCMSR_LAYOUT_FLAT:
-		return [TextContentItem(name=DCMSR_DISPLAY_COLOR_ROLES[role], value=color2dcmlab_text(rgb),
-				relationship_type=RelationshipTypeValues.HAS_PROPERTIES)
-			for role, rgb in display.color.items()] + color_preserved + preserved
-	if layout != DCMSR_LAYOUT_NESTED:
-		raise ValueError('Unsupported display-attribute layout: %s' % layout)
 
 	color_container = ContainerContentItem(name=DCMSR_DISPLAY_COLOR, relationship_type=RelationshipTypeValues.CONTAINS)
 	color_container.ContentSequence = ContentSequence([
@@ -401,11 +399,10 @@ def srencode_display_items(display, layout=DCMSR_LAYOUT_NESTED):
 
 def srencode_finding_children(finding, layout=None):
 	'''	Children of the Finding item of a Series Tag, in writing order: the image reference, the
-		extended meta items, the display attributes in the layout of the document class, then the
-		preserved extra items.
+		extended meta items, the nested display container, then the preserved extra items.
 
 		@input finding (Finding)
-		@input layout (str, default=`DCMSR_LAYOUT_NESTED`): `DCMSR_LAYOUT_NESTED` or `DCMSR_LAYOUT_FLAT`
+		@input layout (str, default=`DCMSR_LAYOUT_NESTED`): `DCMSR_LAYOUT_NESTED`, the only layout written
 
 		@returns list of highdicom content items: empty for a finding without properties
 		@raises ValueError for any other layout
