@@ -122,6 +122,28 @@ study.measurements(frame_of_reference_uid=frame_uid)  # the same mapping, narrow
 series.measurements('length', frame_of_reference_uid=frame_uid)   # also finds patient-domain measurements
 ```
 
+Circles are built from a center and radius, a center and a circumference point, or three points on the
+circumference. In the patient domain the plane comes from `normal`, else from the drawing plane; the
+three-point form keeps its points and writes them with the circle.
+
+```python
+from sonador.apisettings.base import CircleMeasurement
+
+circle = CircleMeasurement.from_center_radius(center, 5.0, normal=(0, 0, 1), frame_of_reference_uid=frame_uid)
+circle = CircleMeasurement.from_center_point(center, point, drawing_plane=((0, 1, 0), (0, 0, -1)), frame_of_reference_uid=frame_uid)
+circle = CircleMeasurement.from_points(p1, p2, p3, frame_of_reference_uid=frame_uid)
+circle.radius, circle.area, circle.perimeter, circle.normal   # mm, mm2, mm, unit normal (None in the image domain)
+```
+
+A circle is written as Area, Perimeter and Radius NUM items (`CIRCLE` geometry on an image, `ELLIPSE` in
+patient coordinates); its stored values are kept while the geometry is unchanged. A stock Cornerstone3D
+patient-domain circle, which has no plane, is read with a warning and written again only once `normal`
+is set.
+
+Display colours have six roles: `Background`, `Border`, `Value` and `Meaning` for Series Tags, `Line` and
+`Text` for a measurement's drawing and label. Any role may be set on any finding or measurement; a role
+that is not set is not written.
+
 View values are registered in `sonador.apisettings.sr.measurements` (`SONADOR_MEASUREMENT_VIEWS`: `axial`,
 `sagittal`, `coronal`, `oblique`, `3d`, each with a meaning and a code in `DCMSR_MEASUREMENT_VIEW_CODES`). A
 value outside the registry is written as given with a `warning`, and refused with `strict=True`; values read

@@ -391,7 +391,10 @@ class RegistryTestCase(unittest.TestCase):
 			self.assertEqual(code.scheme_designator, 'Sonador-SR')
 		self.assertEqual([c.value for c in DCMSR_DISPLAY_COLOR_ROLES.values()], [
 			'Sonador-DisplayAttributes.Color.Background', 'Sonador-DisplayAttributes.Color.Border',
-			'Sonador-DisplayAttributes.Color.Value', 'Sonador-DisplayAttributes.Color.Meaning'])
+			'Sonador-DisplayAttributes.Color.Value', 'Sonador-DisplayAttributes.Color.Meaning',
+			'Sonador-DisplayAttributes.Color.Line', 'Sonador-DisplayAttributes.Color.Text'])
+		self.assertEqual([c.meaning for c in DCMSR_DISPLAY_COLOR_ROLES.values()], ['Background color (CIELab)', 'Border color (CIELab)',
+			'Coded value color (CIELab)', 'Code meaning color (CIELab)', 'Line color (CIELab)', 'Text color (CIELab)'])
 		self.assertEqual(DCMSR_MEASUREMENT_DESCRIPTION.value, 'Sonador-Measurement.Description')
 
 	def test_tracking_identifiers(self):

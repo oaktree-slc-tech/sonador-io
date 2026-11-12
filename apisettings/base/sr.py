@@ -9,8 +9,10 @@
 		identifiers, extended meta, display attributes, preserved `extra_items`) and is read from a
 		content item with `from_sr`. A `Measurement` carries the same attributes for a NUM item, plus
 		its other NUM values and its coordinates (`Geometry`).
-	* Typed quantitative tools: `LengthMeasurement`, `AngleMeasurement`, `CobbAngleMeasurement`, on
-		`GeometricMeasurement`; `measurement_class_for_type` selects the class a document reads to.
+	* Typed quantitative tools: `LengthMeasurement`, `AngleMeasurement`, `CobbAngleMeasurement` and
+		`CircleMeasurement`, on `GeometricMeasurement`; `measurement_class_for_type` selects the class a
+		document reads to. A circle is held by its center, radius and plane (an image-domain `CIRCLE`, a
+		patient-domain `ELLIPSE` of two equal perpendicular diameters), with optional construction points.
 	* Report groups: `ReportGroup` (TID 1501, also read with `from_sr`), `ReportMetaGroup`,
 		`VolumePointCollectionGroup` and `ReportGroupCollection`.
 
@@ -33,8 +35,8 @@ from highdicom.sr.value_types import ContainerContentItem, CodeContentItem, Text
 from client.utils.object import pick, omit
 from client.utils.microservices import JsonObjectCollection
 
-from .constants import DCMSR_UNITS_MM, DCMSR_UNITS_ANGLE_DEGREE, SONADOR_MEASUREMENT_TYPE_LENGTH, SONADOR_MEASUREMENT_TYPE_ANGLE, \
-	SONADOR_MEASUREMENT_TYPE_COBB_ANGLE
+from .constants import DCMSR_UNITS_MM, DCMSR_UNITS_MM2, DCMSR_UNITS_ANGLE_DEGREE, SONADOR_MEASUREMENT_TYPE_LENGTH, SONADOR_MEASUREMENT_TYPE_ANGLE, \
+	SONADOR_MEASUREMENT_TYPE_COBB_ANGLE, SONADOR_MEASUREMENT_TYPE_CIRCLE
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +240,18 @@ class ImageTransformMatrix(SRDataCollectionMember):
 		source = np.asarray(points, dtype=float) * scale
 		homogeneous = np.column_stack((source, np.ones(len(source))))
 		return tuple(tuple(float(c) for c in p[:3]) for p in matrix.dot(homogeneous.T).T)
+
+	def rotate_directions(self, directions):
+		'''	Apply the rotation part of the matrix to direction vectors, such as a plane normal or the
+			directions of a drawing plane. The translation and the source-unit scale do not apply to a
+			direction.
+
+			@input directions (sequence of (x, y, z)): unit directions in the source frame
+			@returns tuple of tuple of 3 float: the directions in the target frame
+			@raises ValueError for a transform that is not rigid
+		'''
+		rotation = self.rigid_matrix()[:3, :3]
+		return tuple(tuple(float(c) for c in rotation.dot(np.asarray(d, dtype=float))) for d in directions)
 
 	def invert(self, points):
 		'''	Convert points from the target frame back to the source frame with the matrix inverse.
@@ -1261,7 +1275,8 @@ class GeometricMeasurement(Measurement):
 				image domain, `(x, y, z)` triples for the patient domain
 			@input geometry (Geometry, default=None): used instead of `points`
 			@input transform (ImageTransformMatrix, default=None): conversion of patient-domain `points`
-				from another frame to the imaging series' frame; it must be rigid and name its source frame
+				from another frame to the imaging series' frame; it must be rigid and name its source frame.
+				A `drawing_plane` given with it is rotated by the same transform (rotation part only).
 			@input reference (ImageReference, default=None): image the points were drawn on
 			@input frame_of_reference_uid (str, default=the transform's target frame): Frame of Reference
 				of the imaging series
@@ -1291,6 +1306,8 @@ class GeometricMeasurement(Measurement):
 						% (transform.target_frame, frame_of_reference_uid))
 				points = transform.convert(points)
 				frame_of_reference_uid = frame_of_reference_uid or transform.target_frame
+				if kwargs.get('drawing_plane') is not None:
+					kwargs['drawing_plane'] = transform.rotate_directions(drawing_plane_vectors(kwargs['drawing_plane']))
 			domain = DCMSR_GEOMETRY_DOMAIN_IMAGE if len(points[0]) == 2 else DCMSR_GEOMETRY_DOMAIN_PATIENT
 			geometry = Geometry(domain, self.graphic_type, points, reference if domain == DCMSR_GEOMETRY_DOMAIN_IMAGE else None)
 
@@ -1624,6 +1641,972 @@ class CobbAngleMeasurement(_AngleBase):
 		self.points = self.points[:2] + tuple(line)
 
 
+# Circles
+
+DCMSR_GRAPHIC_CIRCLE = 'CIRCLE'
+DCMSR_GRAPHIC_ELLIPSE = 'ELLIPSE'
+
+# Concept names of the three NUM items of a circle, in writing order (SCT; the SRT forms are read too)
+DCMSR_CONCEPT_AREA = Code('42798000', 'SCT', 'Area')
+DCMSR_CONCEPT_PERIMETER = Code('131191004', 'SCT', 'Perimeter')
+DCMSR_CONCEPT_RADIUS = Code('131190003', 'SCT', 'Radius')
+
+# Circle tolerances: the smallest radius, the collinearity of construction points and the agreement of
+# radius and perimeter values (mm); the area agreement (mm2, or a relative part of the value when larger);
+# the angle within which two plane normals are parallel (degrees); the perpendicularity of the two
+# diameters of an ELLIPSE read as a circle (cosine)
+DCMSR_CIRCLE_LENGTH_TOLERANCE = 0.01
+DCMSR_CIRCLE_AREA_TOLERANCE = 0.05
+DCMSR_CIRCLE_AREA_RELATIVE_TOLERANCE = 1e-4
+DCMSR_CIRCLE_PARALLEL_DEGREES = 1.0
+DCMSR_CIRCLE_AXES_COSINE_TOLERANCE = 1e-3
+
+CIRCLE_VALUE_AREA = 'area'
+CIRCLE_VALUE_PERIMETER = 'perimeter'
+CIRCLE_VALUE_RADIUS = 'radius'
+CIRCLE_VALUE_ROLES = (CIRCLE_VALUE_AREA, CIRCLE_VALUE_PERIMETER, CIRCLE_VALUE_RADIUS)
+
+# UCUM units a stored circle value is converted from, to millimetres or square millimetres
+DCMSR_UCUM_LENGTH_SCALES = {'um': 0.001, 'mm': 1.0, 'cm': 10.0, 'm': 1000.0}
+DCMSR_UCUM_AREA_SCALES = {'um2': 1e-6, 'mm2': 1.0, 'cm2': 100.0, 'm2': 1e6}
+
+
+def circle_unit_scale(unit, kind):
+	'''	Factor converting a value in a UCUM unit to millimetres (`length`) or square millimetres (`area`).
+
+		@input unit (Code, CodedConcept or pydicom.Dataset, or None): the unit
+		@input kind (str): `length` or `area`
+
+		@returns float, or None for a unit that is absent, not UCUM, or not one of the units converted
+	'''
+	if unit is None:
+		return None
+	value = getattr(unit, 'value', None) if hasattr(unit, 'scheme_designator') else unit.get('CodeValue')
+	scheme = getattr(unit, 'scheme_designator', None) if hasattr(unit, 'scheme_designator') else unit.get('CodingSchemeDesignator')
+	if scheme != 'UCUM':
+		return None
+	return (DCMSR_UCUM_AREA_SCALES if kind == 'area' else DCMSR_UCUM_LENGTH_SCALES).get(str(value))
+
+
+def _unit_vector(vector, label='vector'):
+	'''	Unit vector of a 3-vector.
+
+		@input vector (sequence of 3 numbers)
+		@input label (str, default='vector'): name used in the error message
+		@returns numpy.ndarray of shape (3,)
+		@raises ValueError for a vector that is not finite or of zero length
+	'''
+	vector = np.asarray(vector, dtype=float)
+	norm = float(np.linalg.norm(vector))
+	if not math.isfinite(norm) or norm <= DCMSR_GEOMETRY_COINCIDENT_TOLERANCE:
+		raise ValueError('The %s %r has no direction' % (label, tuple(vector)))
+	return vector / norm
+
+
+def normals_parallel(a, b, degrees=DCMSR_CIRCLE_PARALLEL_DEGREES):
+	'''	Whether two plane normals are parallel (or anti-parallel) within an angle.
+
+		@input a, b (sequence of 3 numbers): the normals
+		@input degrees (float, default=1): the angle allowed between them
+		@returns bool
+	'''
+	return abs(float(np.dot(_unit_vector(a, 'normal'), _unit_vector(b, 'normal')))) >= math.cos(math.radians(degrees))
+
+
+def drawing_plane_normal(plane):
+	'''	Normal of a drawing plane: the cross product of its width and height directions.
+
+		@input plane (pair of 3-vectors, or 6 numbers): the drawing plane
+		@returns numpy.ndarray of shape (3,): the unit normal
+		@raises ValueError for a plane whose directions are parallel or not finite
+	'''
+	width, height = drawing_plane_vectors(plane)
+	return _unit_vector(np.cross(width, height), 'drawing plane normal')
+
+
+def circle_first_axis(normal, toward=None):
+	'''	In-plane unit vector `u` the first diameter of a patient-domain circle runs along: the
+		projection of `toward` onto the plane when given, else the projection of the patient `+x` axis,
+		or of `+y` when the normal is within 1 degree of `+x` or `-x`.
+
+		@input normal (sequence of 3 numbers): the plane normal
+		@input toward (sequence of 3 numbers, default=None): direction to project, such as center to edge
+		@returns numpy.ndarray of shape (3,)
+		@raises ValueError when `toward` has no component in the plane
+	'''
+	normal = _unit_vector(normal, 'normal')
+	if toward is None:
+		toward = (0.0, 1.0, 0.0) if normals_parallel(normal, (1.0, 0.0, 0.0)) else (1.0, 0.0, 0.0)
+	toward = np.asarray(toward, dtype=float)
+	return _unit_vector(toward - normal * float(np.dot(toward, normal)), 'in-plane direction')
+
+
+def circle_ellipse_points(center, radius, normal, u):
+	'''	The four `ELLIPSE` points of a patient-domain circle: the end points of the first diameter,
+		`center - r u` then `center + r u`, followed by those of the second, `center - r v` then
+		`center + r v`, with `v = n x u`.
+
+		@input center (sequence of 3 numbers), radius (float), normal and u (sequences of 3 numbers)
+		@returns tuple of 4 tuples of 3 float
+	'''
+	center, normal, u = np.asarray(center, dtype=float), _unit_vector(normal, 'normal'), _unit_vector(u, 'axis')
+	v = np.cross(normal, u)
+	return tuple(tuple(float(c) for c in p) for p in (center - radius * u, center + radius * u, center - radius * v, center + radius * v))
+
+
+def circle_from_ellipse(points):
+	'''	Circle of a patient-domain `ELLIPSE` of four points: two diameters of equal length through one
+		center and perpendicular to each other. Makes no request.
+
+		@input points (sequence of 4 sequences of 3 numbers)
+		@returns
+			- dict with `center`, `radius`, `u`, `normal` (numpy arrays and float)
+			- str naming the failed check (`four-points`, `common-center`, `equal-axes`, `perpendicular-axes`,
+				`zero-radius`) when the ellipse is not a circle
+	'''
+	if len(points) != 4:
+		return 'four-points'
+	p0, p1, p2, p3 = (np.asarray(p, dtype=float) for p in points)
+	c1, c2 = (p0 + p1) / 2.0, (p2 + p3) / 2.0
+	r1, r2 = float(np.linalg.norm(p1 - p0)) / 2.0, float(np.linalg.norm(p3 - p2)) / 2.0
+	if r1 <= DCMSR_GEOMETRY_COINCIDENT_TOLERANCE or r2 <= DCMSR_GEOMETRY_COINCIDENT_TOLERANCE:
+		return 'zero-radius'
+	if float(np.linalg.norm(c1 - c2)) > DCMSR_CIRCLE_LENGTH_TOLERANCE:
+		return 'common-center'
+	if abs(r1 - r2) > DCMSR_CIRCLE_LENGTH_TOLERANCE:
+		return 'equal-axes'
+	u, v = (p1 - p0) / (2.0 * r1), (p3 - p2) / (2.0 * r2)
+	if abs(float(np.dot(u, v))) > DCMSR_CIRCLE_AXES_COSINE_TOLERANCE:
+		return 'perpendicular-axes'
+	return {'center': (c1 + c2) / 2.0, 'radius': (r1 + r2) / 2.0, 'u': u, 'normal': _unit_vector(np.cross(u, v), 'normal')}
+
+
+def circle_through_points(p1, p2, p3):
+	'''	Circle through three points, in two or three dimensions. Makes no request.
+
+		@input p1, p2, p3 (sequences of 2 or 3 numbers): the construction points
+		@returns
+			- dict with `center` (of the input dimension), `radius` (float) and `normal` (unit 3-vector,
+				`(0, 0, 1)` for two-dimensional points)
+			- None when a point lies within 0.01 of the line through the other two (collinear)
+	'''
+	dimension = len(p1)
+	pts = [np.array(tuple(p) + (0.0,) * (3 - dimension), dtype=float) for p in (p1, p2, p3)]
+	for i in range(3):
+		a, b, c = pts[i], pts[(i + 1) % 3], pts[(i + 2) % 3]
+		line = c - b
+		length = float(np.linalg.norm(line))
+		distance = float(np.linalg.norm(a - b)) if length <= DCMSR_GEOMETRY_COINCIDENT_TOLERANCE else \
+			float(np.linalg.norm(np.cross(a - b, line))) / length
+		if distance <= DCMSR_CIRCLE_LENGTH_TOLERANCE:
+			return None
+	a, b = pts[0] - pts[2], pts[1] - pts[2]
+	axb = np.cross(a, b)
+	center = pts[2] + np.cross(np.dot(a, a) * b - np.dot(b, b) * a, axb) / (2.0 * float(np.dot(axb, axb)))
+	normal = _unit_vector(axb, 'normal') if dimension == 3 else np.array((0.0, 0.0, 1.0))
+	return {'center': center[:dimension], 'radius': float(np.linalg.norm(pts[0] - center)), 'normal': normal}
+
+
+class CircleMeasurement(GeometricMeasurement):
+	'''	Circle (Cornerstone `CircleROI` tool), written as three NUM items in the order Area, Perimeter,
+		Radius, each `INFERRED FROM` the same geometry, with the per-measurement properties under the
+		Area NUM. The radius is the primary value; perimeter `2 pi r` and area `pi r^2` follow from it.
+
+		Geometry by domain:
+		* image domain: `CIRCLE` of two points, the center then one point on the circumference, on the
+			referenced image; the circle lies in the image plane (`normal` is None);
+		* patient domain: `ELLIPSE` of four points, the two end points of a first diameter along `u`,
+			then those of a second along `n x u` (`n` the plane normal);
+		* legacy patient domain, read only: the undefined `CIRCLE` SCOORD3D of two points, with no plane;
+			it is written again (as an `ELLIPSE`) once `normal` is set.
+
+		A circle derived from three circumference points keeps them as `construction_points`, written as
+		`Sonador-Measurement.ConstructionPoints`.
+
+		@property center (tuple of float): center, pixels or millimetres; settable
+		@property radius (float or None): radius in millimetres, read and set (a stored radius in another
+			UCUM unit is converted; an image-domain assignment converts with the frame's calibration)
+		@property value, unit: the stored radius and its unit as read, for an unchanged parsed circle
+		@property pixel_radius (float or None): image-domain radius in pixels; settable
+		@property normal (tuple of 3 float or None): unit plane normal, patient domain; settable
+		@property u (tuple of 3 float or None): direction of the first diameter, patient domain
+		@property edge (tuple of float): `center + r u`, the second point of the geometry's first diameter
+			(patient domain) or the circumference point (image domain)
+		@property area, perimeter (float or None): the values written, in `area_unit` and `perimeter_unit`
+			(the stored units of a parsed, unchanged circle; `mm2` and `mm` otherwise)
+		@property construction_points (tuple of 3 points or None): the three circumference points the
+			circle was derived from; settable, which recomputes the circle
+		@property extra_items, perimeter_extra_items, radius_extra_items (tuple of pydicom.Dataset):
+			unmodelled children of the Area, Perimeter and Radius NUM items, each re-emitted under its own
+			NUM item
+	'''
+	default_type = SONADOR_MEASUREMENT_TYPE_CIRCLE
+	default_name = DCMSR_CONCEPT_RADIUS
+	default_unit = DCMSR_UNITS_MM
+	graphic_type = None
+	point_count = None
+
+	def __init__(self, geometry=None, construction_points=None, area=None, perimeter=None, value_names=None,
+			perimeter_extra_items=None, radius_extra_items=None, legacy_normal=None, area_unit=None, perimeter_unit=None, **kwargs):
+		'''	Initialize the circle from a `Geometry` of one of the circle forms. Callers building a new
+			circle use `from_center_radius`, `from_center_point` or `from_points`.
+
+			@input geometry (Geometry): `CIRCLE` (image domain), `ELLIPSE` or legacy `CIRCLE` (patient domain)
+			@input construction_points (sequence of 3 points, default=None): the three circumference points
+			@input area, perimeter (number, default=None): stored values; the document reader sets them
+			@input area_unit, perimeter_unit (Code or CodedConcept, default=mm2 and mm): units of the stored values
+			@input value_names (dict, default=None): concept read for each of `area`, `perimeter`, `radius`
+			@input perimeter_extra_items, radius_extra_items (iterable of pydicom.Dataset, default=None):
+				unmodelled children of the Perimeter and Radius NUM items
+			@input legacy_normal (sequence of 3 numbers, default=None): normal of a legacy `CIRCLE` SCOORD3D
+			@input kwargs: `GeometricMeasurement` arguments (the stored radius is `value`)
+
+			@raises ValueError for a geometry that is not a circle form
+		'''
+		if geometry is None:
+			raise ValueError('CircleMeasurement needs a geometry; use from_center_radius, from_center_point or from_points')
+		self._check_circle_geometry(geometry)
+		self._legacy_normal = None
+		self._stored_area = area
+		self._stored_perimeter = perimeter
+		self._stored_area_unit = area_unit or DCMSR_UNITS_MM2
+		self._stored_perimeter_unit = perimeter_unit or DCMSR_UNITS_MM
+		self._stored_items = {}
+		self._stored_qualifiers = {}
+		self._num_coordinates = {}
+		self.value_names = dict(value_names or {})
+		self._construction_points = None
+		self._parsed_construction_points = None
+		super().__init__(geometry=geometry, **kwargs)
+		if legacy_normal is not None:
+			self._legacy_normal = tuple(float(c) for c in _unit_vector(legacy_normal, 'normal'))
+		self.construction_points_raw = construction_points
+		self.perimeter_extra_items = tuple(perimeter_extra_items or ())
+		self.radius_extra_items = tuple(radius_extra_items or ())
+
+	# ---- construction ----
+
+	@staticmethod
+	def _resolve_normal(normal, drawing_plane):
+		'''	Plane normal of a patient-domain circle: `normal`, else the cross product of the drawing plane.
+
+			@returns numpy.ndarray of shape (3,), or None when neither is given
+			@raises ValueError when both are given and are not parallel within 1 degree
+		'''
+		plane_normal = drawing_plane_normal(drawing_plane) if drawing_plane is not None else None
+		if normal is None:
+			return plane_normal
+		normal = _unit_vector(normal, 'normal')
+		if plane_normal is not None and not normals_parallel(normal, plane_normal):
+			raise ValueError('The circle normal is not parallel to the drawing plane normal within %s degree' % DCMSR_CIRCLE_PARALLEL_DEGREES)
+		return normal
+
+	@staticmethod
+	def _convert(transform, frame_of_reference_uid, points, normal=None, drawing_plane=None):
+		'''	Apply a rigid frame conversion to the points, the normal and the drawing plane of a circle.
+
+			@returns tuple (points, normal, drawing_plane, frame_of_reference_uid)
+			@raises ValueError for a transform that is not rigid (scale or shear would make the circle an
+				ellipse), unnamed, or aimed at another frame
+		'''
+		if transform is None:
+			return points, normal, drawing_plane, frame_of_reference_uid
+		if any(len(point) != 3 for point in points):
+			raise ValueError('A frame conversion applies to patient-domain points only')
+		if not (transform.source_frame or transform.uid):
+			raise ValueError('A frame conversion must name its source frame')
+		if frame_of_reference_uid and transform.target_frame and frame_of_reference_uid != transform.target_frame:
+			raise ValueError('The transform targets frame %s, not the measurement frame %s' % (transform.target_frame, frame_of_reference_uid))
+		points = transform.convert(points)
+		if normal is not None:
+			normal = transform.rotate_directions([normal])[0]
+		if drawing_plane is not None:
+			drawing_plane = tuple(transform.rotate_directions(drawing_plane_vectors(drawing_plane)))
+		return points, normal, drawing_plane, frame_of_reference_uid or transform.target_frame
+
+	@classmethod
+	def from_center_radius(cls, center, radius, normal=None, drawing_plane=None, transform=None, reference=None,
+			frame_of_reference_uid=None, **kwargs):
+		'''	Circle from its center and radius. In the patient domain (a 3D center) the plane comes from
+			`normal`, else from the cross product of `drawing_plane`, and the first diameter runs along the
+			projection of `+x` onto the plane (`+y` when the normal is within 1 degree of the `x` axis). In
+			the image domain (a 2D center) the circumference point lies along the `+column` direction, at
+			`radius` millimetres converted to pixels with `calibration`.
+
+			@input center (sequence of 2 or 3 numbers): the center
+			@input radius (number): the radius in millimetres
+			@input normal (sequence of 3 numbers, default=None): plane normal
+			@input drawing_plane (pair of 3-vectors, default=None): the drawing plane, also written as
+				`Sonador-Measurement.Drawing-Plane`
+			@input transform (ImageTransformMatrix, default=None): rigid conversion from another frame,
+				applied to the center, the normal and the drawing plane
+			@input reference (ImageReference, default=None): image of an image-domain circle
+			@input frame_of_reference_uid (str, default=the transform's target frame): Frame of Reference
+			@input kwargs: further measurement arguments
+
+			@returns CircleMeasurement
+			@raises ValueError for a radius below 0.01 mm, a patient-domain circle with neither normal nor
+				drawing plane, a normal not parallel to the drawing plane, a transform that is not rigid, or an
+				image-domain circle without a calibrated `calibration`
+		'''
+		radius = cls._check_radius(radius)
+		center = tuple(float(c) for c in center)
+		if len(center) == 2:
+			if normal is not None or drawing_plane is not None or transform is not None:
+				raise ValueError('An image-domain circle lies in the image plane: no normal, drawing plane or transform')
+			circle = cls(geometry=Geometry(DCMSR_GEOMETRY_DOMAIN_IMAGE, DCMSR_GRAPHIC_CIRCLE, (center, (center[0] + 1.0, center[1])), reference),
+				**kwargs)
+			circle.radius = radius
+			return circle
+		(center,), normal, drawing_plane, frame_of_reference_uid = cls._convert(transform, frame_of_reference_uid, [center], normal, drawing_plane)
+		normal = cls._resolve_normal(normal, drawing_plane)
+		if normal is None:
+			raise ValueError('A patient-domain circle needs a normal or a drawing plane')
+		points = circle_ellipse_points(center, radius, normal, circle_first_axis(normal))
+		return cls(geometry=Geometry(DCMSR_GEOMETRY_DOMAIN_PATIENT, DCMSR_GRAPHIC_ELLIPSE, points),
+			frame_of_reference_uid=frame_of_reference_uid, drawing_plane=drawing_plane, reference=reference, **kwargs)
+
+	@classmethod
+	def from_center_point(cls, center, point, normal=None, drawing_plane=None, transform=None, reference=None,
+			frame_of_reference_uid=None, **kwargs):
+		'''	Circle from its center and one point on the circumference. In the patient domain the plane
+			comes from `normal`, else from the cross product of `drawing_plane`; the first diameter runs
+			toward the point (projected onto the plane), and the radius is the in-plane distance.
+
+			@input center, point (sequences of 2 or 3 numbers): center and circumference point
+			@input normal, drawing_plane, transform, reference, frame_of_reference_uid: as `from_center_radius`
+			@input kwargs: further measurement arguments
+
+			@returns CircleMeasurement
+			@raises ValueError as `from_center_radius`, or for a point on the normal through the center
+		'''
+		center, point = tuple(float(c) for c in center), tuple(float(c) for c in point)
+		if len(center) != len(point):
+			raise ValueError('Center and point must have the same dimension')
+		if len(center) == 2:
+			if normal is not None or drawing_plane is not None or transform is not None:
+				raise ValueError('An image-domain circle lies in the image plane: no normal, drawing plane or transform')
+			if _distance(center, point) < DCMSR_CIRCLE_LENGTH_TOLERANCE:
+				raise ValueError('A circle radius must be at least %s' % DCMSR_CIRCLE_LENGTH_TOLERANCE)
+			return cls(geometry=Geometry(DCMSR_GEOMETRY_DOMAIN_IMAGE, DCMSR_GRAPHIC_CIRCLE, (center, point), reference), **kwargs)
+		(center, point), normal, drawing_plane, frame_of_reference_uid = cls._convert(transform, frame_of_reference_uid,
+			[center, point], normal, drawing_plane)
+		normal = cls._resolve_normal(normal, drawing_plane)
+		if normal is None:
+			raise ValueError('A patient-domain circle from a center and a point needs a normal or a drawing plane')
+		offset = np.asarray(point) - np.asarray(center)
+		in_plane = offset - normal * float(np.dot(offset, normal))
+		radius = float(np.linalg.norm(in_plane))
+		if radius < DCMSR_CIRCLE_LENGTH_TOLERANCE:
+			raise ValueError('A circle radius must be at least %s; the point lies on the normal through the center' % DCMSR_CIRCLE_LENGTH_TOLERANCE)
+		points = circle_ellipse_points(center, radius, normal, in_plane / radius)
+		return cls(geometry=Geometry(DCMSR_GEOMETRY_DOMAIN_PATIENT, DCMSR_GRAPHIC_ELLIPSE, points),
+			frame_of_reference_uid=frame_of_reference_uid, drawing_plane=drawing_plane, reference=reference, **kwargs)
+
+	@classmethod
+	def from_points(cls, p1, p2, p3, drawing_plane=None, transform=None, reference=None, frame_of_reference_uid=None, **kwargs):
+		'''	Circle through three circumference points, which are kept as `construction_points`. The plane
+			is that of the points and the first diameter runs from the center toward `p1`.
+
+			@input p1, p2, p3 (sequences of 2 or 3 numbers): the construction points
+			@input drawing_plane (pair of 3-vectors, default=None): drawing plane, whose normal must be
+				parallel to the plane of the points within 1 degree
+			@input transform, reference, frame_of_reference_uid: as `from_center_radius`
+			@input kwargs: further measurement arguments
+
+			@returns CircleMeasurement
+			@raises ValueError when a point lies within 0.01 of the line through the other two, the
+				drawing plane is not parallel, or the transform is not rigid
+		'''
+		points = [tuple(float(c) for c in p) for p in (p1, p2, p3)]
+		if len(set(len(p) for p in points)) != 1 or len(points[0]) not in (2, 3):
+			raise ValueError('Construction points must all be 2D or all be 3D')
+		if len(points[0]) == 3:
+			points, _, drawing_plane, frame_of_reference_uid = cls._convert(transform, frame_of_reference_uid, points, None, drawing_plane)
+		elif transform is not None or drawing_plane is not None:
+			raise ValueError('An image-domain circle lies in the image plane: no drawing plane or transform')
+		circle = circle_through_points(*points)
+		if circle is None:
+			raise ValueError('The three construction points are collinear (one lies within %s of the line through the other two)'
+				% DCMSR_CIRCLE_LENGTH_TOLERANCE)
+		if len(points[0]) == 2:
+			geometry = Geometry(DCMSR_GEOMETRY_DOMAIN_IMAGE, DCMSR_GRAPHIC_CIRCLE, (tuple(circle['center']), points[0]), reference)
+			return cls(geometry=geometry, construction_points=points, **kwargs)
+		if drawing_plane is not None and not normals_parallel(circle['normal'], drawing_plane_normal(drawing_plane)):
+			raise ValueError('The drawing plane is not parallel to the plane of the construction points within %s degree'
+				% DCMSR_CIRCLE_PARALLEL_DEGREES)
+		u = (np.asarray(points[0]) - circle['center']) / circle['radius']
+		geometry = Geometry(DCMSR_GEOMETRY_DOMAIN_PATIENT, DCMSR_GRAPHIC_ELLIPSE,
+			circle_ellipse_points(circle['center'], circle['radius'], circle['normal'], u))
+		return cls(geometry=geometry, construction_points=points, frame_of_reference_uid=frame_of_reference_uid,
+			drawing_plane=drawing_plane, reference=reference, **kwargs)
+
+	# ---- geometry ----
+
+	@staticmethod
+	def _check_circle_geometry(geometry):
+		'''	Refuse a geometry that is not one of the circle forms.
+
+			@raises ValueError for any other graphic type or number of points
+		'''
+		forms = {(DCMSR_GEOMETRY_DOMAIN_IMAGE, DCMSR_GRAPHIC_CIRCLE): 2, (DCMSR_GEOMETRY_DOMAIN_PATIENT, DCMSR_GRAPHIC_ELLIPSE): 4,
+			(DCMSR_GEOMETRY_DOMAIN_PATIENT, DCMSR_GRAPHIC_CIRCLE): 2}
+		if geometry is None or forms.get((geometry.domain, geometry.graphic_type)) != len(geometry.points):
+			raise ValueError('CircleMeasurement holds an image-domain CIRCLE of 2 points or a patient-domain ELLIPSE of 4 points')
+
+	def _check_geometry(self, geometry):
+		'''	Refuse a geometry that is not one of the circle forms (`_check_circle_geometry`).
+		'''
+		self._check_circle_geometry(geometry)
+
+	@property
+	def points(self):
+		'''	The encoded points: center and circumference point (`CIRCLE`) or the four diameter end points
+			(`ELLIPSE`).
+
+			@returns tuple of tuple of float
+		'''
+		return self._geometry.points
+
+	@points.setter
+	def points(self, points):
+		'''	Replace the encoded points, keeping the domain and graphic type.
+
+			@raises ValueError for points that do not form the circle's graphic type
+		'''
+		geometry = self._geometry.with_points(points)
+		self._check_circle_geometry(geometry)
+		self._geometry = geometry
+
+	@property
+	def is_legacy(self):
+		'''	Whether the geometry is the undefined `CIRCLE` SCOORD3D read from a stock Cornerstone3D document.
+
+			@returns bool
+		'''
+		return self._geometry.is_patient and self._geometry.graphic_type == DCMSR_GRAPHIC_CIRCLE
+
+	def _ellipse(self):
+		'''	Circle of an `ELLIPSE` geometry (`circle_from_ellipse`).
+
+			@returns dict, str naming the failed check, or None for a `CIRCLE` geometry
+		'''
+		return circle_from_ellipse(self._geometry.points) if self._geometry.graphic_type == DCMSR_GRAPHIC_ELLIPSE else None
+
+	@property
+	def center(self):
+		'''	Center of the circle.
+
+			@returns tuple of float: `(column, row)` pixels or `(x, y, z)` millimetres
+		'''
+		ellipse = self._ellipse()
+		if isinstance(ellipse, dict):
+			return tuple(float(c) for c in ellipse['center'])
+		return self._geometry.points[0]
+
+	@center.setter
+	def center(self, center):
+		'''	Move the circle to a new center; the construction points no longer apply and are removed.
+		'''
+		offset = np.asarray(center, dtype=float) - np.asarray(self.center, dtype=float)
+		self.points = [tuple(float(c) for c in np.asarray(p) + offset) for p in self._geometry.points]
+		self._construction_points = None
+
+	@property
+	def edge(self):
+		'''	Point on the circumference along the first axis: `center + r u`.
+
+			@returns tuple of float
+		'''
+		return self._geometry.points[1]
+
+	@property
+	def u(self):
+		'''	Direction of the first diameter of a patient-domain circle.
+
+			@returns tuple of 3 float, or None in the image domain or for a legacy circle without a normal
+		'''
+		ellipse = self._ellipse()
+		if isinstance(ellipse, dict):
+			return tuple(float(c) for c in ellipse['u'])
+		if self.is_legacy and self._legacy_normal is not None:
+			return tuple(float(c) for c in circle_first_axis(self._legacy_normal, np.subtract(self.edge, self.center)))
+		return None
+
+	@property
+	def normal(self):
+		'''	Unit normal of the circle's plane.
+
+			@returns tuple of 3 float, or None in the image domain (the image plane applies) and for a
+				legacy circle whose normal was not supplied
+		'''
+		ellipse = self._ellipse()
+		if isinstance(ellipse, dict):
+			return tuple(float(c) for c in ellipse['normal'])
+		return self._legacy_normal if self.is_legacy else None
+
+	@normal.setter
+	def normal(self, normal):
+		'''	Set the plane of a patient-domain circle. A legacy `CIRCLE` SCOORD3D becomes an `ELLIPSE`; the
+			first diameter keeps its direction projected onto the new plane.
+
+			@raises ValueError in the image domain, or for a normal along the first diameter
+		'''
+		if not self._geometry.is_patient:
+			raise ValueError('An image-domain circle lies in the image plane; it has no normal to set')
+		normal = _unit_vector(normal, 'normal')
+		toward = np.subtract(self.edge, self.center)
+		radius = self._patient_radius()
+		self._geometry = Geometry(DCMSR_GEOMETRY_DOMAIN_PATIENT, DCMSR_GRAPHIC_ELLIPSE,
+			circle_ellipse_points(self.center, radius, normal, circle_first_axis(normal, toward)))
+		self._legacy_normal = None
+		self._construction_points = None
+
+	@property
+	def plane_normal(self):
+		'''	Normal a drawing plane of the measurement must be parallel to.
+
+			@returns tuple of 3 float, or None
+		'''
+		return self.normal
+
+	def _patient_radius(self):
+		'''	Radius in the units of the points: half a diameter of an `ELLIPSE`, the center-to-point distance
+			of a `CIRCLE`.
+
+			@returns float
+		'''
+		ellipse = self._ellipse()
+		if isinstance(ellipse, dict):
+			return float(ellipse['radius'])
+		return _distance(self._geometry.points[0], self._geometry.points[1])
+
+	@property
+	def radius(self):
+		'''	Radius in millimetres. For an unchanged parsed circle this is the stored radius (or, without
+			one, the radius of the stored area or perimeter) converted from its UCUM unit; the stored
+			number and unit themselves are `value` and `unit`. Otherwise it is computed from the geometry.
+
+			@returns float, or None when no stored value converts to millimetres and the geometry cannot
+				be measured (an image-domain circle without a calibrated frame)
+		'''
+		return self._radius_mm()
+
+	@staticmethod
+	def _check_radius(radius, unit='mm'):
+		'''	Validate a requested radius.
+
+			@returns float
+			@raises ValueError for a radius that is not a finite number of at least 0.01
+		'''
+		try:
+			radius = float(radius)
+		except (TypeError, ValueError):
+			raise ValueError('A circle radius must be a number; got %r' % (radius,))
+		if not math.isfinite(radius) or radius < DCMSR_CIRCLE_LENGTH_TOLERANCE:
+			raise ValueError('A circle radius must be a finite number of at least %s %s; got %s' % (DCMSR_CIRCLE_LENGTH_TOLERANCE, unit, radius))
+		return radius
+
+	def _millimetres_per_pixel(self, direction):
+		'''	Physical length of one pixel step along a pixel direction of an image-domain circle, with the
+			frame's calibration (anisotropic spacing honoured).
+
+			@input direction (sequence of 2 numbers): unit direction in `(column, row)` pixels
+			@returns float
+			@raises ValueError for a circle without a calibrated frame
+		'''
+		if self.calibration is None or not self.calibration.is_calibrated:
+			raise ValueError('An image-domain circle needs `calibration` with a Pixel Spacing to convert millimetres to pixels')
+		center = self._geometry.points[0]
+		step = tuple(np.asarray(center) + np.asarray(direction))
+		return _distance(self.calibration.patient_point(*center), self.calibration.patient_point(*step))
+
+	@radius.setter
+	def radius(self, radius):
+		'''	Change the radius to `radius` millimetres, keeping the center and the direction of the first
+			axis (the circumference point in the image domain, converted to pixels with the frame's
+			calibration); the construction points are removed. Nothing changes when the value is refused.
+
+			@raises ValueError for a radius that is not a finite number of at least 0.01 mm, or an
+				image-domain circle without a calibrated frame
+		'''
+		radius = self._check_radius(radius)
+		if self._geometry.is_image:
+			center = self._geometry.points[0]
+			direction = _unit_vector(tuple(np.subtract(self.edge, center)) + (0.0,), 'radius direction')[:2]
+			pixels = radius / self._millimetres_per_pixel(direction)
+			self.points = (center, tuple(float(c) for c in np.asarray(center) + pixels * direction))
+		elif self.is_legacy:
+			center = np.asarray(self.center)
+			direction = _unit_vector(np.subtract(self.edge, center), 'radius direction')
+			self.points = (tuple(center), tuple(float(c) for c in center + radius * direction))
+		else:
+			self.points = circle_ellipse_points(self.center, radius, self.normal, self.u)
+		self._construction_points = None
+
+	@property
+	def pixel_radius(self):
+		'''	Distance in pixels between the center and the circumference point of an image-domain circle.
+
+			@returns float, or None in the patient domain
+		'''
+		return _distance(*self._geometry.points[:2]) if self._geometry.is_image else None
+
+	@pixel_radius.setter
+	def pixel_radius(self, pixels):
+		'''	Change the radius of an image-domain circle to `pixels`, along the current direction; the
+			construction points are removed.
+
+			@raises ValueError in the patient domain, or for a value that is not a finite number of at least 0.01
+		'''
+		if not self._geometry.is_image:
+			raise ValueError('pixel_radius applies to image-domain circles; set `radius` in millimetres')
+		pixels = self._check_radius(pixels, 'px')
+		center = self._geometry.points[0]
+		direction = _unit_vector(tuple(np.subtract(self.edge, center)) + (0.0,), 'radius direction')[:2]
+		self.points = (center, tuple(float(c) for c in np.asarray(center) + pixels * direction))
+		self._construction_points = None
+
+	@property
+	def construction_points(self):
+		'''	The three circumference points the circle was derived from.
+
+			@returns tuple of 3 tuples of float, or None
+		'''
+		return self._construction_points
+
+	@construction_points.setter
+	def construction_points(self, points):
+		'''	Replace the construction points, recomputing the circle through them (patient domain: its
+			plane too). None removes them and leaves the circle as it is.
+
+			@raises ValueError for collinear points or points of another domain
+		'''
+		if points is None:
+			self._construction_points = None
+			return
+		points = tuple(tuple(float(c) for c in p) for p in points)
+		dimension = 2 if self._geometry.is_image else 3
+		if len(points) != 3 or any(len(p) != dimension for p in points):
+			raise ValueError('Construction points are three %dD points' % dimension)
+		circle = circle_through_points(*points)
+		if circle is None:
+			raise ValueError('The three construction points are collinear')
+		if self._geometry.is_image:
+			self.points = (tuple(float(c) for c in circle['center']), points[0])
+		else:
+			u = (np.asarray(points[0]) - circle['center']) / circle['radius']
+			self._geometry = Geometry(DCMSR_GEOMETRY_DOMAIN_PATIENT, DCMSR_GRAPHIC_ELLIPSE,
+				circle_ellipse_points(circle['center'], circle['radius'], circle['normal'], u))
+			self._legacy_normal = None
+		self._construction_points = points
+
+	@property
+	def construction_points_raw(self):
+		'''	The construction points as recorded, without any check (the reader's view).
+
+			@returns tuple of 3 tuples of float, or None
+		'''
+		return self._construction_points
+
+	@construction_points_raw.setter
+	def construction_points_raw(self, points):
+		'''	Record construction points as given, without recomputing the circle (the reader's path).
+		'''
+		self._construction_points = None if points is None else tuple(tuple(float(c) for c in p) for p in points)
+
+	@property
+	def construction_points_changed(self):
+		'''	Whether the construction points differ from those read from the document.
+
+			@returns bool: True for a circle created in Python with construction points
+		'''
+		return self._construction_points != self._parsed_construction_points
+
+	def _mark_parsed(self, stored_value_item=None, source_coordinates=None):
+		'''	Record the state read from a document, the construction points included.
+		'''
+		super()._mark_parsed(stored_value_item, source_coordinates)
+		self._parsed_construction_points = self._construction_points
+
+	# ---- values ----
+
+	def _calculation_points(self, points):
+		'''	Points in the space the radius is calculated in: patient coordinates for a calibrated image frame.
+
+			@returns sequence of points
+		'''
+		if self._geometry.is_image and self.calibration is not None and self.calibration.is_calibrated:
+			return [self.calibration.patient_point(*p) for p in points]
+		return points
+
+	@property
+	def is_degenerate(self):
+		'''	Whether the circle defines no measurement: a radius below 0.01 mm (pixels without a
+			calibration), or construction points of which one lies within 0.01 of the line through the
+			other two.
+
+			@returns bool
+		'''
+		if self._construction_points is not None and circle_through_points(*self._construction_points) is None:
+			return True
+		if self._geometry.graphic_type == DCMSR_GRAPHIC_ELLIPSE:
+			return not isinstance(self._ellipse(), dict) or self._patient_radius() < DCMSR_CIRCLE_LENGTH_TOLERANCE
+		center, edge = self._calculation_points(self._geometry.points[:2])
+		return _distance(center, edge) < DCMSR_CIRCLE_LENGTH_TOLERANCE
+
+	def computed_value(self):
+		'''	Radius computed from the geometry: the patient-domain radius, or the distance between the
+			center and the circumference point mapped to patient coordinates with the frame's calibration.
+
+			@returns
+				- tuple (float, unit): millimetres
+				- None for an image-domain circle without a calibrated frame, or degenerate geometry
+		'''
+		if self.is_degenerate:
+			return None
+		if self._geometry.is_patient:
+			return self._patient_radius(), DCMSR_UNITS_MM
+		if self.calibration is None or not self.calibration.is_calibrated:
+			return None
+		center, edge = self._calculation_points(self._geometry.points[:2])
+		value = _distance(center, edge)
+		return (value, DCMSR_UNITS_MM) if math.isfinite(value) else None
+
+	@property
+	def keeps_stored_value(self):
+		'''	Whether the stored values are re-emitted: a parsed circle whose points, referenced image and
+			construction points are unchanged. Each value is kept only where the document held one.
+
+			@returns bool
+		'''
+		return self.is_parsed and not self.points_changed and not self.reference_changed and not self.construction_points_changed
+
+	@property
+	def is_parsed(self):
+		'''	Whether the circle holds the state of a document it was read from.
+
+			@returns bool
+		'''
+		return self._parsed_points is not None
+
+	@property
+	def value(self):
+		'''	Radius in `unit`, the authoritative stored pair: the stored number while the geometry is
+			unchanged, else in millimetres (`_radius_mm`). `radius` is always in millimetres.
+
+			@returns float, or None when it cannot be derived
+		'''
+		if self._keeps(self._val):
+			return self._val
+		return self._radius_mm()
+
+	@value.setter
+	def value(self, val):
+		'''	Set the stored radius.
+		'''
+		self._val = val
+
+	@property
+	def unit(self):
+		'''	Unit of the radius: the stored unit while the stored radius is kept, else millimetres.
+
+			@returns Code or CodedConcept
+		'''
+		return self._unit if self._keeps(self._val) else DCMSR_UNITS_MM
+
+	def _keeps(self, stored):
+		'''	Whether a stored value is the one exposed and written: read from the document, and the
+			geometry unchanged since.
+
+			@returns bool
+		'''
+		return stored is not None and self.keeps_stored_value
+
+	def _radius_mm(self):
+		'''	Radius in millimetres the other values follow from. For an unchanged parsed circle the stored
+			values are authoritative: the stored radius, area or perimeter, in that order, converted from a
+			UCUM unit `circle_unit_scale` converts. Otherwise, or when none converts, the radius computed from
+			the geometry.
+
+			@returns float, or None when no stored value converts and the geometry cannot be measured
+		'''
+		stored = self._stored_radius_mm() if self.keeps_stored_value else None
+		if stored is not None:
+			return stored
+		computed = self.computed_value()
+		return computed[0] if computed is not None else None
+
+	def _stored_radius_mm(self):
+		'''	Radius in millimetres of the stored values: the radius, else that of the area or the
+			perimeter, from the first whose UCUM unit converts.
+
+			@returns float, or None
+		'''
+		candidates = (
+			(self._val, self._unit, 'length', lambda mm: mm),
+			(self._stored_area, self._stored_area_unit, 'area', lambda mm2: math.sqrt(mm2 / math.pi)),
+			(self._stored_perimeter, self._stored_perimeter_unit, 'length', lambda mm: mm / (2.0 * math.pi)),
+		)
+		for value, unit, kind, to_radius in candidates:
+			scale = circle_unit_scale(unit, kind)
+			if value is not None and scale is not None:
+				return to_radius(value * scale)
+		return None
+
+	@property
+	def area(self):
+		'''	Area in `area_unit`: the stored value while the geometry is unchanged, else `pi r^2` in mm2.
+
+			@returns float, or None when the radius cannot be computed
+		'''
+		if self._keeps(self._stored_area):
+			return self._stored_area
+		radius = self._radius_mm()
+		return None if radius is None else math.pi * radius ** 2
+
+	@property
+	def area_unit(self):
+		'''	Unit of `area`: the stored unit while the stored area is kept, else `mm2`.
+
+			@returns Code or CodedConcept
+		'''
+		return self._stored_area_unit if self._keeps(self._stored_area) else DCMSR_UNITS_MM2
+
+	@property
+	def perimeter(self):
+		'''	Perimeter in `perimeter_unit`: the stored value while the geometry is unchanged, else `2 pi r` in mm.
+
+			@returns float, or None when the radius cannot be computed
+		'''
+		if self._keeps(self._stored_perimeter):
+			return self._stored_perimeter
+		radius = self._radius_mm()
+		return None if radius is None else 2.0 * math.pi * radius
+
+	@property
+	def perimeter_unit(self):
+		'''	Unit of `perimeter`: the stored unit while the stored perimeter is kept, else `mm`.
+
+			@returns Code or CodedConcept
+		'''
+		return self._stored_perimeter_unit if self._keeps(self._stored_perimeter) else DCMSR_UNITS_MM
+
+	@property
+	def values(self):
+		'''	The area and perimeter with their units, keyed by concept `(code value, scheme designator)`.
+
+			@returns OrderedDict of MeasurementValue (without source item)
+		'''
+		found = OrderedDict()
+		for role, value, unit in ((CIRCLE_VALUE_AREA, self.area, self.area_unit), (CIRCLE_VALUE_PERIMETER, self.perimeter, self.perimeter_unit)):
+			name = self.value_names.get(role) or {CIRCLE_VALUE_AREA: DCMSR_CONCEPT_AREA, CIRCLE_VALUE_PERIMETER: DCMSR_CONCEPT_PERIMETER}[role]
+			found[(name.value, name.scheme_designator)] = MeasurementValue(name, value, unit)
+		return found
+
+	@values.setter
+	def values(self, val):
+		'''	Accept only an empty mapping (the measurement constructor's default).
+
+			@raises ValueError for values given explicitly
+		'''
+		if val:
+			raise ValueError('The area and perimeter of a circle follow from its radius; they cannot be set')
+
+	def resolve_circle_values(self, diagnostics=None):
+		'''	Values written for the three NUM items. While the geometry is unchanged each stored value is
+			re-emitted verbatim, with its unit, its Measured Value Sequence item and its numeric value
+			qualifier; a value the document did not hold is derived from the radius in mm or mm2.
+
+			@input diagnostics (list, default=None): list the diagnostics are appended to
+
+			@returns OrderedDict: role (`area`, `perimeter`, `radius`) -> tuple (value, unit, stored item or
+				None, stored qualifier sequence or None)
+			@raises ValueError for a legacy circle without a normal
+			@raises SRDiagnosticError for degenerate geometry or a radius that cannot be derived (see `resolve_value`)
+		'''
+		if self.is_legacy:
+			raise ValueError('Circle %s carries the undefined CIRCLE SCOORD3D of a stock Cornerstone3D document and no plane; '
+				'set `normal` before writing it, which writes it as an ELLIPSE' % self.tracking_uid)
+		self._refuse_degenerate()
+		stored = {CIRCLE_VALUE_AREA: (self._stored_area, self._stored_area_unit), CIRCLE_VALUE_PERIMETER: (self._stored_perimeter,
+			self._stored_perimeter_unit), CIRCLE_VALUE_RADIUS: (self._val, self._unit)}
+		resolved, missing = OrderedDict(), []
+		for role in CIRCLE_VALUE_ROLES:
+			value, unit = stored[role]
+			item = self._stored_items.get(role)
+			if self._keeps(value) and item is not None:
+				resolved[role] = (value, unit, item, self._stored_qualifiers.get(role))
+			else:
+				resolved[role] = None
+				missing.append(role)
+		if missing:
+			radius = self._radius_or_refuse()
+			derived = {CIRCLE_VALUE_AREA: (math.pi * radius ** 2, DCMSR_UNITS_MM2), CIRCLE_VALUE_PERIMETER: (2.0 * math.pi * radius, DCMSR_UNITS_MM),
+				CIRCLE_VALUE_RADIUS: (radius, DCMSR_UNITS_MM)}
+			for role in missing:
+				resolved[role] = derived[role] + (None, None)
+		return resolved
+
+	def resolve_value(self, diagnostics=None):
+		'''	Radius and unit written: the stored radius of an unchanged parsed circle, else computed from
+			the geometry, else (a parsed circle read without a usable Radius NUM, unchanged) converted from
+			its stored area or perimeter when their UCUM unit converts to millimetres.
+
+			@returns tuple (number, unit)
+			@raises SRDiagnosticError for degenerate geometry, or a radius that cannot be derived: an
+				image-domain circle without a calibrated frame and no stored value in a supported unit
+		'''
+		self._refuse_degenerate()
+		if self._keeps(self._val):
+			return self._val, self._unit
+		return self._radius_or_refuse(), DCMSR_UNITS_MM
+
+	def _refuse_degenerate(self):
+		'''	Refuse a circle with degenerate geometry before anything is written.
+
+			@raises SRDiagnosticError (`degenerate-geometry`)
+		'''
+		from ..sr import SRDiagnostic, SRDiagnosticError, SR_DIAGNOSTIC_ERROR, SR_CONDITION_DEGENERATE_GEOMETRY
+		if self.is_degenerate:
+			raise SRDiagnosticError(SRDiagnostic(SR_DIAGNOSTIC_ERROR, SR_CONDITION_DEGENERATE_GEOMETRY, None, self.tracking_uid,
+				'CircleMeasurement has degenerate geometry (radius below %s, or collinear construction points) and cannot be written'
+				% DCMSR_CIRCLE_LENGTH_TOLERANCE))
+
+	def _radius_or_refuse(self):
+		'''	Radius in millimetres a value to be written is derived from (`_radius_mm`).
+
+			@returns float
+			@raises SRDiagnosticError (`measurement-not-computable`) when there is none
+		'''
+		from ..sr import SRDiagnostic, SRDiagnosticError, SR_DIAGNOSTIC_ERROR, SR_CONDITION_MEASUREMENT_NOT_COMPUTABLE
+		radius = self._radius_mm()
+		if radius is None:
+			raise SRDiagnosticError(SRDiagnostic(SR_DIAGNOSTIC_ERROR, SR_CONDITION_MEASUREMENT_NOT_COMPUTABLE, None, self.tracking_uid,
+				'CircleMeasurement cannot be computed: an image-domain circle needs `calibration` with a Pixel Spacing, '
+				'or a stored radius, area or perimeter in a unit that converts to millimetres'))
+		return radius
+
+	@classmethod
+	def from_sr(cls, item, group=None, strict=False, diagnostics=None, calibrations=None, **kwargs):
+		'''	Build a circle from its measurement group. Pass the group itself as `item`, or any of its NUM
+			items together with the enclosing `group`: a NUM item alone carries neither the tracking
+			identifier nor the other NUM items, and reads as None. See
+			`sonador.apisettings.sr.measurements.srparse_circle`.
+
+			@input item (pydicom.Dataset): the measurement group, or one of its NUM items with `group`
+			@input group (pydicom.Dataset, default=None): the enclosing measurement group of a NUM `item`
+
+			@returns CircleMeasurement, a generic Measurement for a group the circle model cannot hold, or None
+		'''
+		from ..sr.measurements import srparse_circle, _group_tracking
+		if group is None and item.get('ValueType') == 'NUM':
+			return None
+		group = group if group is not None else item
+		tracking_id, tracking_uid = _group_tracking(group)
+		return srparse_circle(group, tracking_id, tracking_uid, set(), strict=strict, diagnostics=diagnostics, calibrations=calibrations)
+
+
 # Measurement class by measurement type: the factory behind `Measurement.from_sr`
 MEASUREMENT_CLASSES = {}
 
@@ -1647,7 +2630,7 @@ def measurement_class_for_type(measurement_type):
 	return MEASUREMENT_CLASSES.get(measurement_type, Measurement)
 
 
-for _measurement_class in (LengthMeasurement, AngleMeasurement, CobbAngleMeasurement):
+for _measurement_class in (LengthMeasurement, AngleMeasurement, CobbAngleMeasurement, CircleMeasurement):
 	register_measurement_class(_measurement_class)
 
 

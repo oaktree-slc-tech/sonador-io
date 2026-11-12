@@ -214,6 +214,8 @@ SR_CONDITION_UNREGISTERED_VIEW = 'unregistered-view-value'
 SR_CONDITION_INVALID_DRAWING_PLANE = 'invalid-drawing-plane'
 SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN = 'patient-provenance-on-image-domain'
 SR_CONDITION_UNKNOWN_SOURCE_SERIES = 'unknown-source-series'
+SR_CONDITION_LEGACY_CIRCLE = 'legacy-circle-scoord3d'
+SR_CONDITION_QUALIFIER_DROPPED = 'measurement-qualifier-dropped'
 
 
 class SRDiagnostic(namedtuple('SRDiagnostic', ('severity', 'condition', 'path', 'value', 'message'))):
@@ -368,11 +370,28 @@ def _placeholder_num_values(item, found):
 		_placeholder_num_values(child, found)
 
 
+def _mark_unnamed_items(item):
+	'''	Mark the items of a subtree that carry no concept name where DICOM makes it optional (IMAGE,
+		SCOORD, SCOORD3D and the like). highdicom gives such an item a placeholder name when it reads it;
+		the writers remove the placeholder from marked items once the document is built
+		(`sonador.apisettings.sr.seriestag.srcontent_strip_unnamed`), so the item is written back unnamed.
+		Modifies the subtree in place.
+
+		@input item (pydicom.Dataset): root of the subtree
+	'''
+	from .seriestag import _UNNAMED_MARKER
+	if DCMHEADER_SR_VALUE_TYPE in item and not item.get('ConceptNameCodeSequence') \
+			and str(item.get(DCMHEADER_SR_VALUE_TYPE)) in DCMSR_VALUE_TYPES_OPTIONAL_NAME:
+		setattr(item, _UNNAMED_MARKER, True)
+	for child in item.get('ContentSequence') or []:
+		_mark_unnamed_items(child)
+
+
 def srcontent_from_dataset(item):
 	'''	highdicom content item of a raw content item dataset, as a deep copy. Used to re-emit
 		preserved (unmodelled) items; a by-reference item cannot be represented and is refused,
 		wherever it sits in the item's subtree. A NUM item without a value is re-emitted with an empty
-		Measured Value Sequence.
+		Measured Value Sequence, and an item read without a concept name is written back without one.
 
 		@input item (pydicom.Dataset or highdicom ContentItem): the content item
 
@@ -386,6 +405,7 @@ def srcontent_from_dataset(item):
 	if isinstance(item, ContentItem):
 		return copy.deepcopy(item)
 	copied = copy.deepcopy(item)
+	_mark_unnamed_items(copied)
 	without_value = []
 	_placeholder_num_values(copied, without_value)
 	converted = ContentItem._from_dataset_derived(copied)
@@ -738,7 +758,10 @@ def srencode_measurement(measurement:Measurement, name_default=SONADOR_LENGTH, s
 		@raises SRDiagnosticError for degenerate geometry, a value that cannot be computed, or under
 			`strict` an unregistered View value
 	'''
-	from .measurements import srencode_measurement_coordinates, srencode_measurement_children, srencode_measurement_values
+	from .measurements import srencode_measurement_coordinates, srencode_measurement_children, srencode_measurement_values, srencode_circle
+	from ..base import CircleMeasurement
+	if isinstance(measurement, CircleMeasurement):
+		return srencode_circle(measurement, sr_template=sr_template, layout=layout, diagnostics=diagnostics, strict=strict)
 	mname = measurement.name or name_default
 
 	if not mname or not isinstance(mname, (DcmCode, DcmCodedConcept)):
