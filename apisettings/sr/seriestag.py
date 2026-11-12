@@ -9,7 +9,9 @@
 	* `INFERRED FROM` IMAGE: one referenced SOP instance, representative of the series;
 	* `HAS PROPERTIES` TEXT: the extended meta attributes (`Sonador-Measurement.Description`, `.Text`,
 		`.Location`), flat in every document class;
-	* the display colours, one TEXT item per colour role with a CIELab `L\\a\\b` value (0-65535):
+	* the display colours, one TEXT item per colour role present with a CIELab `L\\a\\b` value
+		(0-65535). The registry holds six roles: the Series Tag roles `Background`, `Border`, `Value`,
+		`Meaning`, and a measurement's `Line` and `Text`; any role is read and written on any item:
 		- nested form (Comprehensive 3D SR, the only form written): a `HAS PROPERTIES` CONTAINER
 			`Sonador-DisplayAttributes` holding a `CONTAINS` CONTAINER `Sonador-DisplayAttributes.Color`
 			holding the role items;
@@ -45,7 +47,7 @@ from highdicom.sr.enum import RelationshipTypeValues, ValueTypeValues
 
 from ..base import SONADOR_MANUFACTURER, SONADOR_SR, SONADOR_SCHEME_VERSION_03, Finding, FindingCollection, \
 	MeasurementCollection, SONADOR_MEASUREMENT_TYPE_SERIES_TAG, SONADOR_MEASUREMENT_TYPE_LENGTH, SONADOR_MEASUREMENT_TYPE_ANGLE, \
-	SONADOR_MEASUREMENT_TYPE_COBB_ANGLE, SONADOR_MEASUREMENT_TYPE_ARROW, SONADOR_MEASUREMENT_TYPE_GENERIC, ReportGroup, ImageReference, DCMSR_FINDING, RGBColor, \
+	SONADOR_MEASUREMENT_TYPE_COBB_ANGLE, SONADOR_MEASUREMENT_TYPE_CIRCLE, SONADOR_MEASUREMENT_TYPE_ARROW, SONADOR_MEASUREMENT_TYPE_GENERIC, ReportGroup, ImageReference, DCMSR_FINDING, RGBColor, \
 	DCMHEADER_SR_VALUE_TYPE, DCMHEADER_CONCEPT_CODE_SEQUENCE, DCMHEADER_CODING_SCHEME_VERSION, \
 	DCMHEADER_CODING_SCHEME_DESIGNATOR, DCMHEADER_CODE_MEANING, DCMHEADER_CODE_VALUE, \
 	DCMHEADER_SR_REF_SOP_SEQ, DCMHEADER_SR_SOP_CLASS_UID, DCMHEADER_SR_REF_INSTANCE_UID, DCMHEADER_SERIES_INSTANCE_UID
@@ -94,7 +96,7 @@ DCMSR_DISPLAY_COLOR = Code(SONADOR_DISPLAY_COLOR, SONADOR_SR, 'Display color', s
 DCMSR_DISPLAY_COLOR_ROLES = OrderedDict(
 	(role, Code('%s.%s' % (SONADOR_DISPLAY_COLOR, role), SONADOR_SR, '%s (CIELab)' % meaning, scheme_version=SONADOR_SCHEME_VERSION_03))
 	for role, meaning in (('Background', 'Background color'), ('Border', 'Border color'),
-		('Value', 'Coded value color'), ('Meaning', 'Code meaning color')))
+		('Value', 'Coded value color'), ('Meaning', 'Code meaning color'), ('Line', 'Line color'), ('Text', 'Text color')))
 
 
 # Tracking identifiers and measurement types
@@ -107,6 +109,7 @@ CORNERSTONE_TOOL_SERIES_TAG = 'DICOMSRSeriesTagTool'
 CORNERSTONE_TOOL_LENGTH = 'Length'
 CORNERSTONE_TOOL_ANGLE = 'Angle'
 CORNERSTONE_TOOL_COBB_ANGLE = 'CobbAngle'
+CORNERSTONE_TOOL_CIRCLE = 'CircleROI'
 CORNERSTONE_TOOL_ARROW = 'ArrowAnnotate'
 
 
@@ -128,14 +131,17 @@ SONADOR_MEASUREMENT_TYPES = OrderedDict((
 	(cornerstone_tracking_id(CORNERSTONE_TOOL_LENGTH), SONADOR_MEASUREMENT_TYPE_LENGTH),
 	(cornerstone_tracking_id(CORNERSTONE_TOOL_ANGLE), SONADOR_MEASUREMENT_TYPE_ANGLE),
 	(cornerstone_tracking_id(CORNERSTONE_TOOL_COBB_ANGLE), SONADOR_MEASUREMENT_TYPE_COBB_ANGLE),
+	(cornerstone_tracking_id(CORNERSTONE_TOOL_CIRCLE), SONADOR_MEASUREMENT_TYPE_CIRCLE),
 	(cornerstone_tracking_id(CORNERSTONE_TOOL_ARROW), SONADOR_MEASUREMENT_TYPE_ARROW),
 	('%s:%s' % (CORNERSTONE3D_TOOLS_SR_TAG, CORNERSTONE_TOOL_LENGTH), SONADOR_MEASUREMENT_TYPE_LENGTH),
 	('%s:%s' % (CORNERSTONE3D_TOOLS_SR_TAG, CORNERSTONE_TOOL_ANGLE), SONADOR_MEASUREMENT_TYPE_ANGLE),
 	('%s:%s' % (CORNERSTONE3D_TOOLS_SR_TAG, CORNERSTONE_TOOL_COBB_ANGLE), SONADOR_MEASUREMENT_TYPE_COBB_ANGLE),
+	('%s:%s' % (CORNERSTONE3D_TOOLS_SR_TAG, CORNERSTONE_TOOL_CIRCLE), SONADOR_MEASUREMENT_TYPE_CIRCLE),
 ))
 SONADOR_FINDING_TYPES = (SONADOR_MEASUREMENT_TYPE_SERIES_TAG,)		# qualitative (findings)
 # Quantitative tools a measurement group is parsed to a typed measurement for
-SONADOR_QUANTITATIVE_TYPES = (SONADOR_MEASUREMENT_TYPE_LENGTH, SONADOR_MEASUREMENT_TYPE_ANGLE, SONADOR_MEASUREMENT_TYPE_COBB_ANGLE)
+SONADOR_QUANTITATIVE_TYPES = (SONADOR_MEASUREMENT_TYPE_LENGTH, SONADOR_MEASUREMENT_TYPE_ANGLE, SONADOR_MEASUREMENT_TYPE_COBB_ANGLE,
+	SONADOR_MEASUREMENT_TYPE_CIRCLE)
 
 
 def measurement_type_for_tracking_id(tracking_id):

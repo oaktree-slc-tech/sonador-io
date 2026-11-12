@@ -1,7 +1,9 @@
 '''	Display attributes: properties which control how a resource is rendered in the viewer.
 
-	The shared element is the color-role contract (`Background`, `Border`, `Value`, `Meaning`, each a
-	hexadecimal sRGB color). Each consumer wraps it differently; a tag stores it in its `Meta`
+	The shared element is the color-role contract: six roles, each a hexadecimal sRGB color. The
+	Series Tag roles are `Background`, `Border`, `Value` and `Meaning`; a measurement's own roles are
+	`Line` (the drawn geometry) and `Text` (its label). Any role may occur on any item: a role read is
+	a role written back, and no role set is enforced per tool. Each consumer wraps it differently; a tag stores it in its `Meta`
 	document (`DCMSR_TAG_META`) as `{ 'DisplayAttributes': { 'Color': {...} } }`, a Series Tag finding
 	carries them as `DisplayAttributes` (RGB tuples in the model, CIELab text only in the DICOM-SR codec,
 	see `apisettings.sr.seriestag`).
@@ -18,7 +20,10 @@ DISPLAY_COLOR_BACKGROUND = 'Background'
 DISPLAY_COLOR_BORDER = 'Border'
 DISPLAY_COLOR_VALUE = 'Value'
 DISPLAY_COLOR_MEANING = 'Meaning'
-DISPLAY_COLOR_ROLES = (DISPLAY_COLOR_BACKGROUND, DISPLAY_COLOR_BORDER, DISPLAY_COLOR_VALUE, DISPLAY_COLOR_MEANING)
+DISPLAY_COLOR_LINE = 'Line'
+DISPLAY_COLOR_TEXT = 'Text'
+DISPLAY_COLOR_ROLES = (DISPLAY_COLOR_BACKGROUND, DISPLAY_COLOR_BORDER, DISPLAY_COLOR_VALUE, DISPLAY_COLOR_MEANING,
+	DISPLAY_COLOR_LINE, DISPLAY_COLOR_TEXT)
 
 HEX_COLOR_RE = re.compile(r'^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$')
 
@@ -49,9 +54,9 @@ def tag_display_color(meta):
 
 
 class DisplayAttributes:
-	'''	Display attributes of a finding: the colour roles as RGB tuples, plus any unmodelled content
-		items read from the two display containers of a document, each re-emitted under the container
-		it was read from on write.
+	'''	Display attributes of a finding or measurement: the colour roles as RGB tuples, plus any
+		unmodelled content items read from the two display containers of a document, each re-emitted
+		under the container it was read from on write. A role that is absent is not written.
 
 		@property color (OrderedDict): role -> `client.utils.colors.RGB`, roles in `DISPLAY_COLOR_ROLES`
 			order, only the roles that carry a colour

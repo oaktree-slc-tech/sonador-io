@@ -1,5 +1,5 @@
-'''	Sonador-SR 0.3: quantitative measurements (Length, Angle, Cobb angle) exchanged with the Sonador
-	Viewer, specified in oak-tree/medical-imaging/sonador-client#37.
+'''	Sonador-SR 0.3: quantitative measurements (Length, Angle, Cobb angle, Circle) exchanged with the
+	Sonador Viewer, specified in oak-tree/medical-imaging/sonador-client#37.
 
 	A measurement is one TID 1501 group holding a TID 300 NUM item whose tracking identifier names
 	the Cornerstone tool. The geometry is a child of the NUM: `INFERRED FROM` SCOORD3D with a Frame
@@ -19,12 +19,20 @@
 
 	Quantitative concepts are written with their SCT codes and read in their SRT forms as well.
 
+	A circle (`CircleROI`) is three NUM items, Area, Perimeter and Radius, each `INFERRED FROM` its own
+	copy of the geometry: `CIRCLE` (center and circumference point) in the image domain, `ELLIPSE` (two
+	perpendicular diameters of equal length) in the patient domain, where DICOM defines no 3D circle. The
+	Area NUM carries the per-measurement properties and, for a circle derived from three points,
+	`Sonador-Measurement.ConstructionPoints`. Readers also accept the undefined `CIRCLE` SCOORD3D a stock
+	Cornerstone3D adapter writes, as a circle with no plane.
+
 	The identifier decides the type, the geometry never does: a group with an unknown identifier or
 	an unusable geometry reads as a generic `Measurement` with every NUM item preserved. Children
 	that are not modelled stay under their own item as `extra_items`.
 
-	Contents: the concepts and accepted codes, `image_frame_geometry`, the content item encoders
-	(`srencode_measurement_*`) and the parsers (`srparse_measurement`, `srparse_group_measurement`).
+	Contents: the concepts and accepted codes, `image_frame_geometry`, the drawing-plane codec, the content
+	item encoders (`srencode_measurement_*`, `srencode_circle`) and the parsers (`srparse_measurement`,
+	`srparse_circle`, `srparse_group_measurement`).
 	The model classes are in `sonador.apisettings.base.sr`; the group router is
 	`sonador.apisettings.sr.seriestag.srparse_report_group`.
 '''
@@ -39,14 +47,22 @@ from pydicom.valuerep import DS
 
 from highdicom.sr.content import CoordinatesForMeasurement, CoordinatesForMeasurement3D, SourceImageForRegion, FindingSite
 from highdicom.sr.templates import Code, CodedConcept
-from highdicom.sr.value_types import ContentItem, NumContentItem, TextContentItem, UIDRefContentItem
+from highdicom.sr.value_types import ContentItem, ContentSequence, NumContentItem, TextContentItem, UIDRefContentItem, \
+	ScoordContentItem, Scoord3DContentItem
+from pydicom.sequence import Sequence
+
+from client.utils.object import pick
 from highdicom.sr.enum import RelationshipTypeValues, GraphicTypeValues, GraphicTypeValues3D
 
 from ..base import SONADOR_MANUFACTURER, SONADOR_SR, SONADOR_SCHEME_VERSION_03, Measurement, MeasurementValue, Geometry, \
 	GeometricMeasurement, ImageFrameGeometry, measurement_class_for_type, DCMSR_GEOMETRY_DOMAIN_IMAGE, DCMSR_GEOMETRY_DOMAIN_PATIENT, \
 	DCMSR_UNITS_PIXEL, DCMSR_CONCEPT_LENGTH, DCMSR_CONCEPT_COBB_ANGLE, DCMHEADER_SR_REF_REFERENCE_FRAME, \
 	SONADOR_MEASUREMENT_TYPE_LENGTH, SONADOR_MEASUREMENT_TYPE_ANGLE, SONADOR_MEASUREMENT_TYPE_COBB_ANGLE, \
-	SONADOR_MEASUREMENT_TYPE_GENERIC, DCMHEADER_CODING_SCHEME_DESIGNATOR, DCMHEADER_CODE_MEANING, drawing_plane_vectors
+	SONADOR_MEASUREMENT_TYPE_GENERIC, SONADOR_MEASUREMENT_TYPE_CIRCLE, DCMHEADER_CODING_SCHEME_DESIGNATOR, DCMHEADER_CODE_MEANING, \
+	drawing_plane_vectors, drawing_plane_normal, normals_parallel, CircleMeasurement, circle_from_ellipse, DCMSR_GRAPHIC_CIRCLE, \
+	DCMSR_GRAPHIC_ELLIPSE, DCMSR_CONCEPT_AREA, DCMSR_CONCEPT_PERIMETER, DCMSR_CONCEPT_RADIUS, DCMSR_CIRCLE_LENGTH_TOLERANCE, \
+	DCMSR_CIRCLE_AREA_TOLERANCE, DCMSR_CIRCLE_AREA_RELATIVE_TOLERANCE, DCMSR_CIRCLE_PARALLEL_DEGREES, DCMSR_UNITS_MM, \
+	CIRCLE_VALUE_AREA, CIRCLE_VALUE_PERIMETER, CIRCLE_VALUE_RADIUS, CIRCLE_VALUE_ROLES, circle_unit_scale
 from . import dcm_code_value, srcontent_is_named, srcontent_extra_items, srcontent_from_dataset, sr_diagnostic, \
 	SR_DIAGNOSTIC_INFO, SR_DIAGNOSTIC_WARNING, SR_DIAGNOSTIC_ERROR, SR_CONDITION_MEASUREMENT_VALUE_MISMATCH, \
 	SR_CONDITION_MEASUREMENT_VALUE_UNVERIFIED, SR_CONDITION_MEASUREMENT_UNCALIBRATED, SR_CONDITION_MEASUREMENT_WITHOUT_VALUE, \
@@ -55,7 +71,9 @@ from . import dcm_code_value, srcontent_is_named, srcontent_extra_items, srconte
 from .seriestag import srparse_item_properties, srencode_meta_items, srencode_display_items, srcontent_is_valid, \
 	image_reference_from_dataset, measurement_type_for_tracking_id, DCMSR_LAYOUT_NESTED, DCMSR_LAYOUTS_WRITTEN, \
 	_children, _value_type, _text_value, _relationship, _path, _note_by_reference, _note_missing_relationships, _UNNAMED_MARKER, DCMSR_IMAGE_REFERENCE_NAME
-from . import srcontent_name, SR_CONDITION_UNREGISTERED_VIEW, SR_CONDITION_INVALID_DRAWING_PLANE, SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN
+from . import srcontent_name, SR_CONDITION_UNREGISTERED_VIEW, SR_CONDITION_INVALID_DRAWING_PLANE, SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN, \
+	SR_CONDITION_LEGACY_CIRCLE, SR_CONDITION_QUALIFIER_DROPPED
+from .seriestag import DCMSR_MEASUREMENT_META, DCMSR_DISPLAY_ATTRIBUTES, DCMSR_DISPLAY_COLOR_ROLES
 
 # Concepts
 
@@ -108,6 +126,20 @@ SONADOR_MEASUREMENT_DRAWING_PLANE_MEANING = 'Orientation of the view a measureme
 DCMSR_MEASUREMENT_DRAWING_PLANE = Code(SONADOR_MEASUREMENT_DRAWING_PLANE, SONADOR_SR, SONADOR_MEASUREMENT_DRAWING_PLANE_MEANING,
 	scheme_version=SONADOR_SCHEME_VERSION_03)
 
+# Points a measurement was derived from (a circle's three circumference points): auxiliary data, the
+# primary geometry is complete without them
+SONADOR_MEASUREMENT_CONSTRUCTION_POINTS = '%s-Measurement.ConstructionPoints' % SONADOR_MANUFACTURER
+SONADOR_MEASUREMENT_CONSTRUCTION_POINTS_MEANING = 'Points a measurement was constructed from.'
+DCMSR_MEASUREMENT_CONSTRUCTION_POINTS = Code(SONADOR_MEASUREMENT_CONSTRUCTION_POINTS, SONADOR_SR,
+	SONADOR_MEASUREMENT_CONSTRUCTION_POINTS_MEANING, scheme_version=SONADOR_SCHEME_VERSION_03)
+
+# Concepts of a circle's NUM items by role, in writing order: the SCT code written, then the SRT equivalent read
+DCMSR_CIRCLE_CONCEPTS = OrderedDict((
+	(CIRCLE_VALUE_AREA, (DCMSR_CONCEPT_AREA, Code('G-A166', 'SRT', 'Area'))),
+	(CIRCLE_VALUE_PERIMETER, (DCMSR_CONCEPT_PERIMETER, Code('G-A197', 'SRT', 'Perimeter'))),
+	(CIRCLE_VALUE_RADIUS, (DCMSR_CONCEPT_RADIUS, Code('G-A196', 'SRT', 'Radius'))),
+))
+
 # Drawing-plane validation: unit length and perpendicularity of the directions, distance of the points
 # from the plane through the first point (millimetres)
 DCMSR_DRAWING_PLANE_DIRECTION_TOLERANCE = 1e-4
@@ -130,6 +162,19 @@ DCMSR_CORNERSTONE_FREE_TEXT = 'CORNERSTONEFREETEXT'
 DCMSR_VALUE_TOLERANCE = 0.01
 
 DCMSR_GRAPHIC_TYPES = {'SCOORD': GraphicTypeValues, 'SCOORD3D': GraphicTypeValues3D}
+
+
+def _is_measurement_geometry(item):
+	'''	Whether a child of a NUM item is the coordinates the measurement was made from: a SCOORD or
+		SCOORD3D item that is not a named auxiliary property (`Sonador-Measurement.ConstructionPoints`) and
+		is not a `HAS PROPERTIES` child.
+
+		@input item (pydicom.Dataset): a child of a NUM item
+		@returns bool
+	'''
+	if _value_type(item) not in DCMSR_GRAPHIC_TYPES or srcontent_is_named(item, DCMSR_MEASUREMENT_CONSTRUCTION_POINTS):
+		return False
+	return _relationship(item) != RelationshipTypeValues.HAS_PROPERTIES.value
 
 
 # Calibration
@@ -235,18 +280,20 @@ def drawing_plane_from_text(text):
 		return None
 
 
-def drawing_plane_failed_check(plane, points):
+def drawing_plane_failed_check(plane, points, normal=None):
 	'''	The first validation check a drawing plane fails for the points of a measurement: each
 		direction of unit length within 1e-4, the two directions perpendicular within 1e-4 (their dot
-		product), every point within 1 mm of the plane through the first point. Makes no request.
+		product), the plane's normal parallel to `normal` within 1 degree when one is given (a circle's
+		plane), every point within 1 mm of the plane through the first point. Makes no request.
 
 		@input plane (pair of 3-vectors, or None): the drawing plane
 		@input points (sequence of 3-sequences): patient-domain points of the measurement
+		@input normal (sequence of 3 numbers, default=None): normal of the measurement's own plane
 
 		@returns
 			- None when the plane is valid
 			- str naming the failed check: `six-finite-numbers`, `unit-width`, `unit-height`,
-				`perpendicular` or `points-within-1mm`
+				`perpendicular`, `normal-parallel` or `points-within-1mm`
 	'''
 	try:
 		width, height = (np.asarray(v, dtype=float) for v in drawing_plane_vectors(plane))
@@ -258,12 +305,14 @@ def drawing_plane_failed_check(plane, points):
 		return 'unit-height'
 	if abs(float(np.dot(width, height))) > DCMSR_DRAWING_PLANE_DIRECTION_TOLERANCE:
 		return 'perpendicular'
-	normal = np.cross(width, height)
-	normal = normal / np.linalg.norm(normal)
+	plane_normal = np.cross(width, height)
+	plane_normal = plane_normal / np.linalg.norm(plane_normal)
+	if normal is not None and not normals_parallel(plane_normal, normal, DCMSR_CIRCLE_PARALLEL_DEGREES):
+		return 'normal-parallel'
 	if points:
 		origin = np.asarray(points[0], dtype=float)
 		for point in points[1:]:
-			if abs(float(np.dot(np.asarray(point, dtype=float) - origin, normal))) > DCMSR_DRAWING_PLANE_DISTANCE_TOLERANCE:
+			if abs(float(np.dot(np.asarray(point, dtype=float) - origin, plane_normal))) > DCMSR_DRAWING_PLANE_DISTANCE_TOLERANCE:
 				return 'points-within-1mm'
 	return None
 
@@ -418,7 +467,7 @@ def srencode_measurement_provenance(measurement):
 	text, plane = measurement.drawing_plane_text, measurement.drawing_plane
 	points_changed = getattr(measurement, 'points_changed', False)
 	if plane is not None and (text is None or points_changed):
-		failed = drawing_plane_failed_check(plane, geometry.points)
+		failed = drawing_plane_failed_check(plane, geometry.points, normal=getattr(measurement, 'plane_normal', None))
 		if failed is not None:
 			raise ValueError('Drawing plane of measurement %s fails the check "%s" and cannot be written'
 				% (measurement.tracking_uid, failed))
@@ -736,6 +785,113 @@ def _group_tracking(group):
 	return identifier, uid
 
 
+def _parse_num_properties(children, consumed, group_items, group_consumed, diagnostics, strict, path, geometry, tracking_uid,
+		normal=None):
+	'''	Read the per-measurement properties under a NUM item: the extended meta items and display
+		attributes (with the legacy group-level layout), the View items, Source-Series and Drawing-Plane
+		(patient domain only), a foreign label, coded finding sites, and every other child preserved.
+
+		Diagnostics raised here: those of `srparse_item_properties`, `patient-provenance-on-image-domain`
+		(info), `invalid-drawing-plane` (warning), `foreign-measurement-label` (info), and those of the
+		validity checks of preserved items.
+
+		@input children (list of pydicom.Dataset): children of the NUM item
+		@input consumed (set): indices of `children` already read; those read here are added
+		@input group_items (list of pydicom.Dataset): group-level siblings read as the legacy layout
+		@input group_consumed (set): indices of `group_items` already read; those read here are added
+		@input diagnostics (list), strict (bool), path (str): diagnostics list, strict mode, location
+		@input geometry (Geometry or None): geometry of the measurement
+		@input tracking_uid (str or None): tracking UID, the value of the drawing-plane diagnostic
+		@input normal (sequence of 3 numbers, default=None): plane normal a drawing plane must be
+			parallel to within 1 degree (circles)
+
+		@returns tuple (dict, DisplayAttributes or None, list of str, str or None, tuple or None, str or None,
+			list of FindingSite, list of pydicom.Dataset): meta attributes, display, views, source series,
+			drawing plane, drawing-plane text, finding sites, preserved children
+	'''
+	# Properties of the NUM item, then the legacy group level
+	meta, display = srparse_item_properties(children, group_items, consumed, group_consumed, diagnostics, strict, path, {}, owner='NUM item')
+
+	views = []
+	for idx, child in enumerate(children):
+		if idx not in consumed and srcontent_is_named(child, DCMSR_MEASUREMENT_VIEW) and _value_type(child) == 'TEXT':
+			consumed.add(idx)
+			if (_text_value(child) or '').strip():
+				views.append(_text_value(child).strip())
+	if not views:
+		for idx, sibling in enumerate(group_items):
+			if idx not in group_consumed and srcontent_is_named(sibling, DCMSR_MEASUREMENT_VIEW) and _value_type(sibling) == 'TEXT':
+				group_consumed.add(idx)
+				if (_text_value(sibling) or '').strip():
+					views.append(_text_value(sibling).strip())
+
+	# Where a patient-domain measurement was made; under an image-domain NUM the items are reported and
+	# left in place, so that they are preserved with the other unmodelled children
+	source_series, plane, plane_text = None, None, None
+	for idx, child in enumerate(children):
+		if idx in consumed:
+			continue
+		is_series = srcontent_is_named(child, DCMSR_MEASUREMENT_SOURCE_SERIES) and _value_type(child) == 'UIDREF'
+		is_plane = srcontent_is_named(child, DCMSR_MEASUREMENT_DRAWING_PLANE) and _value_type(child) == 'TEXT'
+		if not (is_series or is_plane):
+			continue
+		if geometry is None or not geometry.is_patient:
+			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN,
+				'%s under a NUM item without patient-domain geometry; ignored and preserved' % dcm_code_value(srcontent_name(child)), path=path)
+		elif is_series and source_series is None:
+			consumed.add(idx)
+			source_series = str(child.get('UID') or '').strip() or None
+		elif is_plane and plane_text is None:
+			consumed.add(idx)
+			plane_text = _text_value(child) or ''
+			plane = drawing_plane_from_text(plane_text)
+			failed = 'six-finite-numbers' if plane is None else drawing_plane_failed_check(plane, geometry.points, normal=normal)
+			if failed is not None:
+				plane = None
+				sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_INVALID_DRAWING_PLANE,
+					'Drawing-Plane "%s" fails the check "%s"; read as absent and written back as read' % (plane_text, failed),
+					path=path, value=tracking_uid, strict=strict)
+
+	# A dcmjs label becomes the description; it is written back only in that form
+	if meta.get('description') is None:
+		label = None
+		for idx, child in enumerate(children):
+			if idx not in consumed and _foreign_label(child):
+				label = _foreign_label(child)
+				consumed.add(idx)
+				break
+		if label is None:
+			for idx, sibling in enumerate(group_items):
+				if idx not in group_consumed and _foreign_label(sibling):
+					label = _foreign_label(sibling)
+					group_consumed.add(idx)
+					break
+		if label is not None:
+			meta['description'] = label
+			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_FOREIGN_MEASUREMENT_LABEL,
+				'foreign label read as the description; written back as the Sonador description', path=path, value=label)
+
+	# Coded finding sites under the NUM item
+	finding_sites = []
+	for idx, child in enumerate(children):
+		if idx not in consumed and _is_finding_site(child) and _relationship(child) == RelationshipTypeValues.HAS_CONCEPT_MOD.value:
+			consumed.add(idx)
+			finding_sites.append(FindingSite.from_dataset(child, copy=True))
+
+	# Everything else under the NUM item is preserved there
+	extra_items = []
+	for idx, child in enumerate(children):
+		if idx in consumed:
+			continue
+		if _note_by_reference(child, diagnostics, path):
+			pass
+		elif not srcontent_is_valid(child, diagnostics=diagnostics, strict=strict, path=path):
+			continue
+		extra_items.append(_preserved(child))
+
+	return meta, display, views, source_series, plane, plane_text, finding_sites, extra_items
+
+
 def srparse_measurement(item, group=None, strict=False, diagnostics=None, measurement_class=None, tracking_id=None, tracking_uid=None,
 		group_consumed=None, allow_group_level=True, calibrations=None, repaired=False):
 	'''	Build a measurement from a NUM content item: the value and unit, the geometry, the per-item
@@ -799,7 +955,7 @@ def srparse_measurement(item, group=None, strict=False, diagnostics=None, measur
 	consumed = set()
 	geometry, frame_uid, source_coordinates = None, None, None
 	for idx, child in enumerate(children):
-		if _value_type(child) in DCMSR_GRAPHIC_TYPES:
+		if _is_measurement_geometry(child):
 			geometry, frame_uid = _parse_coordinates(child, diagnostics, strict, path)
 			if geometry is not None:
 				consumed.add(idx)
@@ -834,85 +990,10 @@ def srparse_measurement(item, group=None, strict=False, diagnostics=None, measur
 		if not typed and value is None:
 			return None
 
-	# Properties of the NUM item, then the legacy group level
-	meta, display = srparse_item_properties(children, group_items, consumed, group_consumed, diagnostics, strict, path, {}, owner='NUM item')
-
-	views = []
-	for idx, child in enumerate(children):
-		if idx not in consumed and srcontent_is_named(child, DCMSR_MEASUREMENT_VIEW) and _value_type(child) == 'TEXT':
-			consumed.add(idx)
-			if (_text_value(child) or '').strip():
-				views.append(_text_value(child).strip())
-	if not views:
-		for idx, sibling in enumerate(group_items):
-			if idx not in group_consumed and srcontent_is_named(sibling, DCMSR_MEASUREMENT_VIEW) and _value_type(sibling) == 'TEXT':
-				group_consumed.add(idx)
-				if (_text_value(sibling) or '').strip():
-					views.append(_text_value(sibling).strip())
-
-	# Where a patient-domain measurement was made; under an image-domain NUM the items are reported and
-	# left in place, so that they are preserved with the other unmodelled children
-	source_series, plane, plane_text = None, None, None
-	for idx, child in enumerate(children):
-		if idx in consumed:
-			continue
-		is_series = srcontent_is_named(child, DCMSR_MEASUREMENT_SOURCE_SERIES) and _value_type(child) == 'UIDREF'
-		is_plane = srcontent_is_named(child, DCMSR_MEASUREMENT_DRAWING_PLANE) and _value_type(child) == 'TEXT'
-		if not (is_series or is_plane):
-			continue
-		if geometry is None or not geometry.is_patient:
-			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN,
-				'%s under a NUM item without patient-domain geometry; ignored and preserved' % dcm_code_value(srcontent_name(child)), path=path)
-		elif is_series and source_series is None:
-			consumed.add(idx)
-			source_series = str(child.get('UID') or '').strip() or None
-		elif is_plane and plane_text is None:
-			consumed.add(idx)
-			plane_text = _text_value(child) or ''
-			plane = drawing_plane_from_text(plane_text)
-			failed = 'six-finite-numbers' if plane is None else drawing_plane_failed_check(plane, geometry.points)
-			if failed is not None:
-				plane = None
-				sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_INVALID_DRAWING_PLANE,
-					'Drawing-Plane "%s" fails the check "%s"; read as absent and written back as read' % (plane_text, failed),
-					path=path, value=tracking_uid, strict=strict)
-
-	# A dcmjs label becomes the description; it is written back only in that form
-	if meta.get('description') is None:
-		label = None
-		for idx, child in enumerate(children):
-			if idx not in consumed and _foreign_label(child):
-				label = _foreign_label(child)
-				consumed.add(idx)
-				break
-		if label is None:
-			for idx, sibling in enumerate(group_items):
-				if idx not in group_consumed and _foreign_label(sibling):
-					label = _foreign_label(sibling)
-					group_consumed.add(idx)
-					break
-		if label is not None:
-			meta['description'] = label
-			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_FOREIGN_MEASUREMENT_LABEL,
-				'foreign label read as the description; written back as the Sonador description', path=path, value=label)
-
-	# Coded finding sites under the NUM item
-	finding_sites = []
-	for idx, child in enumerate(children):
-		if idx not in consumed and _is_finding_site(child) and _relationship(child) == RelationshipTypeValues.HAS_CONCEPT_MOD.value:
-			consumed.add(idx)
-			finding_sites.append(FindingSite.from_dataset(child, copy=True))
-
-	# Everything else under the NUM item is preserved there
-	extra_items = []
-	for idx, child in enumerate(children):
-		if idx in consumed:
-			continue
-		if _note_by_reference(child, diagnostics, path):
-			pass
-		elif not srcontent_is_valid(child, diagnostics=diagnostics, strict=strict, path=path):
-			continue
-		extra_items.append(_preserved(child))
+	# Properties of the NUM item (then the legacy group level), its provenance, label, finding sites and
+	# the unmodelled children preserved under it
+	meta, display, views, source_series, plane, plane_text, finding_sites, extra_items = _parse_num_properties(
+		children, consumed, group_items, group_consumed, diagnostics, strict, path, geometry, tracking_uid)
 
 	# The other NUM items of the group; a repeated concept stays in the group's preserved items
 	values, group_sites = OrderedDict(), []
@@ -957,7 +1038,8 @@ def srparse_measurement(item, group=None, strict=False, diagnostics=None, measur
 def srparse_group_measurement(group, measurement_type, tracking_id, tracking_uid, consumed, strict=False, diagnostics=None,
 		calibrations=None, allow_group_level=True):
 	'''	Measurement of a measurement group: the NUM item the tool's concept names, else the first NUM
-		item, the other ones becoming its `values`. Used by the group router.
+		item, the other ones becoming its `values`; a circle group is read by `srparse_circle`. Used by
+		the group router.
 
 		@input group (pydicom.Dataset): Measurement Group content item
 		@input measurement_type (str or None): type the tracking identifier routes to
@@ -971,6 +1053,9 @@ def srparse_group_measurement(group, measurement_type, tracking_id, tracking_uid
 
 		@returns Measurement, or None for a group without a NUM item the model can hold
 	'''
+	if measurement_type == SONADOR_MEASUREMENT_TYPE_CIRCLE:
+		return srparse_circle(group, tracking_id, tracking_uid, consumed, strict=strict, diagnostics=diagnostics,
+			calibrations=calibrations, allow_group_level=allow_group_level)
 	numbers = [child for idx, child in enumerate(_children(group))
 		if idx not in consumed and _value_type(child) == 'NUM' and child.get('ConceptNameCodeSequence')]
 	if not numbers:
@@ -979,3 +1064,453 @@ def srparse_group_measurement(group, measurement_type, tracking_id, tracking_uid
 	primary = next((n for n in numbers if any(srcontent_is_named(n, code) for code in accepted)), numbers[0])
 	return srparse_measurement(primary, group=group, strict=strict, diagnostics=diagnostics, tracking_id=tracking_id, tracking_uid=tracking_uid,
 		group_consumed=consumed, allow_group_level=allow_group_level, calibrations=calibrations, repaired=True)
+
+
+# Circles: Area, Perimeter and Radius NUM items sharing one geometry, properties under the Area NUM
+
+def _circle_role(item):
+	'''	Role of a NUM item in a circle group: matched by code (SCT, or the SRT equivalent), else by
+		code meaning, as the Cornerstone3D reader matches it.
+
+		@input item (pydicom.Dataset): a NUM content item
+		@returns str (`area`, `perimeter`, `radius`), or None for any other concept
+	'''
+	for role, concepts in DCMSR_CIRCLE_CONCEPTS.items():
+		if any(srcontent_is_named(item, code) for code in concepts):
+			return role
+	name = srcontent_name(item)
+	meaning = str((name.get(DCMHEADER_CODE_MEANING) if name is not None else '') or '').strip().lower()
+	return meaning if meaning in DCMSR_CIRCLE_CONCEPTS else None
+
+
+def _carries_typed_properties(children):
+	'''	Whether a NUM item carries any of the per-measurement properties of the model.
+
+		@input children (list of pydicom.Dataset): the children of the NUM item
+		@returns bool
+	'''
+	concepts = tuple(DCMSR_MEASUREMENT_META.values()) + (DCMSR_MEASUREMENT_VIEW, DCMSR_DISPLAY_ATTRIBUTES, DCMSR_MEASUREMENT_SOURCE_SERIES,
+		DCMSR_MEASUREMENT_DRAWING_PLANE, DCMSR_MEASUREMENT_CONSTRUCTION_POINTS) + tuple(DCMSR_DISPLAY_COLOR_ROLES.values())
+	return any(srcontent_is_named(child, code) for child in children for code in concepts)
+
+
+def _circle_coordinates(measurement, source):
+	'''	Coordinate item of one NUM item of a circle: the item that NUM was read with, copied with its
+		points, Frame of Reference and image reference updated, while it can hold the geometry; else a
+		new `ELLIPSE` (patient domain) or `CIRCLE` (image domain) item.
+
+		@input measurement (CircleMeasurement)
+		@input source (pydicom.Dataset or None): coordinate item of the NUM item as read
+
+		@returns highdicom CoordinatesForMeasurement3D or CoordinatesForMeasurement
+		@raises ValueError for a patient-domain circle without a Frame of Reference, or an image-domain
+			circle without a SOP Instance UID
+	'''
+	geometry = measurement.geometry
+	data = np.asarray(geometry.points, dtype=float)
+	value_type = 'SCOORD3D' if geometry.is_patient else 'SCOORD'
+	if geometry.is_patient and not measurement.frame_of_reference_uid:
+		raise ValueError('A patient-domain circle needs a Frame of Reference UID to be written')
+	if source is not None and source.get('ValueType') == value_type and source.get('GraphicType') == geometry.graphic_type:
+		item = copy.deepcopy(source)
+		item.GraphicData = [float(v) for v in data.flatten()]
+		if geometry.is_patient:
+			item.ReferencedFrameOfReferenceUID = measurement.frame_of_reference_uid
+		elif measurement.reference_changed:
+			_set_image_reference(item, geometry.reference)
+		_mark_source_unnamed(item)
+		return CoordinatesForMeasurement3D.from_dataset(item, copy=False) if geometry.is_patient else CoordinatesForMeasurement.from_dataset(item, copy=False)
+	if geometry.is_patient:
+		return _mark_unnamed(CoordinatesForMeasurement3D(GraphicTypeValues3D.ELLIPSE, data, measurement.frame_of_reference_uid))
+	reference = geometry.reference
+	if reference is None or not reference.sop_instance_uid:
+		raise ValueError('An image-domain circle needs an image reference with a SOP Instance UID to be written')
+	frames = [reference.frame_number] if reference.frame_number else None
+	source_image = _mark_unnamed(SourceImageForRegion(reference.sop_class_uid or '', reference.sop_instance_uid, referenced_frame_numbers=frames))
+	return _mark_unnamed(CoordinatesForMeasurement(GraphicTypeValues.CIRCLE, data, source_image))
+
+
+def srencode_construction_points(measurement):
+	'''	`Sonador-Measurement.ConstructionPoints` item of a circle derived from three points: a
+		`HAS PROPERTIES` SCOORD3D `POLYLINE` with the Frame of Reference (patient domain), or a SCOORD
+		`POLYLINE` `SELECTED FROM` its image (image domain). None for a circle without construction points.
+
+		@input measurement (CircleMeasurement)
+		@returns list of highdicom content items: empty or one item
+	'''
+	points = measurement.construction_points
+	if points is None:
+		return []
+	data = np.asarray(points, dtype=float)
+	geometry = measurement.geometry
+	if geometry.is_patient:
+		return [Scoord3DContentItem(name=DCMSR_MEASUREMENT_CONSTRUCTION_POINTS, graphic_type=GraphicTypeValues3D.POLYLINE, graphic_data=data,
+			frame_of_reference_uid=measurement.frame_of_reference_uid, relationship_type=RelationshipTypeValues.HAS_PROPERTIES)]
+	item = ScoordContentItem(name=DCMSR_MEASUREMENT_CONSTRUCTION_POINTS, graphic_type=GraphicTypeValues.POLYLINE, graphic_data=data,
+		relationship_type=RelationshipTypeValues.HAS_PROPERTIES)
+	reference = geometry.reference
+	frames = [reference.frame_number] if reference.frame_number else None
+	item.ContentSequence = ContentSequence([_mark_unnamed(SourceImageForRegion(reference.sop_class_uid or '', reference.sop_instance_uid,
+		referenced_frame_numbers=frames))])
+	return [item]
+
+
+def srencode_circle(measurement, sr_template=None, layout=None, diagnostics=None, strict=False):
+	'''	The three NUM items of a circle, in the order Area (`mm2`), Perimeter (`mm`), Radius (`mm`),
+		each `INFERRED FROM` its own copy of the geometry. The Area NUM carries the per-measurement
+		children: description, text, location, View items, Source-Series and Drawing-Plane (patient
+		domain), the display container, the construction points, then its preserved children; each other
+		NUM carries its own preserved children. While the geometry is unchanged, each stored value is
+		re-emitted verbatim with its unit and its numeric value qualifier; a circle read without a Radius
+		NUM gains one, derived. After an edit the values are recomputed in mm and mm2, and a qualifier of a
+		replaced value is not written (the `info` `measurement-qualifier-dropped`). Concepts are written
+		as read, else with their SCT codes. Makes no request.
+
+		@input measurement (CircleMeasurement)
+		@input sr_template (class, default=highdicom Measurement): template class instantiated per NUM item
+		@input layout (str, default=`DCMSR_LAYOUT_NESTED`): the only layout written
+		@input diagnostics (list, default=None): list the write diagnostics are appended to
+		@input strict (bool, default=False): refuse an unregistered View value
+
+		@returns highdicom.sr.Measurement: the Area NUM item, followed by the Perimeter and Radius items
+		@raises ValueError for a legacy circle without a normal, a missing Frame of Reference or image
+			reference, or a drawing plane that fails validation
+		@raises SRDiagnosticError for degenerate geometry, a radius that cannot be computed, or under
+			`strict` an unregistered View value
+	'''
+	from highdicom.sr import Measurement as DcmMeasurement
+	sr_template = sr_template or DcmMeasurement
+	layout = layout or DCMSR_LAYOUT_NESTED
+	if layout not in DCMSR_LAYOUTS_WRITTEN:
+		raise ValueError('Unsupported per-item property layout: %s' % layout)
+	resolved = measurement.resolve_circle_values(diagnostics=diagnostics)
+	extras = {CIRCLE_VALUE_AREA: measurement.extra_items, CIRCLE_VALUE_PERIMETER: measurement.perimeter_extra_items,
+		CIRCLE_VALUE_RADIUS: measurement.radius_extra_items}
+
+	encoded = None
+	for role in CIRCLE_VALUE_ROLES:
+		value, unit, stored, qualifier = resolved[role]
+		if value is not None and not math.isfinite(value):
+			raise ValueError('Circle %s value %s is not finite and cannot be written' % (role, value))
+		name = _coded(measurement.value_names.get(role) or DCMSR_CIRCLE_CONCEPTS[role][0])
+		options = pick(measurement, ('qualifier', 'derivation', 'finding_sites', 'method', 'properties')) if role == CIRCLE_VALUE_AREA else {}
+		coordinates = _circle_coordinates(measurement, measurement._num_coordinates.get(role))
+		template = sr_template(name=name, value=value, unit=unit, algorithm_id=measurement.algorithm if role == CIRCLE_VALUE_AREA else None,
+			referenced_coordinates=[coordinates], **options)
+		item = template[0]
+		if stored is not None:
+			item.MeasuredValueSequence = Sequence([copy.deepcopy(stored)])
+		if qualifier is not None:
+			item.NumericValueQualifierCodeSequence = copy.deepcopy(qualifier)
+		elif role in measurement._stored_qualifiers:
+			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_QUALIFIER_DROPPED,
+				'numeric value qualifier of the %s qualified the stored value, which the edited geometry replaces; not written' % role,
+				path=_path(measurement.tracking_uid), value=dcm_code_value(measurement._stored_qualifiers[role][0]))
+		children = []
+		if role == CIRCLE_VALUE_AREA:
+			children = srencode_meta_items(measurement)
+			children.extend(srencode_measurement_views(measurement, diagnostics=diagnostics, strict=strict))
+			children.extend(srencode_measurement_provenance(measurement))
+			children.extend(srencode_display_items(measurement.display, layout=layout))
+			children.extend(srencode_construction_points(measurement))
+		children.extend(srcontent_extra_items(extras[role]))
+		if children:
+			if not hasattr(item, 'ContentSequence'):
+				item.ContentSequence = ContentSequence()
+			for child in children:
+				item.ContentSequence.append(child)
+		if encoded is None:
+			encoded = template
+		else:
+			encoded.append(item)
+	return encoded
+
+
+def _parse_circle_coordinates(item, diagnostics, strict, path):
+	'''	Geometry of a circle's coordinate item. The undefined `CIRCLE` SCOORD3D a stock Cornerstone3D
+		adapter writes is accepted with the `warning` `legacy-circle-scoord3d`: center and circumference
+		point, no plane. Every other item is read as `_parse_coordinates` reads it.
+
+		@returns tuple (Geometry or None, Frame of Reference UID or None)
+	'''
+	from ...imaging.helpers.headers import dcm_header_uid
+	if _value_type(item) != 'SCOORD3D' or str(item.get('GraphicType', '') or '') != DCMSR_GRAPHIC_CIRCLE:
+		return _parse_coordinates(item, diagnostics, strict, path)
+	frame_uid = dcm_header_uid(item, DCMHEADER_SR_REF_REFERENCE_FRAME)
+	if not frame_uid:
+		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_ERROR, SR_CONDITION_SCOORD3D_WITHOUT_FRAME,
+			'SCOORD3D without a Referenced Frame of Reference UID preserved unmodelled', path=path, strict=strict)
+		return None, None
+	data = [float(v) for v in (item.get('GraphicData') or [])]
+	if len(data) != 6 or not all(math.isfinite(v) for v in data):
+		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_INVALID_GEOMETRY,
+			'CIRCLE SCOORD3D holds %d coordinate values, not the two points of a center and a circumference point' % len(data),
+			path=path, strict=strict)
+		return None, None
+	sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_LEGACY_CIRCLE,
+		'CIRCLE SCOORD3D is not a defined graphic type; read as center and circumference point with no plane, '
+		'written again only once a normal is set', path=path, strict=strict)
+	return Geometry(DCMSR_GEOMETRY_DOMAIN_PATIENT, DCMSR_GRAPHIC_CIRCLE, [data[:3], data[3:]]), frame_uid
+
+
+def _circle_shape_failure(geometry):
+	'''	Why a geometry cannot be held by `CircleMeasurement`.
+
+		@returns str, or None when it is a circle form (and an `ELLIPSE` is a circle)
+	'''
+	forms = {(DCMSR_GEOMETRY_DOMAIN_IMAGE, DCMSR_GRAPHIC_CIRCLE): 2, (DCMSR_GEOMETRY_DOMAIN_PATIENT, DCMSR_GRAPHIC_ELLIPSE): 4,
+		(DCMSR_GEOMETRY_DOMAIN_PATIENT, DCMSR_GRAPHIC_CIRCLE): 2}
+	if forms.get((geometry.domain, geometry.graphic_type)) != len(geometry.points):
+		return '%s of %d points is not a circle form' % (geometry.graphic_type, len(geometry.points))
+	if geometry.graphic_type == DCMSR_GRAPHIC_ELLIPSE:
+		failed = circle_from_ellipse(geometry.points)
+		if isinstance(failed, str):
+			return 'ELLIPSE is not a circle (check "%s")' % failed
+	return None
+
+
+def _construction_points_reference_matches(item, geometry):
+	'''	Whether image-domain construction points name the circle's own image: their `SELECTED FROM`
+		IMAGE child has the circle's SOP Instance UID and frame (no frame on both, or the same frame).
+
+		@input item (pydicom.Dataset): the construction-point SCOORD item
+		@input geometry (Geometry): the circle's image-domain geometry
+		@returns bool
+	'''
+	images = [child for child in _children(item) if _value_type(child) == 'IMAGE']
+	if len(images) != 1 or geometry.reference is None:
+		return False
+	own = image_reference_from_dataset(images[0])
+	return own is not None and own.sop_instance_uid == geometry.reference.sop_instance_uid \
+		and (own.frame_number or None) == (geometry.reference.frame_number or None)
+
+
+def _parse_construction_points(children, consumed, geometry, frame_uid, diagnostics, strict, path):
+	'''	Construction points under a circle's NUM item: the first `Sonador-Measurement.ConstructionPoints`
+		POLYLINE of three points in the measurement's domain, in its Frame of Reference (patient domain)
+		or on its image and frame (image domain). Another form, or points on another image, frame or Frame
+		of Reference, are left in place, preserved unmodelled under the NUM item, with the `warning`
+		`invalid-measurement-geometry`; the circle then reads as having no construction points.
+
+		@returns tuple of 3 points, or None
+	'''
+	from ...imaging.helpers.headers import dcm_header_uid
+	value_type = 'SCOORD3D' if geometry.is_patient else 'SCOORD'
+	dimension = 3 if geometry.is_patient else 2
+	for idx, child in enumerate(children):
+		if idx in consumed or not srcontent_is_named(child, DCMSR_MEASUREMENT_CONSTRUCTION_POINTS):
+			continue
+		data = [float(v) for v in (child.get('GraphicData') or [])]
+		if geometry.is_patient:
+			reference_ok = dcm_header_uid(child, DCMHEADER_SR_REF_REFERENCE_FRAME) == frame_uid
+		else:
+			reference_ok = _construction_points_reference_matches(child, geometry)
+		if _value_type(child) != value_type or str(child.get('GraphicType', '')) != 'POLYLINE' or len(data) != 3 * dimension \
+				or not all(math.isfinite(v) for v in data):
+			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_INVALID_GEOMETRY,
+				'construction points that are not a %s POLYLINE of three points; preserved unmodelled' % value_type,
+				path=path, strict=strict)
+			return None
+		if not reference_ok:
+			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_INVALID_GEOMETRY,
+				'construction points on another %s than the circle; preserved unmodelled'
+				% ('Frame of Reference' if geometry.is_patient else 'image or frame'), path=path, strict=strict)
+			return None
+		consumed.add(idx)
+		return tuple(tuple(data[i:i + dimension]) for i in range(0, len(data), dimension))
+	return None
+
+
+def _note_circle_value_checks(measurement, stored, diagnostics, strict, path):
+	'''	Compare each stored circle value with the value computed from the geometry, after converting
+		its UCUM unit to mm or mm2: radius and perimeter within 0.01 mm, area within 0.05 mm2 or 1 part in
+		10 000 of the value, whichever is larger. The stored values stay authoritative; a difference is an
+		`info`, and so is a unit that does not convert (the value is then not verified).
+
+		Diagnostics raised here: `degenerate-geometry` (warning), `measurement-value-unverified` and
+		`measurement-value-mismatch` (info).
+
+		@input measurement (CircleMeasurement)
+		@input stored (dict): role -> (value or None, unit or None)
+	'''
+	if measurement.is_degenerate:
+		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_DEGENERATE_GEOMETRY,
+			'circle with a radius below %s or collinear construction points; kept as read, but refused on write' % DCMSR_CIRCLE_LENGTH_TOLERANCE,
+			path=path, strict=strict)
+		return
+	computed = measurement.computed_value()
+	if computed is None:
+		if any(value is not None for value, _ in stored.values()):
+			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_MEASUREMENT_VALUE_UNVERIFIED,
+				'no usable calibration for the image frame; the stored circle values are kept and not verified', path=path)
+		return
+	radius = computed[0]
+	expected = {CIRCLE_VALUE_AREA: (math.pi * radius ** 2, 'area'), CIRCLE_VALUE_PERIMETER: (2.0 * math.pi * radius, 'length'),
+		CIRCLE_VALUE_RADIUS: (radius, 'length')}
+	for role, (value, unit) in stored.items():
+		if value is None:
+			continue
+		target, kind = expected[role]
+		scale = circle_unit_scale(unit, kind)
+		tolerance = max(DCMSR_CIRCLE_AREA_TOLERANCE, DCMSR_CIRCLE_AREA_RELATIVE_TOLERANCE * abs(target)) if role == CIRCLE_VALUE_AREA \
+			else DCMSR_CIRCLE_LENGTH_TOLERANCE
+		if scale is None:
+			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_MEASUREMENT_VALUE_UNVERIFIED,
+				'stored %s unit %s does not convert to %s; the stored value is kept and not verified'
+				% (role, getattr(unit, 'value', None), 'mm2' if kind == 'area' else 'mm'), path=path, value=value)
+		elif abs(value * scale - target) > tolerance:
+			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_MEASUREMENT_VALUE_MISMATCH,
+				'stored %s %s (%s %s) differs from computed %s by more than %s; the stored value is kept'
+				% (role, value, value * scale, 'mm2' if kind == 'area' else 'mm', target, tolerance),
+				path=path, value=value)
+
+
+def srparse_circle(group, tracking_id, tracking_uid, consumed, strict=False, diagnostics=None, calibrations=None, allow_group_level=True):
+	'''	Circle of a `CircleROI` measurement group: the Area, Perimeter and Radius NUM items (by code,
+		SCT or SRT, else by meaning), the geometry from the first coordinate item among them in document
+		order (`CIRCLE` image domain, `ELLIPSE` patient domain, the legacy `CIRCLE` SCOORD3D with a
+		`warning`), the typed properties from the first of those NUM items in document order that carries
+		any (with the legacy group-level layout), and every other child kept under its own NUM item. A
+		group whose NUM items or geometry the circle model cannot hold reads as a generic `Measurement`
+		with the `warning` `measurement-read-as-generic`. Makes no request.
+
+		The geometry is the measurement's own coordinate item (`_is_measurement_geometry`), whatever the
+		order of the NUM's children; construction points count only on the circle's own image and frame
+		(image domain) or Frame of Reference (patient domain), and are otherwise preserved unmodelled.
+		Each NUM's stored value keeps its unit and numeric value qualifier.
+
+		Diagnostics raised here: `legacy-circle-scoord3d`, `degenerate-geometry`, `measurement-read-as-generic`,
+		`invalid-measurement-geometry` (construction points in another form or on another image, frame or
+		Frame of Reference) and `invalid-drawing-plane` (warning, a drawing plane whose normal is not
+		parallel to the circle's within 1 degree included), the value checks of `_note_circle_value_checks`
+		(info) and those of `_parse_num_properties`. `strict` raises on `warning` and `error`.
+
+		@input group (pydicom.Dataset): the measurement group
+		@input tracking_id, tracking_uid (str or None): tracking identifier and UID of the group
+		@input consumed (set): indices into the group's content sequence already read; those read here are added
+		@input strict (bool, default=False): raise SRDiagnosticError on `warning` and `error` diagnostics
+		@input diagnostics (list, default=None): list the diagnostics are appended to
+		@input calibrations (mapping, default=None): see `srparse_measurement`
+		@input allow_group_level (bool, default=True): read the legacy group-level properties
+
+		@returns
+			- CircleMeasurement
+			- Measurement (generic) for a group the circle model cannot hold
+			- None for a group without a NUM item the model can hold
+	'''
+	path = _path(tracking_uid)
+	group_children = _children(group)
+	nums = OrderedDict()
+	for idx, child in enumerate(group_children):
+		if idx in consumed or _value_type(child) != 'NUM' or not child.get('ConceptNameCodeSequence'):
+			continue
+		role = _circle_role(child)
+		if role is not None and role not in nums:
+			nums[role] = (idx, child)
+
+	def generic(message):
+		'''	The group read as a generic `Measurement` (its Radius NUM, else its first NUM, as the primary
+			item), with the `measurement-read-as-generic` warning.
+
+			@returns Measurement, or None for a group without a NUM item
+		'''
+		numbers = [child for idx, child in enumerate(group_children)
+			if idx not in consumed and _value_type(child) == 'NUM' and child.get('ConceptNameCodeSequence')]
+		if not numbers:
+			return None
+		_generic(diagnostics, strict, path, message)
+		primary = nums[CIRCLE_VALUE_RADIUS][1] if CIRCLE_VALUE_RADIUS in nums else numbers[0]
+		return srparse_measurement(primary, group=group, strict=strict, diagnostics=diagnostics, measurement_class=Measurement,
+			tracking_id=tracking_id, tracking_uid=tracking_uid, group_consumed=consumed, allow_group_level=allow_group_level,
+			calibrations=calibrations, repaired=True)
+
+	if not nums:
+		return generic('circle group without an Area, Perimeter or Radius NUM item')
+
+	ordered = sorted(nums.items(), key=lambda entry: entry[1][0])
+	geometry, frame_uid = None, None
+	for role, (idx, item) in ordered:
+		coordinate = next((child for child in _children(item) if _is_measurement_geometry(child)), None)
+		if coordinate is not None:
+			geometry, frame_uid = _parse_circle_coordinates(coordinate, diagnostics, strict, path)
+			break
+	if geometry is None:
+		return generic('circle group without usable geometry')
+	failure = _circle_shape_failure(geometry)
+	if failure is not None:
+		return generic(failure)
+
+	# Each NUM item: its own coordinate item (when it holds the geometry) and its children
+	per_num = OrderedDict()
+	for role, (idx, item) in ordered:
+		children = _children(item)
+		own, source = set(), None
+		for cidx, child in enumerate(children):
+			if _is_measurement_geometry(child):
+				if _value_type(child) == ('SCOORD3D' if geometry.is_patient else 'SCOORD') and str(child.get('GraphicType', '')) == geometry.graphic_type:
+					own.add(cidx)
+					source = copy.deepcopy(child)
+				break
+		per_num[role] = {'item': item, 'children': children, 'consumed': own, 'source': source}
+
+	# The typed properties: the first NUM in document order carrying any, else the Area NUM
+	source_role = next((role for role, entry in per_num.items()
+		if _carries_typed_properties([c for i, c in enumerate(entry['children']) if i not in entry['consumed']])), None)
+	source_role = source_role or (CIRCLE_VALUE_AREA if CIRCLE_VALUE_AREA in per_num else next(iter(per_num)))
+	group_items = group_children if allow_group_level else []
+
+	# A provisional circle gives the normal the drawing plane is checked against
+	normal = circle_from_ellipse(geometry.points)['normal'] if geometry.graphic_type == DCMSR_GRAPHIC_ELLIPSE else None
+	extras, properties = {}, None
+	for role, entry in per_num.items():
+		if role == source_role:
+			construction = _parse_construction_points(entry['children'], entry['consumed'], geometry, frame_uid, diagnostics, strict, path)
+			properties = _parse_num_properties(entry['children'], entry['consumed'], group_items, consumed, diagnostics, strict, path,
+				geometry, tracking_uid, normal=normal) + (construction,)
+			extras[role] = properties[7]
+		else:
+			found = []
+			for cidx, child in enumerate(entry['children']):
+				if cidx in entry['consumed']:
+					continue
+				if _note_by_reference(child, diagnostics, path):
+					pass
+				elif not srcontent_is_valid(child, diagnostics=diagnostics, strict=strict, path=path):
+					continue
+				found.append(_preserved(child))
+			extras[role] = found
+	meta, display, views, source_series, plane, plane_text, finding_sites, _, construction = properties
+
+	stored, names, stored_items, qualifiers = {}, {}, {}, {}
+	for role, entry in per_num.items():
+		_note_by_reference(entry['item'], diagnostics, path)
+		value, unit, measured = _measured_value(entry['item'])
+		stored[role] = (value, unit)
+		names[role] = CodedConcept.from_dataset(entry['item'].ConceptNameCodeSequence[0], copy=True)
+		stored_items[role] = copy.deepcopy(measured) if measured is not None and value is not None else None
+		if entry['item'].get('NumericValueQualifierCodeSequence'):
+			qualifiers[role] = copy.deepcopy(entry['item'].NumericValueQualifierCodeSequence)
+	for role, (idx, item) in nums.items():
+		consumed.add(idx)
+
+	group_sites = [CodedConcept.from_dataset(sibling.ConceptCodeSequence[0], copy=True) for idx, sibling in enumerate(group_children)
+		if idx not in consumed and _is_finding_site(sibling) and sibling.get('ConceptCodeSequence')]
+
+	radius_value, radius_unit = stored.get(CIRCLE_VALUE_RADIUS, (None, None))
+	measurement = CircleMeasurement(geometry=geometry, value=radius_value, unit=radius_unit or DCMSR_UNITS_MM,
+		name=names.get(CIRCLE_VALUE_RADIUS), area=stored.get(CIRCLE_VALUE_AREA, (None, None))[0],
+		perimeter=stored.get(CIRCLE_VALUE_PERIMETER, (None, None))[0], value_names=names,
+		area_unit=stored.get(CIRCLE_VALUE_AREA, (None, None))[1], perimeter_unit=stored.get(CIRCLE_VALUE_PERIMETER, (None, None))[1],
+		calibration=_calibration_for(calibrations, geometry.reference), tracking_id=tracking_id, tracking_uid=tracking_uid,
+		frame_of_reference_uid=frame_uid, display=display, views=views, series_uid=source_series,
+		extra_items=extras.get(CIRCLE_VALUE_AREA, ()), perimeter_extra_items=extras.get(CIRCLE_VALUE_PERIMETER, ()),
+		radius_extra_items=extras.get(CIRCLE_VALUE_RADIUS, ()), group_finding_sites=group_sites,
+		finding_sites=finding_sites or None, construction_points=construction, **meta)
+	if plane_text is not None:
+		measurement._set_parsed_drawing_plane(plane, plane_text)
+	measurement._stored_items = stored_items
+	measurement._stored_qualifiers = qualifiers
+	measurement._num_coordinates = {role: entry['source'] for role, entry in per_num.items()}
+	measurement._mark_parsed(stored_items.get(CIRCLE_VALUE_RADIUS), per_num[source_role]['source'])
+	_note_circle_value_checks(measurement, stored, diagnostics, strict, path)
+	return measurement
