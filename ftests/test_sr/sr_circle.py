@@ -13,6 +13,12 @@
 	are written by the stock `@cornerstonejs/adapters` 4.22.13 `CircleROI` writer (the Sonador Viewer's locked
 	version) from synthetic annotation state, by the jest harness in `fixtures/generators/cornerstone-adapters`:
 	an image-domain `CIRCLE` and the undefined `CIRCLE` SCOORD3D the stock writer produces in the patient domain.
+	`sonador-viewer.circle-image.2026-1111.dcm` and `sonador-viewer.circle-oblique.2026-1111.dcm` are written by
+	the Sonador Viewer (copied unchanged from its `platform/core/src/DICOMSR/__fixtures__`) over a synthetic CT.
+
+	Pixel statistics: `sonador-io.circle-statistics-ct.2026-1112.dcm` (quantity form, patient domain) and
+	`sonador-io.circle-statistics-stock.2026-1112.dcm` (stock Cornerstone3D form, image domain) hold a circle of
+	this client with three statistic NUM items added the way a Viewer writes them.
 
 	Run from the directory containing the `sonador` package: python -m unittest sonador.ftests.test_sr.sr_circle
 '''
@@ -23,19 +29,22 @@ import numpy as np
 
 from pydicom.dataset import Dataset
 from pydicom.sequence import Sequence
+from pydicom.valuerep import DS
+
+from highdicom.sr.templates import Code
 
 from ...apisettings.base import CircleMeasurement, LengthMeasurement, AngleMeasurement, Measurement, Geometry, ImageFrameGeometry, \
 	ImageTransformMatrix, Finding, measurement_class_for_type, SONADOR_MEASUREMENT_TYPE_CIRCLE, DCMSR_CONCEPT_AREA, DCMSR_CONCEPT_PERIMETER, \
-	DCMSR_CONCEPT_RADIUS
+	DCMSR_CONCEPT_RADIUS, CircleStatistics
 from ...apisettings.display_attrs import DisplayAttributes, DISPLAY_COLOR_ROLES
 from ...apisettings.sr import dcm_code_value, SRDiagnosticError, sr_diagnostics_with, SR_DIAGNOSTIC_INFO, SR_DIAGNOSTIC_WARNING, \
 	SR_CONDITION_LEGACY_CIRCLE, SR_CONDITION_DEGENERATE_GEOMETRY, SR_CONDITION_MEASUREMENT_VALUE_MISMATCH, SR_CONDITION_MEASUREMENT_READ_AS_GENERIC, \
 	SR_CONDITION_INVALID_DRAWING_PLANE, SR_CONDITION_MEASUREMENT_VALUE_UNVERIFIED, SR_CONDITION_GROUP_LEVEL_PROPERTIES, \
-	SR_CONDITION_INVALID_GEOMETRY, SR_CONDITION_QUALIFIER_DROPPED
+	SR_CONDITION_INVALID_GEOMETRY, SR_CONDITION_QUALIFIER_DROPPED, SR_CONDITION_STATISTICS_DROPPED, SR_CONDITION_CONSTRUCTION_POINTS_DROPPED
 from ...apisettings.sr.seriestag import measurement_type_for_tracking_id, tracking_id_for_measurement_type, DCMSR_MEASUREMENT_DESCRIPTION, \
 	DCMSR_MEASUREMENT_TEXT, DCMSR_DISPLAY_ATTRIBUTES, DCMSR_DISPLAY_COLOR, DCMSR_DISPLAY_COLOR_ROLES, DCMSR_SOP_CLASS_COMPREHENSIVE_3D
 from ...apisettings.sr.measurements import DCMSR_MEASUREMENT_CONSTRUCTION_POINTS, DCMSR_CIRCLE_CONCEPTS, DCMSR_MEASUREMENT_VIEW, \
-	DCMSR_MEASUREMENT_SOURCE_SERIES, DCMSR_MEASUREMENT_DRAWING_PLANE, drawing_plane_failed_check
+	DCMSR_MEASUREMENT_SOURCE_SERIES, DCMSR_MEASUREMENT_DRAWING_PLANE, drawing_plane_failed_check, DCMSR_DERIVATION, DCMSR_CIRCLE_STATISTICS
 from ...imaging.helpers.sr import SonadorImagingMeasurementReport
 from ...imaging.helpers.sr.parse import srdoc_measurement_groups, srdoc_children
 from ...imaging.orthanc.sr import dcmsr_local_series
@@ -47,7 +56,8 @@ from .sr_measurements import FOR_UID, CALIBRATION, COLORS, model_of, written, re
 
 
 __all__ = ['CircleRegistryTestCase', 'CircleModelTestCase', 'CircleWriterTestCase', 'CircleReaderTestCase', 'CircleAdapterFixtureTestCase',
-	'CircleFixtureTestCase', 'CircleDocumentTestCase', 'DisplayColorRoleTestCase', 'CircleUnitsAndEditsTestCase', 'CircleReadFidelityTestCase']
+	'CircleFixtureTestCase', 'CircleDocumentTestCase', 'DisplayColorRoleTestCase', 'CircleUnitsAndEditsTestCase', 'CircleReadFidelityTestCase',
+	'CircleViewerFixtureTestCase', 'CircleStatisticsTestCase', 'MeasurementValueKeyTestCase', 'CircleConstructionPointsDroppedTestCase']
 
 
 TRACKING = '2.25.9901'
@@ -956,3 +966,370 @@ class CircleReadFidelityTestCase(OracleMixin, unittest.TestCase):
 		num = nums_of(group)[1]
 		self.assertIsNone(CircleMeasurement.from_sr(num))
 		self.assertAlmostEqual(CircleMeasurement.from_sr(num, group=group).radius, 5.0)
+
+
+# Viewer-authored circles (oak-tree/medical-imaging/ohif-viewers, `platform/core/src/DICOMSR/__fixtures__`): the
+# synthetic CT they reference is 64 x 48 pixels, 0.8 mm between rows and 1.2 mm between columns, axial, first
+# pixel centre at (-38.4, -19.2, z), slices 3 mm apart from z = 0
+VIEWER_FIXTURES = {topic: os.path.join(FIXTURES, 'sonador-viewer.%s.2026-1111.dcm' % topic) for topic in ('circle-image', 'circle-oblique')}
+VIEWER_CT_SERIES = '2.25.316170002'
+VIEWER_CT_FRAME = '2.25.316170003'
+VIEWER_CT_SLICE = '2.25.316170113'
+VIEWER_CT_CALIBRATION = {VIEWER_CT_SLICE: ImageFrameGeometry((-38.4, -19.2, 9.0), (1.0, 0.0, 0.0, 0.0, 1.0, 0.0), (0.8, 1.2))}
+
+
+class CircleViewerFixtureTestCase(OracleMixin, unittest.TestCase):
+	'''	Circles written by the Sonador Viewer, read with the calibration of the synthetic CT they reference
+	'''
+	def read_viewer(self, topic, **kwargs):
+		doc = read(VIEWER_FIXTURES[topic])
+		model = reparse(doc, strict=True, **kwargs)
+		self.assertFalse(sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_MEASUREMENT_VALUE_MISMATCH), topic)
+		self.assertFalse(sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_MEASUREMENT_VALUE_UNVERIFIED), topic)
+		m = measurements_of(model)[0]
+		self.assertIsInstance(m, CircleMeasurement, topic)
+		self.assertEqual(m.tracking_id, CIRCLE_ID)
+		self.assertIsNone(m.statistics)
+		self.assertEqual([v.unit.value for v in m.values.values()], ['mm2', 'mm'])
+		return doc, model, m
+
+	def test_image_domain(self):
+		doc, model, m = self.read_viewer('circle-image', calibrations=VIEWER_CT_CALIBRATION)
+		self.assertEqual(m.geometry.domain, 'image')
+		self.assertEqual(m.reference.sop_instance_uid, VIEWER_CT_SLICE)
+		np.testing.assert_allclose(m.center, (24.1667, 18.25), atol=1e-4)
+		calibration = VIEWER_CT_CALIBRATION[VIEWER_CT_SLICE]
+		np.testing.assert_allclose(calibration.patient_point(*m.center), (-10.0, -5.0, 9.0), atol=1e-3)
+		np.testing.assert_allclose(calibration.patient_point(*m.edge), (2.0, -5.0, 9.0), atol=1e-3)
+		# The stored values: 10 columns of 1.2 mm; the radius is stored as read after the pixel round trip
+		self.assertEqual(str(nums_of(group_of(doc))[2].MeasuredValueSequence[0].NumericValue), '11.9999999999999')
+		self.assertAlmostEqual(m.radius, 12.0, places=6)
+		self.assertAlmostEqual(m.computed_value()[0], 12.0, places=3)
+		self.assertAlmostEqual(m.area, 452.3893, places=4)
+		self.assertAlmostEqual(m.perimeter, 75.3982, places=4)
+		self.assertIsNone(m.normal)
+		self.assertEqual(m.description, 'Circle (image)')
+		self.assert_same_content(doc, roundtrip(model.create_sr()))
+
+	def test_oblique_patient_domain(self):
+		doc, model, m = self.read_viewer('circle-oblique')
+		self.assertEqual((m.geometry.domain, m.geometry.graphic_type, m.frame_of_reference_uid), ('patient', 'ELLIPSE', VIEWER_CT_FRAME))
+		np.testing.assert_allclose(m.center, (0.0, 0.0, 15.0), atol=1e-4)
+		self.assertAlmostEqual(m.radius, 10.0, places=4)
+		self.assertAlmostEqual(m.area, 314.1593, places=4)
+		self.assertAlmostEqual(m.perimeter, 62.8319, places=4)
+		np.testing.assert_allclose(m.normal, np.array((-1.0, 0.0, -1.0)) / math.sqrt(2), atol=1e-5)
+		np.testing.assert_allclose(m.u, np.array((1.0, 0.0, -1.0)) / math.sqrt(2), atol=1e-5)
+		self.assertEqual((m.drawing_plane_text, m.views, m.series_uid), ('0.707107,0,-0.707107,0,-1,0', ('oblique',), VIEWER_CT_SERIES))
+		self.assertIsNotNone(m.drawing_plane)
+		self.assertEqual(m.description, 'Circle (oblique)')
+		self.assert_same_content(doc, roundtrip(model.create_sr()))
+
+
+# Pixel statistics
+
+CT_QUANTITY = Code('112031', 'DCM', 'Attenuation Coefficient')
+HU = Code("[hnsf'U]", 'UCUM', 'Hounsfield Unit')
+NO_UNITS = Code('1', 'UCUM', 'no units')
+STATISTIC_VALUES = OrderedDict((('mean', 40.5), ('std_dev', 12.25), ('max', 97.0)))
+STATISTICS_FIXTURE_DATE = '2026-1112'
+STATISTICS_FIXTURES = ('circle-statistics-ct', 'circle-statistics-stock')
+
+
+def coded_item(code):
+	item = Dataset()
+	item.CodeValue, item.CodingSchemeDesignator, item.CodeMeaning = code.value, code.scheme_designator, code.meaning
+	return item
+
+
+def statistic_num(name, value, unit, geometry, derivation=None):
+	'''	A statistic NUM item as the Viewer writes it: CONTAINS NUM, the Derivation (when given), then its own
+		copy of the circle's geometry
+	'''
+	item = Dataset()
+	item.RelationshipType, item.ValueType = 'CONTAINS', 'NUM'
+	item.ConceptNameCodeSequence = Sequence([coded_item(name)])
+	measured = Dataset()
+	if unit is not None:
+		measured.MeasurementUnitsCodeSequence = Sequence([coded_item(unit)])
+	# A value that is not finite is written as dcmjs writes it
+	measured.NumericValue = DS(value, auto_format=True) if math.isfinite(value) else 'NaN'
+	item.MeasuredValueSequence = Sequence([measured])
+	children = []
+	if derivation is not None:
+		modifier = Dataset()
+		modifier.RelationshipType, modifier.ValueType = 'HAS CONCEPT MOD', 'CODE'
+		modifier.ConceptNameCodeSequence = Sequence([coded_item(DCMSR_DERIVATION)])
+		modifier.ConceptCodeSequence = Sequence([coded_item(derivation)])
+		children.append(modifier)
+	children.append(copy.deepcopy(geometry))
+	item.ContentSequence = Sequence(children)
+	return item
+
+
+def derivation_form(quantity=CT_QUANTITY, unit=HU, srt=False, values=STATISTIC_VALUES):
+	'''	(name, value, unit, derivation) of each statistic in the quantity form
+	'''
+	return [(quantity, value, unit, DCMSR_CIRCLE_STATISTICS[field][1 if srt else 0]) for field, value in values.items()]
+
+
+def stock_form(unit=HU, srt=False, values=STATISTIC_VALUES):
+	'''	(name, value, unit, derivation) of each statistic in the stock Cornerstone3D form
+	'''
+	return [(DCMSR_CIRCLE_STATISTICS[field][1 if srt else 0], value, unit, None) for field, value in values.items()]
+
+
+def with_statistics(doc, statistics, group_index=0):
+	'''	Add statistic NUM items after the last NUM item of a measurement group, each with a copy of the
+		geometry of the group's first NUM item
+	'''
+	group = group_of(doc, group_index)
+	children = list(srdoc_children(group))
+	last = max(idx for idx, child in enumerate(children) if child.get('ValueType') == 'NUM')
+	geometry = coordinates_of(children[last])[0] if coordinates_of(children[last]) else coordinates_of(nums_of(group)[0])[0]
+	added = [statistic_num(name, value, unit, geometry, derivation) for name, value, unit, derivation in statistics]
+	group.ContentSequence = Sequence(children[:last + 1] + added + children[last + 1:])
+	return doc
+
+
+def statistics_fixture_doc(topic):
+	'''	The Python-written statistics fixtures: a circle of this client, with the statistics a Viewer adds
+		(this client never computes or creates them): the quantity form on a patient-domain circle, the stock
+		Cornerstone3D form on an image-domain circle. The values are synthetic; nothing checks them against pixels.
+	'''
+	if topic == 'circle-statistics-ct':
+		measurements, statistics = [circle_axial(**fixture_properties(topic, 'axial', series_uid=SYNTHETIC['SeriesInstanceUID'],
+			drawing_plane=AXIAL))], derivation_form()
+	elif topic == 'circle-statistics-stock':
+		measurements, statistics = [circle_image(**fixture_properties(topic, 'axial'))], stock_form()
+	else:
+		raise KeyError(topic)
+	doc = roundtrip(new_model([], measurements=measurements).create_sr(record_instances=True, dcmsr_series_uid='2.25.8000',
+		dcmsr_instance_uid='2.25.8001'))
+	return with_statistics(doc, statistics)
+
+
+def statistics_fixture_path(topic):
+	return os.path.join(FIXTURES, 'sonador-io.%s.%s.dcm' % (topic, STATISTICS_FIXTURE_DATE))
+
+
+class CircleStatisticsTestCase(OracleMixin, unittest.TestCase):
+	'''	Pixel statistics of a circle: read into `statistics` in the quantity and the stock form, written back
+		verbatim while the circle is unchanged, dropped after an edit, never created by this client
+	'''
+	CALIBRATIONS = {SYNTHETIC['SOPInstanceUID']: CALIBRATION}
+
+	def setUp(self):
+		if os.environ.get('UPDATE_SR_FIXTURES'):
+			for topic in STATISTICS_FIXTURES:
+				statistics_fixture_doc(topic).save_as(statistics_fixture_path(topic))
+
+	def read_fixture(self, topic):
+		doc = read(statistics_fixture_path(topic))
+		self.assertEqual((doc.PatientID, str(doc.StudyInstanceUID), str(doc.SOPClassUID)), ('ANONYMOUS', '2.25.1001', DCMSR_SOP_CLASS_COMPREHENSIVE_3D))
+		model = reparse(doc, strict=True, calibrations=self.CALIBRATIONS)
+		return doc, model, measurements_of(model)[0]
+
+	def circle_with(self, statistics, circle=None):
+		doc = with_statistics(written([circle or circle_axial()]), statistics)
+		model = reparse(doc, calibrations=self.CALIBRATIONS)
+		return doc, model, measurements_of(model)[0]
+
+	def assert_statistics(self, m, quantity, unit, values=STATISTIC_VALUES):
+		s = m.statistics
+		self.assertIsInstance(s, CircleStatistics)
+		self.assertEqual((s.mean, s.std_dev, s.max), tuple(values.get(field) for field in ('mean', 'std_dev', 'max')))
+		self.assertEqual(None if s.quantity is None else (s.quantity.value, s.quantity.scheme_designator), quantity)
+		self.assertEqual(None if s.unit is None else (s.unit.value, s.unit.scheme_designator), unit)
+
+	def test_fixtures_read_in_both_forms(self):
+		for topic in STATISTICS_FIXTURES:
+			doc, model, m = self.read_fixture(topic)
+			self.assertIsInstance(m, CircleMeasurement, topic)
+			self.assert_statistics(m, ('112031', 'DCM'), ("[hnsf'U]", 'UCUM'))
+			# Statistics are kept out of `values`, which holds the area and perimeter only
+			self.assertEqual(list(m.values), [('42798000', 'SCT'), ('131191004', 'SCT')], topic)
+			self.assertEqual(len(nums_of(group_of(doc))), 6, topic)
+
+	def test_unchanged_resave_reemits_the_statistics_verbatim(self):
+		for topic in STATISTICS_FIXTURES:
+			doc, model, m = self.read_fixture(topic)
+			again = roundtrip(model.create_sr())
+			src, out = nums_of(group_of(doc)), nums_of(group_of(again))
+			self.assertEqual(len(out), 6, topic)
+			# After the Radius NUM, each with its Derivation (quantity form) and its own geometry copy
+			for source, written_item in zip(src[3:], out[3:]):
+				compare_nodes(self, Node(source), Node(written_item), topic)
+				self.assertEqual(coordinates_of(written_item)[0].GraphicData, coordinates_of(source)[0].GraphicData)
+			self.assertFalse(sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_STATISTICS_DROPPED), topic)
+			self.assert_same_content(doc, again)
+			self.assert_statistics(measurements_of(reparse(again, strict=True, calibrations=self.CALIBRATIONS))[0], ('112031', 'DCM'),
+				("[hnsf'U]", 'UCUM'))
+
+	def test_edit_drops_the_statistics(self):
+		edits = {'circle-statistics-ct': lambda m: setattr(m, 'center', (11.0, 20.0, 30.0)),
+			'circle-statistics-stock': lambda m: setattr(m, 'radius', 6.0)}
+		for topic, edit in edits.items():
+			doc, model, m = self.read_fixture(topic)
+			edit(m)
+			self.assertIsNone(m.statistics, topic)
+			again = roundtrip(model.create_sr())
+			out = nums_of(group_of(again))
+			self.assertEqual([dcm_code_value(n.ConceptNameCodeSequence[0]) for n in out], ['42798000', '131191004', '131190003'], topic)
+			dropped = sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_STATISTICS_DROPPED)
+			self.assertEqual([(d.severity, d.value) for d in dropped], [('info', 3)], topic)
+			self.assertIsNone(measurements_of(reparse(again, calibrations=self.CALIBRATIONS))[0].statistics, topic)
+
+	def test_srt_codes_read(self):
+		for statistics in (derivation_form(srt=True), stock_form(srt=True)):
+			doc, model, m = self.circle_with(statistics)
+			self.assert_statistics(m, ('112031', 'DCM'), ("[hnsf'U]", 'UCUM'))
+			self.assert_same_content(doc, roundtrip(model.create_sr()))
+
+	def test_quantities_and_units(self):
+		cases = (
+			(derivation_form(Code('126401', 'DCM', 'SUVbw'), Code('g/ml{SUVbw}', 'UCUM', 'SUVbw')), ('126401', 'DCM'), ('g/ml{SUVbw}', 'UCUM')),
+			(derivation_form(Code('110852', 'DCM', 'MR signal intensity'), NO_UNITS), ('110852', 'DCM'), ('1', 'UCUM')),
+			(stock_form(Code('HU', 'UCUM', 'HU')), ('112031', 'DCM'), ('HU', 'UCUM')),
+			(stock_form(Code('SUV', 'UCUM', 'SUV')), ('126401', 'DCM'), ('SUV', 'UCUM')),
+			# No unit, or a unit of no known quantity: read, with no quantity
+			(stock_form(NO_UNITS), None, ('1', 'UCUM')),
+			(stock_form(Code('mg/ml', 'UCUM', 'mg/ml')), None, ('mg/ml', 'UCUM')),
+		)
+		for statistics, quantity, unit in cases:
+			doc, model, m = self.circle_with(statistics)
+			self.assert_statistics(m, quantity, unit)
+
+	def test_unsupported_statistics_stay_unmodelled(self):
+		ct_mean = derivation_form(values={'mean': 40.5})
+		cases = OrderedDict((
+			('mixed quantities', ct_mean + stock_form(NO_UNITS, values={'max': 97.0})),
+			('SUV normalization', stock_form(Code('g/ml{SUVlbm}', 'UCUM', 'SUVlbm'))),
+			('unsupported quantity', derivation_form(Code('118565006', 'SCT', 'Volume'))),
+			('quantity scheme', derivation_form(Code('112031', '99X', 'Attenuation Coefficient'))),
+			('quantity unit', derivation_form(unit=Code('mm', 'UCUM', 'mm'))),
+			('unit scheme', stock_form(Code('HU', '99CS', 'HU'))),
+			('statistic scheme', [(CT_QUANTITY, 40.5, HU, Code('373098007', 'SRT', 'Mean'))]),
+			('another derivation', [(CT_QUANTITY, 40.5, HU, Code('255605001', 'SCT', 'Minimum'))]),
+			('not finite', derivation_form(values={'mean': float('nan')})),
+		))
+		for case, statistics in cases.items():
+			doc, model, m = self.circle_with(statistics)
+			self.assertIsInstance(m, CircleMeasurement, case)
+			self.assertIsNone(m.statistics, case)
+			self.assertEqual(list(m.values), [('42798000', 'SCT'), ('131191004', 'SCT')], case)
+			again = roundtrip(model.create_sr())
+			self.assertEqual(len(nums_of(group_of(again))), 3 + len(statistics), case)
+			if case == 'not finite':
+				# The oracle cannot compare NaN with itself
+				self.assertEqual(str(nums_of(group_of(again))[3].MeasuredValueSequence[0].NumericValue), 'NaN')
+			else:
+				self.assert_same_content(doc, again)
+
+	def test_unsupported_statistic_beside_supported_ones(self):
+		doc, model, m = self.circle_with(derivation_form(values={'mean': 40.5}) + stock_form(Code('g/ml{SUVlbm}', 'UCUM', 'SUVlbm'), values={'max': 3.5}))
+		self.assert_statistics(m, ('112031', 'DCM'), ("[hnsf'U]", 'UCUM'), values={'mean': 40.5})
+		self.assert_same_content(doc, roundtrip(model.create_sr()))
+
+	def test_repeated_statistic_reads_the_first(self):
+		doc, model, m = self.circle_with(derivation_form() + derivation_form(values={'mean': 41.0}))
+		self.assertEqual(m.statistics.mean, 40.5)
+		self.assertEqual(len(nums_of(group_of(roundtrip(model.create_sr())))), 7)
+
+	def test_repeated_statistics_follow_the_circle(self):
+		repeats = {'circle-statistics-ct': (derivation_form(values={'mean': 41.0}), lambda m: setattr(m, 'center', (11.0, 20.0, 30.0))),
+			'circle-statistics-stock': (stock_form(values={'mean': 41.0}), lambda m: setattr(m, 'radius', 6.0))}
+		for topic, (repeat, edit) in repeats.items():
+			source = with_statistics(read(statistics_fixture_path(topic)), repeat)
+			# Unchanged: all four statistic NUMs written back verbatim, the first Mean read
+			model = reparse(source, strict=True, calibrations=self.CALIBRATIONS)
+			m = measurements_of(model)[0]
+			self.assertEqual(m.statistics.mean, 40.5, topic)
+			again = roundtrip(model.create_sr())
+			self.assertEqual(len(nums_of(group_of(again))), 7, topic)
+			self.assert_same_content(source, again)
+			# Edited: no statistic NUM survives, and none comes back on later reads and saves
+			model = reparse(source, strict=True, calibrations=self.CALIBRATIONS)
+			edit(measurements_of(model)[0])
+			edited = roundtrip(model.create_sr())
+			self.assertEqual(len(nums_of(group_of(edited))), 3, topic)
+			dropped = sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_STATISTICS_DROPPED)
+			self.assertEqual([(d.severity, d.value) for d in dropped], [('info', 4)], topic)
+			later = reparse(edited, calibrations=self.CALIBRATIONS)
+			self.assertIsNone(measurements_of(later)[0].statistics, topic)
+			self.assertEqual(len(nums_of(group_of(roundtrip(later.create_sr())))), 3, topic)
+
+	def test_frame_change_drops_the_statistics(self):
+		doc, model, m = self.read_fixture('circle-statistics-ct')
+		# The same Frame of Reference assigned again keeps them
+		m.frame_of_reference_uid = str(m.frame_of_reference_uid)
+		self.assertIsNotNone(m.statistics)
+		m.frame_of_reference_uid = '2.25.9999'
+		self.assertIsNone(m.statistics)
+		again = roundtrip(model.create_sr())
+		out = nums_of(group_of(again))
+		self.assertEqual(len(out), 3)
+		self.assertEqual({str(coordinates_of(n)[0].ReferencedFrameOfReferenceUID) for n in out}, {'2.25.9999'})
+		dropped = sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_STATISTICS_DROPPED)
+		self.assertEqual([(d.severity, d.value) for d in dropped], [('info', 3)])
+
+	def test_python_circle_writes_none(self):
+		for m in (circle_axial(), circle_image(), CircleMeasurement.from_points((0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (0.0, 10.0, 0.0),
+				frame_of_reference_uid=FOR_UID, tracking_uid=TRACKING)):
+			self.assertIsNone(m.statistics)
+			with self.assertRaises(AttributeError):
+				m.statistics = CircleStatistics(1.0, None, None, None, None)
+			self.assertEqual(len(nums_of(group_of(written([m])))), 3)
+
+	def test_circle_read_as_generic_keeps_statistics_as_values(self):
+		'''	A circle group the circle model cannot hold reads as a generic measurement: its statistics are
+			values, keyed by concept and Derivation
+		'''
+		doc = with_statistics(written([circle_axial()]), derivation_form())
+		ellipse = coordinates_of(nums_of(group_of(doc))[0])[0]
+		for num in nums_of(group_of(doc))[:3]:
+			coordinates_of(num)[0].GraphicData = [5, 20, 30, 15, 20, 30, 10, 17, 30, 10, 23, 30]
+		m = measurements_of(reparse(doc))[0]
+		self.assertNotIsInstance(m, CircleMeasurement)
+		self.assertEqual([k for k in m.values if len(k) == 4],
+			[('112031', 'DCM', '373098007', 'SCT'), ('112031', 'DCM', '386136009', 'SCT'), ('112031', 'DCM', '56851009', 'SCT')])
+
+
+class MeasurementValueKeyTestCase(unittest.TestCase):
+	'''	`Measurement.values` keys: concept and Derivation together, for every tool
+	'''
+	def test_two_derivations_of_one_concept_are_both_kept(self):
+		doc = written([length_patient()])
+		group = group_of(doc)
+		geometry = coordinates_of(nums_of(group)[0])[0]
+		group.ContentSequence = Sequence(list(srdoc_children(group)) + [statistic_num(CT_QUANTITY, value, HU, geometry, DCMSR_CIRCLE_STATISTICS[field][0])
+			for field, value in (('mean', 40.5), ('max', 97.0))])
+		model = reparse(doc)
+		m = measurements_of(model)[0]
+		self.assertIsInstance(m, LengthMeasurement)
+		self.assertEqual(list(m.values), [('112031', 'DCM', '373098007', 'SCT'), ('112031', 'DCM', '56851009', 'SCT')])
+		self.assertEqual([v.value for v in m.values.values()], [40.5, 97.0])
+		out = nums_of(group_of(roundtrip(model.create_sr())))
+		self.assertEqual([dcm_code_value(srdoc_children(n)[0].ConceptCodeSequence[0]) for n in out[1:]], ['373098007', '56851009'])
+
+	def test_key_without_derivation_unchanged(self):
+		doc = written([length_patient()])
+		group = group_of(doc)
+		geometry = coordinates_of(nums_of(group)[0])[0]
+		group.ContentSequence = Sequence(list(srdoc_children(group)) + [statistic_num(CT_QUANTITY, 40.5, HU, geometry)])
+		self.assertEqual(list(measurements_of(reparse(doc))[0].values), [('112031', 'DCM')])
+
+
+class CircleConstructionPointsDroppedTestCase(unittest.TestCase):
+	def test_edit_drops_the_construction_points_with_an_info(self):
+		doc = written([CircleMeasurement.from_points((0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (0.0, 10.0, 0.0), frame_of_reference_uid=FOR_UID,
+			tracking_uid=TRACKING)])
+		model = reparse(doc, strict=True)
+		roundtrip(model.create_sr())
+		self.assertFalse(sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_CONSTRUCTION_POINTS_DROPPED))
+		m = measurements_of(model)[0]
+		m.radius = 9.0
+		self.assertIsNone(m.construction_points)
+		again = roundtrip(model.create_sr())
+		self.assertEqual([d.severity for d in sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_CONSTRUCTION_POINTS_DROPPED)], ['info'])
+		self.assertFalse(named(srdoc_children(nums_of(group_of(again))[0]), DCMSR_MEASUREMENT_CONSTRUCTION_POINTS.value))

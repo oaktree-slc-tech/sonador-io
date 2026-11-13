@@ -24,7 +24,11 @@
 	perpendicular diameters of equal length) in the patient domain, where DICOM defines no 3D circle. The
 	Area NUM carries the per-measurement properties and, for a circle derived from three points,
 	`Sonador-Measurement.ConstructionPoints`. Readers also accept the undefined `CIRCLE` SCOORD3D a stock
-	Cornerstone3D adapter writes, as a circle with no plane.
+	Cornerstone3D adapter writes, as a circle with no plane. The pixel statistics a circle may carry (a NUM
+	per statistic after the Radius NUM) are read and written back while the circle is unchanged; this
+	client never computes them.
+
+	`Measurement.values` is keyed by the NUM item's concept, with its Derivation modifier when it has one.
 
 	The identifier decides the type, the geometry never does: a group with an unknown identifier or
 	an unusable geometry reads as a generic `Measurement` with every NUM item preserved. Children
@@ -63,7 +67,7 @@ from ..base import SONADOR_MANUFACTURER, SONADOR_SR, SONADOR_SCHEME_VERSION_03, 
 	DCMSR_GRAPHIC_ELLIPSE, DCMSR_CONCEPT_AREA, DCMSR_CONCEPT_PERIMETER, DCMSR_CONCEPT_RADIUS, DCMSR_CIRCLE_LENGTH_TOLERANCE, \
 	DCMSR_CIRCLE_AREA_TOLERANCE, DCMSR_CIRCLE_AREA_RELATIVE_TOLERANCE, DCMSR_CIRCLE_PARALLEL_DEGREES, DCMSR_UNITS_MM, \
 	CIRCLE_VALUE_AREA, CIRCLE_VALUE_PERIMETER, CIRCLE_VALUE_RADIUS, CIRCLE_VALUE_ROLES, circle_unit_scale
-from . import dcm_code_value, srcontent_is_named, srcontent_extra_items, srcontent_from_dataset, sr_diagnostic, \
+from . import dcm_code_value, dcm_code_matches, srcontent_is_named, srcontent_extra_items, srcontent_from_dataset, sr_diagnostic, \
 	SR_DIAGNOSTIC_INFO, SR_DIAGNOSTIC_WARNING, SR_DIAGNOSTIC_ERROR, SR_CONDITION_MEASUREMENT_VALUE_MISMATCH, \
 	SR_CONDITION_MEASUREMENT_VALUE_UNVERIFIED, SR_CONDITION_MEASUREMENT_UNCALIBRATED, SR_CONDITION_MEASUREMENT_WITHOUT_VALUE, \
 	SR_CONDITION_MEASUREMENT_READ_AS_GENERIC, SR_CONDITION_FOREIGN_MEASUREMENT_LABEL, SR_CONDITION_DEGENERATE_GEOMETRY, \
@@ -72,7 +76,8 @@ from .seriestag import srparse_item_properties, srencode_meta_items, srencode_di
 	image_reference_from_dataset, measurement_type_for_tracking_id, DCMSR_LAYOUT_NESTED, DCMSR_LAYOUTS_WRITTEN, \
 	_children, _value_type, _text_value, _relationship, _path, _note_by_reference, _note_missing_relationships, _UNNAMED_MARKER, DCMSR_IMAGE_REFERENCE_NAME
 from . import srcontent_name, SR_CONDITION_UNREGISTERED_VIEW, SR_CONDITION_INVALID_DRAWING_PLANE, SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN, \
-	SR_CONDITION_LEGACY_CIRCLE, SR_CONDITION_QUALIFIER_DROPPED
+	SR_CONDITION_LEGACY_CIRCLE, SR_CONDITION_QUALIFIER_DROPPED, SR_CONDITION_STATISTICS_DROPPED, SR_CONDITION_CONSTRUCTION_POINTS_DROPPED
+from ..base import CircleStatistics
 from .seriestag import DCMSR_MEASUREMENT_META, DCMSR_DISPLAY_ATTRIBUTES, DCMSR_DISPLAY_COLOR_ROLES
 
 # Concepts
@@ -139,6 +144,27 @@ DCMSR_CIRCLE_CONCEPTS = OrderedDict((
 	(CIRCLE_VALUE_PERIMETER, (DCMSR_CONCEPT_PERIMETER, Code('G-A197', 'SRT', 'Perimeter'))),
 	(CIRCLE_VALUE_RADIUS, (DCMSR_CONCEPT_RADIUS, Code('G-A196', 'SRT', 'Radius'))),
 ))
+
+# Derivation modifier of a NUM item (`HAS CONCEPT MOD` CODE): the statistic a value is
+DCMSR_DERIVATION = Code('121401', 'DCM', 'Derivation')
+
+# Pixel statistics of a circle (CID 7464) by `CircleStatistics` field: the SCT code, then the SRT equivalent read
+DCMSR_CIRCLE_STATISTICS = OrderedDict((
+	('mean', (Code('373098007', 'SCT', 'Mean'), Code('R-00317', 'SRT', 'Mean'))),
+	('std_dev', (Code('386136009', 'SCT', 'Standard Deviation'), Code('R-10047', 'SRT', 'Standard Deviation'))),
+	('max', (Code('56851009', 'SCT', 'Maximum'), Code('G-A437', 'SRT', 'Maximum'))),
+))
+
+# Quantities a circle's statistics are read in, by the modality of the pixels: the concept naming a
+# statistic NUM, its UCUM unit, and the modality unit the Viewer reads it as
+DCMSR_CIRCLE_STATISTIC_QUANTITIES = OrderedDict((
+	('CT', (Code('112031', 'DCM', 'Attenuation Coefficient'), Code("[hnsf'U]", 'UCUM', 'Hounsfield Unit'), 'HU')),
+	('PT', (Code('126401', 'DCM', 'SUVbw'), Code('g/ml{SUVbw}', 'UCUM', 'Standardized Uptake Value body weight'), 'SUV')),
+	('MR', (Code('110852', 'DCM', 'MR signal intensity'), Code('1', 'UCUM', 'no units'), '')),
+))
+
+# Units of body-weight SUV in a stock Cornerstone3D statistic (upper case); another SUV normalization is not read
+DCMSR_BODY_WEIGHT_SUV_UNITS = ('SUV', 'SUVBW', 'G/ML{SUVBW}')
 
 # Drawing-plane validation: unit length and perpendicularity of the directions, distance of the points
 # from the plane through the first point (millimetres)
@@ -628,6 +654,37 @@ def _concept_key(code):
 	return (dcm_code_value(code), str(code.get(DCMHEADER_CODING_SCHEME_DESIGNATOR, '') or ''))
 
 
+def _derivation_of(item):
+	'''	Derivation of a NUM content item: the value of its first `HAS CONCEPT MOD` Derivation
+		`(121401, DCM)` child.
+
+		@input item (pydicom.Dataset): the NUM content item
+
+		@returns pydicom.Dataset (the coded concept), or None for an item without one
+	'''
+	for child in _children(item):
+		if _relationship(child) == RelationshipTypeValues.HAS_CONCEPT_MOD.value and srcontent_is_named(child, DCMSR_DERIVATION):
+			concepts = child.get('ConceptCodeSequence')
+			return concepts[0] if concepts else None
+	return None
+
+
+def _value_key(item):
+	'''	Key of a NUM content item in `Measurement.values`: its concept, followed by its Derivation when
+		it has one, so that NUM items of one concept with different derivations (a mean and a maximum)
+		are kept apart.
+
+		@input item (pydicom.Dataset): the NUM content item
+
+		@returns tuple
+			- (code value, scheme designator) for an item without a Derivation
+			- (code value, scheme designator, derivation code value, derivation scheme designator)
+	'''
+	key = _concept_key(item.ConceptNameCodeSequence[0])
+	derivation = _derivation_of(item)
+	return key + _concept_key(derivation) if derivation is not None else key
+
+
 def _is_finding_site(item):
 	return _value_type(item) == 'CODE' and any(srcontent_is_named(item, code) for code in DCMSR_FINDING_SITE_CONCEPTS)
 
@@ -995,14 +1052,15 @@ def srparse_measurement(item, group=None, strict=False, diagnostics=None, measur
 	meta, display, views, source_series, plane, plane_text, finding_sites, extra_items = _parse_num_properties(
 		children, consumed, group_items, group_consumed, diagnostics, strict, path, geometry, tracking_uid)
 
-	# The other NUM items of the group; a repeated concept stays in the group's preserved items
+	# The other NUM items of the group, keyed by concept and Derivation; a repeated key stays in the
+	# group's preserved items
 	values, group_sites = OrderedDict(), []
-	own_key = _concept_key(item.ConceptNameCodeSequence[0])
+	own_key = _value_key(item)
 	for idx, sibling in enumerate(group_children):
 		if sibling is item:
 			group_consumed.add(idx)
 		elif idx not in group_consumed and _value_type(sibling) == 'NUM' and sibling.get('ConceptNameCodeSequence'):
-			key = _concept_key(sibling.ConceptNameCodeSequence[0])
+			key = _value_key(sibling)
 			if key == own_key or key in values:
 				continue
 			group_consumed.add(idx)
@@ -1166,13 +1224,20 @@ def srencode_circle(measurement, sr_template=None, layout=None, diagnostics=None
 		replaced value is not written (the `info` `measurement-qualifier-dropped`). Concepts are written
 		as read, else with their SCT codes. Makes no request.
 
+		The pixel statistic NUM items read with the circle follow the Radius NUM, verbatim (their
+		Derivation, their own copy of the geometry and every other child) while the circle is unchanged. A
+		circle whose points, image or Frame of Reference changed is written without them (the `info`
+		`statistics-dropped`). Construction points read with the circle that it no longer carries (a new
+		center, radius or normal clears them) record the `info` `construction-points-dropped`.
+
 		@input measurement (CircleMeasurement)
 		@input sr_template (class, default=highdicom Measurement): template class instantiated per NUM item
 		@input layout (str, default=`DCMSR_LAYOUT_NESTED`): the only layout written
 		@input diagnostics (list, default=None): list the write diagnostics are appended to
 		@input strict (bool, default=False): refuse an unregistered View value
 
-		@returns highdicom.sr.Measurement: the Area NUM item, followed by the Perimeter and Radius items
+		@returns highdicom.sr.Measurement: the Area NUM item, followed by the Perimeter and Radius items and
+			the statistic items
 		@raises ValueError for a legacy circle without a normal, a missing Frame of Reference or image
 			reference, or a drawing plane that fails validation
 		@raises SRDiagnosticError for degenerate geometry, a radius that cannot be computed, or under
@@ -1223,6 +1288,17 @@ def srencode_circle(measurement, sr_template=None, layout=None, diagnostics=None
 			encoded = template
 		else:
 			encoded.append(item)
+
+	path = _path(measurement.tracking_uid)
+	if measurement.statistics_dropped:
+		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_STATISTICS_DROPPED,
+			'pixel statistics read with the circle no longer describe it after the edit; not written', path=path,
+			value=len(measurement._statistic_items))
+	if measurement.construction_points_dropped:
+		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_CONSTRUCTION_POINTS_DROPPED,
+			'construction points read with the circle no longer describe it after the edit; not written', path=path)
+	for item in measurement.statistic_items:
+		encoded.append(srcontent_from_dataset(item))
 	return encoded
 
 
@@ -1365,6 +1441,116 @@ def _note_circle_value_checks(measurement, stored, diagnostics, strict, path):
 				path=path, value=value)
 
 
+def _statistic_quantity_of_unit(unit):
+	'''	Quantity of a stock Cornerstone3D statistic NUM (one named by the statistic's own code), from its
+		unit. No unit, or the UCUM unit `1`, names no quantity; nor does a UCUM unit of no known
+		quantity, which is still read. `HU` and `[hnsf'U]` are the attenuation coefficient of CT, and
+		body-weight SUV is SUVbw of PT.
+
+		@input unit (pydicom.Dataset or None): the unit coded concept
+
+		@returns
+			- tuple (modality unit, quantity key or None): the identity statistics of one circle share
+			- None for a unit that is not UCUM, or an SUV normalization other than body weight
+	'''
+	from ...imaging.helpers.headers import dcm_header_value
+	value = dcm_code_value(unit) if unit is not None else None
+	scheme = dcm_header_value(unit, DCMHEADER_CODING_SCHEME_DESIGNATOR) if unit is not None else None
+	if not value or value == '1':
+		return ('', None) if unit is None or scheme == 'UCUM' else None
+	if scheme != 'UCUM':
+		return None
+	for key, (_, quantity_unit, modality_unit) in DCMSR_CIRCLE_STATISTIC_QUANTITIES.items():
+		if value == quantity_unit.value:
+			return modality_unit, key
+	upper = value.upper()
+	if upper == 'HU':
+		return 'HU', 'CT'
+	if upper in DCMSR_BODY_WEIGHT_SUV_UNITS:
+		return 'SUV', 'PT'
+	if upper.startswith('SUV') or '{SUV' in upper:
+		return None
+	return value, None
+
+
+def _circle_statistic(item):
+	'''	The pixel statistic a NUM item of a circle group holds, in either form: named by the quantity
+		(`DCMSR_CIRCLE_STATISTIC_QUANTITIES`) in its UCUM unit, with a Derivation of CID 7464; or, as stock
+		Cornerstone3D writes it, named by the statistic's code in a UCUM unit. Codes match with their
+		scheme, SCT or the SRT equivalent. A value that is missing or not finite is no statistic.
+
+		@input item (pydicom.Dataset): a NUM content item
+
+		@returns
+			- tuple (field, value, identity, quantity, unit): the `CircleStatistics` field, the number, the
+				quantity identity (`_statistic_quantity_of_unit`), the quantity concept (CodedConcept or None)
+				and the unit (CodedConcept or None)
+			- None for an item that is no statistic this client reads
+	'''
+	value, unit, measured = _measured_value(item)
+	if value is None:
+		return None
+	units = measured.get('MeasurementUnitsCodeSequence')
+	unit_item = units[0] if units else None
+	derivation = _derivation_of(item)
+	# A Derivation modifier, even one without a value, makes it the quantity form
+	if any(_relationship(child) == RelationshipTypeValues.HAS_CONCEPT_MOD.value and srcontent_is_named(child, DCMSR_DERIVATION)
+			for child in _children(item)):
+		field = next((name for name, codes in DCMSR_CIRCLE_STATISTICS.items() if any(dcm_code_matches(derivation, code) for code in codes)), None)
+		quantity = next((key for key, (concept, quantity_unit, _) in DCMSR_CIRCLE_STATISTIC_QUANTITIES.items()
+			if srcontent_is_named(item, concept) and dcm_code_matches(unit_item, quantity_unit)), None)
+		if field is None or quantity is None:
+			return None
+		identity = (DCMSR_CIRCLE_STATISTIC_QUANTITIES[quantity][2], quantity)
+		return field, value, identity, CodedConcept.from_dataset(item.ConceptNameCodeSequence[0], copy=True), unit
+	field = next((name for name, codes in DCMSR_CIRCLE_STATISTICS.items() if any(srcontent_is_named(item, code) for code in codes)), None)
+	identity = _statistic_quantity_of_unit(unit_item) if field is not None else None
+	if identity is None:
+		return None
+	concept = DCMSR_CIRCLE_STATISTIC_QUANTITIES[identity[1]][0] if identity[1] is not None else None
+	return field, value, identity, (_coded(concept) if concept is not None else None), unit
+
+
+def _parse_circle_statistics(group_children, consumed, diagnostics, path):
+	'''	Pixel statistics of a circle group: the first NUM item of each statistic (`_circle_statistic`)
+		among the group's items not yet read. Statistics of different quantities are not read at all, so
+		that one quantity is never reported as another; unread items stay unmodelled in the group. Once
+		read, the statistics own every statistic NUM item of the group, a repeated one included, so that
+		all of them are written back while the circle is unchanged and none survives an edit.
+
+		The quantity is the concept naming the first statistic in the quantity form, else the quantity
+		the unit of a stock statistic identifies (None for a unit of no known quantity); the unit is that
+		of the first statistic in document order.
+
+		@input group_children (list of pydicom.Dataset): the children of the measurement group
+		@input consumed (set): indices into `group_children` already read; those read here are added
+
+		@returns tuple (CircleStatistics or None, list of pydicom.Dataset): the statistics and every
+			statistic NUM item of the group, in document order, copied for write-back
+	'''
+	found, owned = OrderedDict(), []
+	for idx, child in enumerate(group_children):
+		if idx in consumed or _value_type(child) != 'NUM' or not child.get('ConceptNameCodeSequence'):
+			continue
+		statistic = _circle_statistic(child)
+		if statistic is None:
+			continue
+		owned.append(idx)
+		if statistic[0] not in found:
+			found[statistic[0]] = (idx,) + statistic
+	if not found or len({entry[3] for entry in found.values()}) > 1:
+		return None, []
+	entries = sorted(found.values(), key=lambda entry: entry[0])
+	items = []
+	for idx in owned:
+		consumed.add(idx)
+		_note_by_reference(group_children[idx], diagnostics, path)
+		items.append(_preserved(group_children[idx], 'CONTAINER'))
+	quantity = next((entry[4] for entry in entries if entry[4] is not None), None)
+	values = {name: (found[name][2] if name in found else None) for name in DCMSR_CIRCLE_STATISTICS}
+	return CircleStatistics(quantity=quantity, unit=entries[0][5], **values), items
+
+
 def srparse_circle(group, tracking_id, tracking_uid, consumed, strict=False, diagnostics=None, calibrations=None, allow_group_level=True):
 	'''	Circle of a `CircleROI` measurement group: the Area, Perimeter and Radius NUM items (by code,
 		SCT or SRT, else by meaning), the geometry from the first coordinate item among them in document
@@ -1377,7 +1563,8 @@ def srparse_circle(group, tracking_id, tracking_uid, consumed, strict=False, dia
 		The geometry is the measurement's own coordinate item (`_is_measurement_geometry`), whatever the
 		order of the NUM's children; construction points count only on the circle's own image and frame
 		(image domain) or Frame of Reference (patient domain), and are otherwise preserved unmodelled.
-		Each NUM's stored value keeps its unit and numeric value qualifier.
+		Each NUM's stored value keeps its unit and numeric value qualifier. The pixel statistics of the
+		group are read into `statistics` (`_parse_circle_statistics`) and kept out of `values`.
 
 		Diagnostics raised here: `legacy-circle-scoord3d`, `degenerate-geometry`, `measurement-read-as-generic`,
 		`invalid-measurement-geometry` (construction points in another form or on another image, frame or
@@ -1492,6 +1679,7 @@ def srparse_circle(group, tracking_id, tracking_uid, consumed, strict=False, dia
 			qualifiers[role] = copy.deepcopy(entry['item'].NumericValueQualifierCodeSequence)
 	for role, (idx, item) in nums.items():
 		consumed.add(idx)
+	statistics, statistic_items = _parse_circle_statistics(group_children, consumed, diagnostics, path)
 
 	group_sites = [CodedConcept.from_dataset(sibling.ConceptCodeSequence[0], copy=True) for idx, sibling in enumerate(group_children)
 		if idx not in consumed and _is_finding_site(sibling) and sibling.get('ConceptCodeSequence')]
@@ -1511,6 +1699,8 @@ def srparse_circle(group, tracking_id, tracking_uid, consumed, strict=False, dia
 	measurement._stored_items = stored_items
 	measurement._stored_qualifiers = qualifiers
 	measurement._num_coordinates = {role: entry['source'] for role, entry in per_num.items()}
+	if statistics is not None:
+		measurement._set_parsed_statistics(statistics, statistic_items)
 	measurement._mark_parsed(stored_items.get(CIRCLE_VALUE_RADIUS), per_num[source_role]['source'])
 	_note_circle_value_checks(measurement, stored, diagnostics, strict, path)
 	return measurement

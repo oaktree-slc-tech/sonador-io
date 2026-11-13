@@ -805,8 +805,10 @@ class Measurement(_DisplayAttributesMixin, SRDataCollectionMember):
 
 		@property value (number): measured value
 		@property unit (highdicom.Code or highdicom.CodedConcept): measurement unit
-		@property values (OrderedDict): the other NUM items of the measurement group, keyed by concept
-			`(code value, scheme designator)`, as `MeasurementValue`. Re-emitted as read unless replaced.
+		@property values (OrderedDict): the other NUM items of the measurement group, as `MeasurementValue`,
+			keyed by concept: `(code value, scheme designator)`, or for a NUM with a Derivation
+			`(code value, scheme designator, derivation code value, derivation scheme designator)`.
+			Re-emitted as read unless replaced.
 		@property uid: tracking identifier as given (a string or a highdicom `TrackingIdentifier`)
 		@property tracking_id (str or None): human readable tracking identifier
 		@property tracking_uid (str or None): tracking unique identifier, stable across revisions
@@ -1666,6 +1668,11 @@ CIRCLE_VALUE_PERIMETER = 'perimeter'
 CIRCLE_VALUE_RADIUS = 'radius'
 CIRCLE_VALUE_ROLES = (CIRCLE_VALUE_AREA, CIRCLE_VALUE_PERIMETER, CIRCLE_VALUE_RADIUS)
 
+# Pixel statistics of a circle as read from its document: the mean, standard deviation and maximum of
+# the pixels inside it (None for a statistic the document does not hold), the quantity the pixels
+# measure (None when the document does not name one) and the unit of the three values
+CircleStatistics = namedtuple('CircleStatistics', ('mean', 'std_dev', 'max', 'quantity', 'unit'))
+
 # UCUM units a stored circle value is converted from, to millimetres or square millimetres
 DCMSR_UCUM_LENGTH_SCALES = {'um': 0.001, 'mm': 1.0, 'cm': 10.0, 'm': 1000.0}
 DCMSR_UCUM_AREA_SCALES = {'um2': 1e-6, 'mm2': 1.0, 'cm2': 100.0, 'm2': 1e6}
@@ -1839,6 +1846,8 @@ class CircleMeasurement(GeometricMeasurement):
 		@property extra_items, perimeter_extra_items, radius_extra_items (tuple of pydicom.Dataset):
 			unmodelled children of the Area, Perimeter and Radius NUM items, each re-emitted under its own
 			NUM item
+		@property statistics (CircleStatistics or None): pixel statistics read from the document, while
+			the circle is unchanged since it was read; read only, since this client has no pixel data
 	'''
 	default_type = SONADOR_MEASUREMENT_TYPE_CIRCLE
 	default_name = DCMSR_CONCEPT_RADIUS
@@ -1877,6 +1886,9 @@ class CircleMeasurement(GeometricMeasurement):
 		self.value_names = dict(value_names or {})
 		self._construction_points = None
 		self._parsed_construction_points = None
+		self._statistics = None
+		self._statistic_items = ()
+		self._parsed_frame_of_reference_uid = None
 		super().__init__(geometry=geometry, **kwargs)
 		if legacy_normal is not None:
 			self._legacy_normal = tuple(float(c) for c in _unit_vector(legacy_normal, 'normal'))
@@ -2328,6 +2340,63 @@ class CircleMeasurement(GeometricMeasurement):
 		'''
 		super()._mark_parsed(stored_value_item, source_coordinates)
 		self._parsed_construction_points = self._construction_points
+		self._parsed_frame_of_reference_uid = self.frame_of_reference_uid
+
+	@property
+	def construction_points_dropped(self):
+		'''	Whether construction points read from the document are no longer carried: the center, radius
+			or normal changed since the circle was read, or they were removed.
+
+			@returns bool
+		'''
+		return self._parsed_construction_points is not None and self._construction_points is None
+
+	# ---- pixel statistics ----
+
+	def _set_parsed_statistics(self, statistics, items):
+		'''	Record the pixel statistics read from the document and the statistic NUM items of the group,
+			which are written back verbatim while the circle is unchanged. The document reader's path.
+
+			@input statistics (CircleStatistics)
+			@input items (sequence of pydicom.Dataset): every statistic NUM item of the group, in document order
+		'''
+		self._statistics = statistics
+		self._statistic_items = tuple(items)
+
+	@property
+	def keeps_statistics(self):
+		'''	Whether the pixel statistics read from the document still describe the circle: its points,
+			referenced image and Frame of Reference are unchanged since it was read.
+
+			@returns bool: False for a circle without statistics, which includes every circle created in Python
+		'''
+		return (self._statistics is not None and self.is_parsed and not self.points_changed and not self.reference_changed
+			and self.frame_of_reference_uid == self._parsed_frame_of_reference_uid)
+
+	@property
+	def statistics(self):
+		'''	Pixel statistics read from the document while the circle is unchanged since it was read. A
+			changed circle has none: they are not written again, and this client never computes them.
+
+			@returns CircleStatistics, or None
+		'''
+		return self._statistics if self.keeps_statistics else None
+
+	@property
+	def statistics_dropped(self):
+		'''	Whether pixel statistics read from the document are not written because the circle changed.
+
+			@returns bool
+		'''
+		return self._statistics is not None and not self.keeps_statistics
+
+	@property
+	def statistic_items(self):
+		'''	The statistic NUM items written back, verbatim, while the statistics are kept.
+
+			@returns tuple of pydicom.Dataset: empty when there are none to write
+		'''
+		return self._statistic_items if self.keeps_statistics else ()
 
 	# ---- values ----
 
@@ -2549,9 +2618,10 @@ class CircleMeasurement(GeometricMeasurement):
 		return resolved
 
 	def resolve_value(self, diagnostics=None):
-		'''	Radius and unit written: the stored radius of an unchanged parsed circle, else computed from
-			the geometry, else (a parsed circle read without a usable Radius NUM, unchanged) converted from
-			its stored area or perimeter when their UCUM unit converts to millimetres.
+		'''	Radius and unit written: the stored radius and its unit for a parsed circle whose geometry is
+			unchanged; otherwise the radius in millimetres (`_radius_mm`), converted from a stored radius,
+			area or perimeter whose UCUM unit converts to millimetres while the geometry is unchanged, else
+			computed from the geometry.
 
 			@returns tuple (number, unit)
 			@raises SRDiagnosticError for degenerate geometry, or a radius that cannot be derived: an
