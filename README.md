@@ -94,7 +94,7 @@ sr_series.findings()                             # the study-shaped mapping, fro
 Each `Finding` links back to its `ImagingSeries`, `DcmInstance` and `DcmSRInstance`.
 
 ### Quantitative Measurements
-Length, Angle and Cobb angle measurements are read from and written to DICOM-SR documents
+Length, Angle, Cobb angle, Circle and Bidirectional measurements are read from and written to DICOM-SR documents
 (`sonador.apisettings.sr.measurements`) with the coordinates they were made from: one measurement group
 each, in the patient domain (millimetres, in the imaging series' Frame of Reference) or the image domain.
 
@@ -140,6 +140,51 @@ patient coordinates); its stored values are kept while the geometry is unchanged
 patient-domain circle, which has no plane, is read with a warning and written again only once `normal`
 is set.
 
+A bidirectional measurement (the Cornerstone `Bidirectional` tool, shown as a Target in the Viewer) is a long
+axis and a short axis, two line segments of two points each, built from the axes as drawn:
+
+```python
+from sonador.apisettings.base import BidirectionalMeasurement
+
+target = BidirectionalMeasurement.from_axes(((-10, 20, 30), (10, 20, 30)), ((0, 15, 30), (0, 25, 30)),
+	frame_of_reference_uid=frame_uid, series_uid=series.series_uid, drawing_plane=((1, 0, 0), (0, 1, 0)))
+target.length, target.width               # 20.0, 10.0 (mm); `value` and `unit` are the long axis
+target.short_axis = ((0, 10, 30), (0, 30, 30))   # recomputes the width only; the stored length is kept
+
+image_target = BidirectionalMeasurement.from_axes(long_axis, short_axis, reference=image_reference,
+	calibration=image_frame_geometry(header))   # (column, row) points; mm with Pixel Spacing, pixels without
+```
+
+| Model | DICOM-SR |
+| --- | --- |
+| `long_axis`, `length` (`value`, `unit`) | NUM `(103339001, SCT, "Long Axis")`, `INFERRED FROM` a two-point `POLYLINE` |
+| `short_axis`, `width` (`width_unit`, also in `values`) | NUM `(103340004, SCT, "Short Axis")`, `INFERRED FROM` its own two-point `POLYLINE` |
+| description, text, location, views, `series_uid`, `drawing_plane`, `display`, `extra_items` | children of the Long Axis NUM |
+| `short_axis_extra_items` | the Short Axis NUM's own unmodelled children |
+| `tracking_id`, `tracking_uid` | `cornerstoneTools@^4.0.0:Bidirectional` and the group's UID (`Cornerstone3DTools@^0.1.0:Bidirectional` is read) |
+
+Each `POLYLINE` is a SCOORD `SELECTED FROM` the image in the image domain, or a SCOORD3D with the Frame of
+Reference in the patient domain. A length computed by this client is in `mm`, or in the pixel unit on a frame
+without Pixel Spacing (with the `info` `measurement-uncalibrated`); a stored length keeps the unit it was read
+in. The SRT codes `G-A185` and `G-A186` are read too, as is a NUM matched by its meaning only, in either order;
+a measurement read with SRT codes keeps them. The typed properties are read from the first of the two NUM
+items in document order that carries any and written under the Long Axis NUM; every other child stays under
+the NUM it was read from.
+
+The axes are kept as drawn: the client never swaps them, and applies no perpendicularity or intersection
+constraint. A short axis longer than the long axis is read and written as labelled, with the `info`
+`axes-not-ordered`. Each stored length is authoritative; one stored in the unit the client computes is checked
+against its axis within 0.01 mm (0.01 px uncalibrated), one in another unit is reported, not converted. An
+unchanged axis re-saves its stored value verbatim, an edited one is recomputed, and assigning `value` replaces
+the stored long axis length. Lengths stored in different units are read as stored, with the `warning`
+`axes-units-differ`, and written back as read; editing one axis can also leave the two in different units.
+Without a calibration, an edited image-domain axis is recomputed only when its own stored length is in
+pixels; otherwise the write is refused (`measurement-not-computable`). A drawing plane must hold all four points within 1 mm; two axes in no common plane are a legal document
+without one. A frame conversion must be rigid and moves both axes and the plane. An axis shorter than 0.01 mm
+is a `warning` on read and refused on write. A group with one axis only, a NUM item without its own
+geometry, or axes on different images or Frames of Reference reads as a generic `Measurement`, with the
+`warning` `measurement-read-as-generic`.
+
 Display colours have six roles: `Background`, `Border`, `Value` and `Meaning` for Series Tags, `Line` and
 `Text` for a measurement's drawing and label. Any role may be set on any finding or measurement; a role
 that is not set is not written.
@@ -179,6 +224,50 @@ a parsed length stored in pixels and then edited recomputes in pixels without a 
 calibration (for example zero spacing) is refused. A parsed length stored in millimetres and left unchanged
 keeps that value even when no calibration is available. Points given in another frame are
 converted at construction with `transform`, a rigid `ImageTransformMatrix`.
+
+### Points
+Two classes hold coordinates. Neither carries a unit: the API that returns a value states its role and unit.
+
+| Class | Values | Returned for |
+|---|---|---|
+| `PixelCoord(column, row)` | a 2D position on an image grid | image-domain measurement points, in pixels: the SCOORD origin is the outer corner of the first pixel, so pixel centres are at `.5` |
+| `ImageCoord(x, y, z)` | a 3D triple | patient-domain measurement points, in millimetres; unitless directions (`normal`, `u`, `plane_normal`, `drawing_plane`, Image Orientation); frame conversions (`convert` returns millimetres, `invert` the transform's `source_unit`) |
+
+The measurement properties (`points`, `p1`, `p2`, `vertex`, `p3`, `line1`, `line2`, `long_axis`, `short_axis`,
+`center`, `edge`, `construction_points`) return them, and every constructor and setter accepts tuples, lists,
+numpy arrays or the point classes. `array` on a measurement or a `Geometry` is a new float array of shape
+`(N, 2)` or `(N, 3)`.
+
+```python
+import numpy as np
+from sonador.apisettings.base import PixelCoord, ImageCoord
+
+image_length.p1                       # PixelCoord(column=10.0, row=10.0)
+image_length.p1 == (10, 10)           # True: compares and hashes as the tuple of its values
+pixels[image_length.p1.array_index(pixels.shape)]   # numpy (row, column) index of the pixel holding the point
+
+length.array                          # (2, 3) float array, the same as np.asarray(length.points)
+offset = np.asarray(length.p2) - length.p1          # arithmetic is done in numpy
+```
+
+* Equality is exact on the stored floats; compare within a tolerance with `numpy.allclose`. A point written as
+  float32 GraphicData and read back may differ from the original: `0.1` reads back as `0.10000000149011612`,
+  while a value exactly representable in float32, such as `0.5`, is unchanged.
+* Comparing a point with a numpy array is element-wise, as numpy does, so `if point == array:` raises numpy's
+  ambiguous-truth error.
+* Neither class has arithmetic of its own. With a numpy array or a numpy scalar the result is a numpy array;
+  any other operand (a point, a tuple, a Python number) raises `TypeError`, so a point is never concatenated
+  or repeated like a tuple.
+* Both keep iteration, unpacking, `len`, indexing, slicing, equality and hashing with tuples, and pickling.
+  `PixelCoord` is a tuple (with `index` and `count`); `ImageCoord` is not, and it also carries the attributes
+  of a point-collection point (`reference_frame`, `name`, `point_type`), which take no part in equality.
+* `array_index` takes the floor of each value and raises `IndexError` for a negative index, which numpy would
+  otherwise count from the opposite edge, or one outside the given shape.
+* An `ImageCoord` returned as a patient position (the patient-domain points and `patient_point`) is in patient
+  space, not a voxel index: SimpleITK indices are `(i, j, k)` and its numpy arrays are indexed `(k, j, i)`. The
+  roles of other `ImageCoord` values are those of the table above: unitless directions, frame-conversion points
+  in the transform's units, and the legacy SCOORD points of `sr2points` below.
+* `sr2points` reads SCOORD points as `ImageCoord` with `z = 0`, as before.
 
 ### Coordinate System and Units of M3D Models
 Encapsulated STL instances (M3D modality) carry a Frame of Reference UID (the origin and axes implicit

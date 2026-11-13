@@ -3,16 +3,22 @@
 
 	* `SRDataObject` / `SRDataCollectionMember` / `SRDataObjectCollection`: base classes. Every object
 		encodes itself with `create_sr` and exposes the result as `.sr`, built on every access.
-	* Spatial data: `ImageTransformMatrix`, `ImageCoord` and their collections.
+	* Spatial data: `ImageTransformMatrix`, `ImageCoord` and their collections, and `PixelCoord`. The two
+		point classes carry no unit: `PixelCoord` is a `(column, row)` position on an image grid and
+		`ImageCoord` an `(x, y, z)` triple, a position or a direction; the API returning a value states
+		its role and unit. Both compare and hash as the tuple of their values and convert to numpy arrays;
+		arithmetic is done in numpy.
 	* Qualitative and quantitative data: `Finding`, `Measurement` and their collections. A `Finding`
 		carries the Sonador-SR 0.3 per-finding properties of a Series Tag (`ImageReference`, tracking
 		identifiers, extended meta, display attributes, preserved `extra_items`) and is read from a
 		content item with `from_sr`. A `Measurement` carries the same attributes for a NUM item, plus
 		its other NUM values and its coordinates (`Geometry`).
-	* Typed quantitative tools: `LengthMeasurement`, `AngleMeasurement`, `CobbAngleMeasurement` and
-		`CircleMeasurement`, on `GeometricMeasurement`; `measurement_class_for_type` selects the class a
-		document reads to. A circle is held by its center, radius and plane (an image-domain `CIRCLE`, a
-		patient-domain `ELLIPSE` of two equal perpendicular diameters), with optional construction points.
+	* Typed quantitative tools: `LengthMeasurement`, `AngleMeasurement`, `CobbAngleMeasurement`,
+		`CircleMeasurement` and `BidirectionalMeasurement`, on `GeometricMeasurement`;
+		`measurement_class_for_type` selects the class a document reads to. A circle is held by its center,
+		radius and plane (an image-domain `CIRCLE`, a patient-domain `ELLIPSE` of two equal perpendicular
+		diameters), with optional construction points. A bidirectional measurement is held by its long and
+		short axis as drawn, each with its own length.
 	* Report groups: `ReportGroup` (TID 1501, also read with `from_sr`), `ReportMetaGroup`,
 		`VolumePointCollectionGroup` and `ReportGroupCollection`.
 
@@ -36,7 +42,7 @@ from client.utils.object import pick, omit
 from client.utils.microservices import JsonObjectCollection
 
 from .constants import DCMSR_UNITS_MM, DCMSR_UNITS_MM2, DCMSR_UNITS_ANGLE_DEGREE, SONADOR_MEASUREMENT_TYPE_LENGTH, SONADOR_MEASUREMENT_TYPE_ANGLE, \
-	SONADOR_MEASUREMENT_TYPE_COBB_ANGLE, SONADOR_MEASUREMENT_TYPE_CIRCLE
+	SONADOR_MEASUREMENT_TYPE_COBB_ANGLE, SONADOR_MEASUREMENT_TYPE_CIRCLE, SONADOR_MEASUREMENT_TYPE_BIDIRECTIONAL
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +171,19 @@ class SRDataObjectCollection(SRDataObject, JsonObjectCollection):
 
 
 DCMSR_TRANSFORM_TOLERANCE = 1e-6
+
+
+def _point_rows(points):
+	'''	Points of a frame conversion as an `(N, 3)` float array.
+
+		@input points (sequence of (x, y, z)): tuples, numpy arrays or `ImageCoord`
+		@returns numpy.ndarray of shape (N, 3)
+		@raises ValueError for anything that is not a sequence of 3D points
+	'''
+	rows = np.asarray(points, dtype=float)
+	if rows.ndim != 2 or rows.shape[1] != 3:
+		raise ValueError('A frame conversion takes a sequence of (x, y, z) points; got an array of shape %s' % (rows.shape,))
+	return rows
 DCMSR_TRANSFORM_UNIT_SCALES = {'mm': 1.0, 'm': 1000.0}
 
 
@@ -231,40 +250,43 @@ class ImageTransformMatrix(SRDataCollectionMember):
 		'''	Convert points from the source frame to the target frame. Points in metres are scaled to
 			millimetres before the matrix is applied.
 
-			@input points (sequence of (x, y, z)): points in the source frame, in `source_unit`
-			@returns tuple of tuple of 3 float: points in the target frame, in millimetres
+			@input points (sequence of (x, y, z): tuples, numpy arrays or `ImageCoord`): points in the source
+				frame, in `source_unit`
+			@returns tuple of ImageCoord: points in the target frame, in millimetres
 			@raises ValueError for a transform that is not rigid
 		'''
 		matrix = self.rigid_matrix()
 		scale = DCMSR_TRANSFORM_UNIT_SCALES[self.source_unit]
-		source = np.asarray(points, dtype=float) * scale
+		source = _point_rows(points) * scale
 		homogeneous = np.column_stack((source, np.ones(len(source))))
-		return tuple(tuple(float(c) for c in p[:3]) for p in matrix.dot(homogeneous.T).T)
+		return tuple(ImageCoord(*(float(c) for c in p[:3])) for p in matrix.dot(homogeneous.T).T)
 
 	def rotate_directions(self, directions):
 		'''	Apply the rotation part of the matrix to direction vectors, such as a plane normal or the
 			directions of a drawing plane. The translation and the source-unit scale do not apply to a
 			direction.
 
-			@input directions (sequence of (x, y, z)): unit directions in the source frame
-			@returns tuple of tuple of 3 float: the directions in the target frame
+			@input directions (sequence of (x, y, z): tuples, numpy arrays or `ImageCoord`): unit directions in
+				the source frame
+			@returns tuple of ImageCoord: the directions in the target frame, unitless
 			@raises ValueError for a transform that is not rigid
 		'''
 		rotation = self.rigid_matrix()[:3, :3]
-		return tuple(tuple(float(c) for c in rotation.dot(np.asarray(d, dtype=float))) for d in directions)
+		return tuple(ImageCoord(*(float(c) for c in rotation.dot(np.asarray(d, dtype=float)))) for d in directions)
 
 	def invert(self, points):
 		'''	Convert points from the target frame back to the source frame with the matrix inverse.
 
-			@input points (sequence of (x, y, z)): points in the target frame, in millimetres
-			@returns tuple of tuple of 3 float: points in the source frame, in `source_unit`
+			@input points (sequence of (x, y, z): tuples, numpy arrays or `ImageCoord`): points in the target
+				frame, in millimetres
+			@returns tuple of ImageCoord: points in the source frame, in `source_unit`
 			@raises ValueError for a transform that is not rigid
 		'''
 		inverse = np.linalg.inv(self.rigid_matrix())
 		scale = DCMSR_TRANSFORM_UNIT_SCALES[self.source_unit]
-		target = np.asarray(points, dtype=float)
+		target = _point_rows(points)
 		homogeneous = np.column_stack((target, np.ones(len(target))))
-		return tuple(tuple(float(c) / scale for c in p[:3]) for p in inverse.dot(homogeneous.T).T)
+		return tuple(ImageCoord(*(float(c) / scale for c in p[:3])) for p in inverse.dot(homogeneous.T).T)
 
 	@property
 	def matrix(self):
@@ -307,26 +329,112 @@ class ImageTransformMatrixCollection(SRDataObjectCollection):
 		return DcmSequence(m.sr for m in self)
 
 
+def _point_arithmetic(self, other):
+	'''	Arithmetic operator of the point classes. A numpy operand (`numpy.ndarray` or a numpy scalar)
+		gets `NotImplemented`, so that numpy computes the element-wise result in either operand order;
+		any other operand is refused, so that a point is never concatenated or repeated like a tuple.
+
+		@input other: the other operand
+		@returns NotImplemented for a numpy operand
+		@raises TypeError for any other operand
+	'''
+	if isinstance(other, (np.ndarray, np.generic)):
+		return NotImplemented
+	raise TypeError('%s values have no arithmetic of their own; convert them with numpy.asarray' % type(self).__name__)
+
+
+class PixelCoord(namedtuple('PixelCoord', ('column', 'row'))):
+	'''	Two-dimensional position on an image grid: a `(column, row)` pair, the order of DICOM SCOORD
+		GraphicData. The class carries no unit; the API that returns a value states its role and unit (an
+		image-domain measurement point is in pixels, with the SCOORD origin at the outer corner of the
+		first pixel, so pixel centres are at `.5`).
+
+		A `PixelCoord` is a tuple: it iterates, indexes, slices, unpacks, compares and hashes as the tuple
+		of its values, and converts to a numpy array of shape `(2,)`. It has no arithmetic: an operation
+		with a numpy operand gives the numpy result, and any other operand (a point, a tuple, a Python
+		number) raises `TypeError`, so a point is never concatenated or repeated.
+
+		@property column (float): position across the columns (left to right)
+		@property row (float): position down the rows (top to bottom)
+	'''
+	__slots__ = ()
+
+	def __new__(cls, column, row):
+		'''	@input column, row (number): the position
+			@returns PixelCoord
+			@raises TypeError or ValueError for a value that is not a number
+		'''
+		return super().__new__(cls, float(column), float(row))
+
+	__add__ = __radd__ = __sub__ = __rsub__ = __mul__ = __rmul__ = _point_arithmetic
+
+	def array_index(self, shape=None):
+		'''	Index of the pixel holding the position, in numpy `[row, column]` order: the floor of each
+			value, since the SCOORD origin is the outer corner of the first pixel.
+
+			@input shape (sequence of int, default=None): `(rows, columns)` of the array the index is for
+			@returns tuple (int, int): `(row, column)`
+			@raises IndexError for a negative index, which names no pixel (numpy would count it from the
+				opposite edge), or for an index outside `shape` when given
+		'''
+		row, column = int(math.floor(self.row)), int(math.floor(self.column))
+		if row < 0 or column < 0:
+			raise IndexError('Pixel position %r lies before the first row or column' % (self,))
+		if shape is not None and (row >= shape[0] or column >= shape[1]):
+			raise IndexError('Pixel position %r lies outside an array of shape %r' % (self, tuple(shape)))
+		return row, column
+
+
 class ImageCoord(SRDataCollectionMember):
-	'''	Helper class for working with DICOM (spatial) coordinates
+	'''	Three-dimensional value `(x, y, z)`. The class carries no unit; the API that returns a value
+		states its role and unit: a patient-domain measurement point is in millimetres, a plane normal
+		or drawing-plane direction is unitless, and the source points of a frame conversion are in the
+		transform's `source_unit`.
+
+		The coordinates are read-only. An `ImageCoord` iterates, indexes, slices and unpacks as
+		`(x, y, z)`; it compares equal to, and hashes as, the tuple of its coordinates (an `ImageCoord`,
+		tuple or list of equal values); `==` is exact, so compare within a tolerance with `numpy.allclose`.
+		It converts to a float64 numpy array of shape `(3,)` (another `dtype` when numpy asks for one). It
+		has no arithmetic: an operation with a numpy
+		operand gives the numpy result, and any other operand raises `TypeError`.
+
+		A point of a point collection (`ImageCoordCollection`, `VolumePointCollectionGroup`) may also carry
+		a `reference_frame`, `name` and `point_type`, written by `create_sr`; they take no part in equality.
 	'''
 	def __init__(self, x, y, z, reference_frame=None, name=None, point_type=None, **kwargs):
-		'''	Initialize image coordinate
+		'''	Initialize the coordinate.
+
+			@input x, y, z (number): the coordinates
+			@input reference_frame (ImageTransformMatrix, default=None): frame of a collection point
+			@input name (Code, default=None): concept name of a collection point
+			@input point_type (str, default=None): graphic type of a collection point
 		'''
 		super().__init__(object_type=point_type, **kwargs)
 		self._name = name
 
 		# Coordinate values
-		self.x = x
-		self.y = y
-		self.z = z
+		self._x = x
+		self._y = y
+		self._z = z
 
 		# Coordinate reference frame
 		self._ref_frame = reference_frame
 
 	@property
+	def x(self):
+		return self._x
+
+	@property
+	def y(self):
+		return self._y
+
+	@property
+	def z(self):
+		return self._z
+
+	@property
 	def _pts(self):
-		return (self.x, self.y, self.z)
+		return (self._x, self._y, self._z)
 
 	@property
 	def name(self):
@@ -338,6 +446,39 @@ class ImageCoord(SRDataCollectionMember):
 
 	def __iter__(self):
 		yield from self._pts
+
+	def __len__(self):
+		return 3
+
+	def __getitem__(self, index):
+		return self._pts[index]
+
+	def __eq__(self, other):
+		'''	Coordinate equality with an `ImageCoord`, tuple or list; numpy arrays compare element-wise.
+		'''
+		if isinstance(other, ImageCoord):
+			return self._pts == other._pts
+		if isinstance(other, (tuple, list)):
+			return self._pts == tuple(other)
+		return NotImplemented
+
+	def __hash__(self):
+		return hash(self._pts)
+
+	def __array__(self, dtype=None, copy=None):
+		'''	numpy array of the coordinates, always a new array: float64 unless numpy asks for another
+			`dtype`, whatever the types the coordinates were given in.
+
+			@raises ValueError when numpy asks for no copy (`copy=False`)
+		'''
+		if copy is False:
+			raise ValueError('An ImageCoord converts to a new array; it cannot be viewed without a copy')
+		return np.array(self._pts, dtype=np.float64 if dtype is None else dtype)
+
+	__add__ = __radd__ = __sub__ = __rsub__ = __mul__ = __rmul__ = _point_arithmetic
+
+	def __repr__(self):
+		return 'ImageCoord(x=%r, y=%r, z=%r)' % self._pts
 
 	def __str__(self):
 		return '(x=%s,y=%s,z=%s)' % self._pts
@@ -375,10 +516,14 @@ class ImageCoordCollection(SRDataObjectCollection):
 			name=self.name, point_type=self.type, **kwargs)
 
 	@property
-	@functools.lru_cache()
 	def array(self):
+		'''	The collection's coordinates as a new numpy array on every access, so it follows changes of
+			membership and writing into it leaves the collection unchanged.
+
+			@returns numpy.ndarray of shape (N, 3); (0, 3) for an empty collection
+		'''
 		from ..sr import points2array
-		return points2array(self)
+		return points2array(self) if len(self) else np.zeros((0, 3))
 
 	@property
 	def reference_frame(self):
@@ -645,13 +790,13 @@ def drawing_plane_vectors(plane):
 		are checked when the measurement is written
 		(`sonador.apisettings.sr.measurements.drawing_plane_failed_check`).
 
-		@input plane (pair of 3-sequences of numbers, or 6 numbers in Image Orientation (Patient)
-			order): the drawing plane
+		@input plane (pair of 3-vectors: tuples, lists, numpy arrays or `ImageCoord`; or 6 numbers in Image
+			Orientation (Patient) order): the drawing plane
 
-		@returns tuple (tuple of 3 float, tuple of 3 float)
+		@returns tuple (ImageCoord, ImageCoord): the unitless width and height directions
 		@raises ValueError for another shape or a value that is not finite
 	'''
-	values = [v for vector in plane for v in (vector if isinstance(vector, (list, tuple, np.ndarray)) else (vector,))]
+	values = [v for vector in plane for v in (vector if isinstance(vector, (list, tuple, np.ndarray, ImageCoord)) else (vector,))]
 	try:
 		values = [float(v) for v in values]
 	except (TypeError, ValueError):
@@ -660,7 +805,7 @@ def drawing_plane_vectors(plane):
 		raise ValueError('A drawing plane is two 3-vectors (width, height); got %d values' % len(values))
 	if not all(math.isfinite(v) for v in values):
 		raise ValueError('Drawing plane values must be finite: %r' % (values,))
-	return tuple(values[:3]), tuple(values[3:])
+	return ImageCoord(*values[:3]), ImageCoord(*values[3:])
 
 
 class Geometry(namedtuple('Geometry', ('domain', 'graphic_type', 'points', 'reference'))):
@@ -670,10 +815,11 @@ class Geometry(namedtuple('Geometry', ('domain', 'graphic_type', 'points', 'refe
 		@property domain (str): `DCMSR_GEOMETRY_DOMAIN_IMAGE` (SCOORD) or `DCMSR_GEOMETRY_DOMAIN_PATIENT`
 			(SCOORD3D)
 		@property graphic_type (str): DICOM graphic type (`POLYLINE`, `CIRCLE`, `ELLIPSE`, ...)
-		@property points (tuple of tuple of float): ordered points as drawn: `(column, row)` pixel pairs
-			or `(x, y, z)` patient triples in millimetres
+		@property points (tuple of PixelCoord or tuple of ImageCoord): ordered points as drawn: `(column, row)`
+			pixel positions (`PixelCoord`) or `(x, y, z)` patient positions in millimetres (`ImageCoord`)
 		@property reference (ImageReference or None): referenced SOP instance and frame of the image
 			domain; None in the patient domain
+		@property array (numpy.ndarray): the points as a new float array of shape `(N, 2)` or `(N, 3)`
 	'''
 	__slots__ = ()
 
@@ -682,7 +828,9 @@ class Geometry(namedtuple('Geometry', ('domain', 'graphic_type', 'points', 'refe
 
 			@input domain (str): `DCMSR_GEOMETRY_DOMAIN_IMAGE` or `DCMSR_GEOMETRY_DOMAIN_PATIENT`
 			@input graphic_type (str): DICOM graphic type
-			@input points (iterable of sequences of numbers): ordered points
+			@input points (iterable of points: tuples, lists, numpy arrays, `PixelCoord` or `ImageCoord`):
+				ordered points. They are stored as `PixelCoord` (image domain) or `ImageCoord` (patient domain);
+				the SR attributes of an input `ImageCoord` (frame, name, point type) are not kept.
 			@input reference (ImageReference, default=None): image the points were drawn on
 
 			@returns Geometry
@@ -692,12 +840,32 @@ class Geometry(namedtuple('Geometry', ('domain', 'graphic_type', 'points', 'refe
 		if domain not in (DCMSR_GEOMETRY_DOMAIN_IMAGE, DCMSR_GEOMETRY_DOMAIN_PATIENT):
 			raise ValueError('Unknown geometry domain: %s' % domain)
 		dimension = 2 if domain == DCMSR_GEOMETRY_DOMAIN_IMAGE else 3
-		points = tuple(tuple(float(c) for c in point) for point in points)
-		if any(len(point) != dimension for point in points):
+		values = tuple(tuple(float(c) for c in point) for point in points)
+		if any(len(point) != dimension for point in values):
 			raise ValueError('%s-domain points must have %d coordinates' % (domain, dimension))
-		if not all(math.isfinite(c) for point in points for c in point):
-			raise ValueError('Measurement coordinates must be finite: %s' % (points,))
-		return super().__new__(cls, domain, str(graphic_type), points, reference)
+		if not all(math.isfinite(c) for point in values for c in point):
+			raise ValueError('Measurement coordinates must be finite: %s' % (values,))
+		point_class = PixelCoord if dimension == 2 else ImageCoord
+		return super().__new__(cls, domain, str(graphic_type), tuple(point_class(*point) for point in values), reference)
+
+	def _replace(self, **kwargs):
+		'''	Same geometry with some fields replaced, validated and normalised like a new one.
+
+			@input kwargs: `domain`, `graphic_type`, `points` or `reference`
+			@returns Geometry
+		'''
+		fields = self._asdict()
+		fields.update(kwargs)
+		return type(self)(**fields)
+
+	@property
+	def array(self):
+		'''	The points as a new float array on every access; writing into it leaves the geometry unchanged.
+
+			@returns numpy.ndarray of shape `(N, 2)` (image domain) or `(N, 3)` (patient domain); `(0, 2)` or
+				`(0, 3)` without points
+		'''
+		return np.array([tuple(point) for point in self.points], dtype=float).reshape(-1, 2 if self.is_image else 3)
 
 	@property
 	def is_image(self):
@@ -777,7 +945,7 @@ class ImageFrameGeometry(namedtuple('ImageFrameGeometry', ('position', 'orientat
 			distances and angles unchanged.
 
 			@input column, row (float): pixel position
-			@returns tuple of 3 float
+			@returns ImageCoord: the position in patient coordinates, in millimetres
 			@raises ValueError for a frame without a usable Pixel Spacing
 		'''
 		if not self.is_calibrated:
@@ -785,8 +953,8 @@ class ImageFrameGeometry(namedtuple('ImageFrameGeometry', ('position', 'orientat
 		position = self.position or (0.0, 0.0, 0.0)
 		orientation = self.orientation or (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
 		row_spacing, column_spacing = self.pixel_spacing
-		return tuple(position[i] + (column - 0.5) * column_spacing * orientation[i]
-			+ (row - 0.5) * row_spacing * orientation[i + 3] for i in range(3))
+		return ImageCoord(*(float(position[i] + (column - 0.5) * column_spacing * orientation[i]
+			+ (row - 0.5) * row_spacing * orientation[i + 3]) for i in range(3)))
 
 
 # Another NUM item of a measurement group, beside the primary value: its concept, value and unit,
@@ -1034,7 +1202,7 @@ class Measurement(_DisplayAttributesMixin, SRDataCollectionMember):
 		'''	Orientation of the view the measurement was drawn in.
 
 			@returns
-				- tuple (width, height) of two 3-tuples of float
+				- tuple (width, height) of two `ImageCoord`: unitless directions
 				- None when absent, or when the value read from the document is malformed
 		'''
 		return self._drawing_plane
@@ -1066,7 +1234,7 @@ class Measurement(_DisplayAttributesMixin, SRDataCollectionMember):
 		'''	Record the drawing plane read from a document: the vectors (None when malformed) and the
 			text, written back verbatim.
 
-			@input plane (tuple of two 3-tuples, or None): the valid value
+			@input plane (tuple of two ImageCoord, or None): the valid value
 			@input text (str): the text as read
 		'''
 		self._drawing_plane = plane
@@ -1258,7 +1426,10 @@ class GeometricMeasurement(Measurement):
 		supplied in another frame are converted once, at construction, with `transform`: the document
 		never carries geometry in any other frame.
 
-		@property points (tuple of tuple of float): the ordered encoded points; settable
+		@property points (tuple of PixelCoord or tuple of ImageCoord): the ordered encoded points, `(column, row)`
+			pixels or `(x, y, z)` millimetres; settable with any sequence of points (tuples, lists, numpy arrays
+			or the point classes)
+		@property array (numpy.ndarray): the points as a new float array of shape `(N, 2)` or `(N, 3)`
 		@property calibration (ImageFrameGeometry or None): spatial calibration of the referenced frame,
 			used to compute a new or edited image-domain value. Assigning it enables that computation and
 			does not change or check a stored value; `calibrations` passed to `from_sr` verify at parse.
@@ -1273,8 +1444,8 @@ class GeometricMeasurement(Measurement):
 			name=None, unit=None, tracking_id=None, value=None, **kwargs):
 		'''	Initialize the measurement from its encoded points or from a `Geometry`.
 
-			@input points (sequence of sequences of numbers, default=None): `(column, row)` pairs for the
-				image domain, `(x, y, z)` triples for the patient domain
+			@input points (sequence of points, default=None): `(column, row)` pairs for the image domain,
+				`(x, y, z)` triples for the patient domain, as tuples, lists, numpy arrays or the point classes
 			@input geometry (Geometry, default=None): used instead of `points`
 			@input transform (ImageTransformMatrix, default=None): conversion of patient-domain `points`
 				from another frame to the imaging series' frame; it must be rigid and name its source frame.
@@ -1330,6 +1501,14 @@ class GeometricMeasurement(Measurement):
 		if len(points) != self.point_count:
 			raise ValueError('%s holds %d encoded points, got %d' % (type(self).__name__, self.point_count, len(points)))
 		self._geometry = self._geometry.with_points(points)
+
+	@property
+	def array(self):
+		'''	The encoded points as a new float array (`Geometry.array`).
+
+			@returns numpy.ndarray of shape `(N, 2)` or `(N, 3)`
+		'''
+		return self._geometry.array
 
 	def _check_geometry(self, geometry):
 		'''	Refuse a geometry the tool cannot hold.
@@ -1453,6 +1632,17 @@ def _distance(a, b):
 	return float(np.linalg.norm(np.subtract(a, b)))
 
 
+def _as_points(points):
+	'''	Points as the point classes: `PixelCoord` for two values, `ImageCoord` for three. A point of any
+		other length stays a tuple of floats (the unchecked reader path keeps what it was given).
+
+		@input points (sequence of points: tuples, lists, numpy arrays or the point classes)
+		@returns tuple
+	'''
+	values = (tuple(float(c) for c in point) for point in points)
+	return tuple(PixelCoord(*v) if len(v) == 2 else ImageCoord(*v) if len(v) == 3 else v for v in values)
+
+
 class LengthMeasurement(GeometricMeasurement):
 	'''	Length between two ordered points (Cornerstone `Length` tool), written as a NUM item
 		`INFERRED FROM` a two-point `POLYLINE`.
@@ -1461,7 +1651,7 @@ class LengthMeasurement(GeometricMeasurement):
 		and is in millimetres. On a frame without Pixel Spacing it is the pixel distance, with unit
 		`(1, UCUM, "px")`.
 
-		@property p1, p2 (tuple of float): the end points as drawn; settable
+		@property p1, p2 (PixelCoord or ImageCoord): the end points as drawn; settable with any point
 		@property length (float or None): the measured value
 	'''
 	default_type = SONADOR_MEASUREMENT_TYPE_LENGTH
@@ -1561,7 +1751,7 @@ class AngleMeasurement(_AngleBase):
 		and the four encoded points are distinct: the encoding is `p1, vertex, vertex, p3`, and a
 		document is read from points 0, 1 and 3. The value is the interior angle at the vertex.
 
-		@property p1, vertex, p3 (tuple of float): the handles; settable
+		@property p1, vertex, p3 (PixelCoord or ImageCoord): the handles; settable with any point
 		@property angle (float or None): the measured value
 	'''
 	default_type = SONADOR_MEASUREMENT_TYPE_ANGLE
@@ -1611,7 +1801,8 @@ class CobbAngleMeasurement(_AngleBase):
 	'''	Angle between two independent lines (Cornerstone `CobbAngle` tool). Coincident middle points
 		do not change the type: the tracking identifier decides it.
 
-		@property line1, line2 (tuple of 2 points): the lines as drawn; settable
+		@property line1, line2 (tuple of 2 PixelCoord or ImageCoord): the lines as drawn; settable with any
+			pair of points
 		@property angle (float or None): the measured value
 	'''
 	default_type = SONADOR_MEASUREMENT_TYPE_COBB_ANGLE
@@ -1830,19 +2021,19 @@ class CircleMeasurement(GeometricMeasurement):
 		A circle derived from three circumference points keeps them as `construction_points`, written as
 		`Sonador-Measurement.ConstructionPoints`.
 
-		@property center (tuple of float): center, pixels or millimetres; settable
+		@property center (PixelCoord or ImageCoord): center, pixels or millimetres; settable with any point
 		@property radius (float or None): radius in millimetres, read and set (a stored radius in another
 			UCUM unit is converted; an image-domain assignment converts with the frame's calibration)
 		@property value, unit: the stored radius and its unit as read, for an unchanged parsed circle
 		@property pixel_radius (float or None): image-domain radius in pixels; settable
-		@property normal (tuple of 3 float or None): unit plane normal, patient domain; settable
-		@property u (tuple of 3 float or None): direction of the first diameter, patient domain
-		@property edge (tuple of float): `center + r u`, the second point of the geometry's first diameter
-			(patient domain) or the circumference point (image domain)
+		@property normal (ImageCoord or None): unitless unit plane normal, patient domain; settable
+		@property u (ImageCoord or None): unitless direction of the first diameter, patient domain
+		@property edge (PixelCoord or ImageCoord): `center + r u`, the second point of the geometry's first
+			diameter (patient domain) or the circumference point (image domain); read only
 		@property area, perimeter (float or None): the values written, in `area_unit` and `perimeter_unit`
 			(the stored units of a parsed, unchanged circle; `mm2` and `mm` otherwise)
-		@property construction_points (tuple of 3 points or None): the three circumference points the
-			circle was derived from; settable, which recomputes the circle
+		@property construction_points (tuple of 3 PixelCoord or ImageCoord, or None): the three
+			circumference points the circle was derived from; settable, which recomputes the circle
 		@property extra_items, perimeter_extra_items, radius_extra_items (tuple of pydicom.Dataset):
 			unmodelled children of the Area, Perimeter and Radius NUM items, each re-emitted under its own
 			NUM item
@@ -1891,7 +2082,7 @@ class CircleMeasurement(GeometricMeasurement):
 		self._parsed_frame_of_reference_uid = None
 		super().__init__(geometry=geometry, **kwargs)
 		if legacy_normal is not None:
-			self._legacy_normal = tuple(float(c) for c in _unit_vector(legacy_normal, 'normal'))
+			self._legacy_normal = ImageCoord(*(float(c) for c in _unit_vector(legacy_normal, 'normal')))
 		self.construction_points_raw = construction_points
 		self.perimeter_extra_items = tuple(perimeter_extra_items or ())
 		self.radius_extra_items = tuple(radius_extra_items or ())
@@ -2109,11 +2300,11 @@ class CircleMeasurement(GeometricMeasurement):
 	def center(self):
 		'''	Center of the circle.
 
-			@returns tuple of float: `(column, row)` pixels or `(x, y, z)` millimetres
+			@returns PixelCoord (`(column, row)` pixels) or ImageCoord (`(x, y, z)` millimetres)
 		'''
 		ellipse = self._ellipse()
 		if isinstance(ellipse, dict):
-			return tuple(float(c) for c in ellipse['center'])
+			return ImageCoord(*(float(c) for c in ellipse['center']))
 		return self._geometry.points[0]
 
 	@center.setter
@@ -2128,7 +2319,7 @@ class CircleMeasurement(GeometricMeasurement):
 	def edge(self):
 		'''	Point on the circumference along the first axis: `center + r u`.
 
-			@returns tuple of float
+			@returns PixelCoord or ImageCoord
 		'''
 		return self._geometry.points[1]
 
@@ -2136,25 +2327,26 @@ class CircleMeasurement(GeometricMeasurement):
 	def u(self):
 		'''	Direction of the first diameter of a patient-domain circle.
 
-			@returns tuple of 3 float, or None in the image domain or for a legacy circle without a normal
+			@returns ImageCoord (a unitless unit vector), or None in the image domain or for a legacy circle
+				without a normal
 		'''
 		ellipse = self._ellipse()
 		if isinstance(ellipse, dict):
-			return tuple(float(c) for c in ellipse['u'])
+			return ImageCoord(*(float(c) for c in ellipse['u']))
 		if self.is_legacy and self._legacy_normal is not None:
-			return tuple(float(c) for c in circle_first_axis(self._legacy_normal, np.subtract(self.edge, self.center)))
+			return ImageCoord(*(float(c) for c in circle_first_axis(self._legacy_normal, np.subtract(self.edge, self.center))))
 		return None
 
 	@property
 	def normal(self):
 		'''	Unit normal of the circle's plane.
 
-			@returns tuple of 3 float, or None in the image domain (the image plane applies) and for a
-				legacy circle whose normal was not supplied
+			@returns ImageCoord (a unitless unit vector), or None in the image domain (the image plane
+				applies) and for a legacy circle whose normal was not supplied
 		'''
 		ellipse = self._ellipse()
 		if isinstance(ellipse, dict):
-			return tuple(float(c) for c in ellipse['normal'])
+			return ImageCoord(*(float(c) for c in ellipse['normal']))
 		return self._legacy_normal if self.is_legacy else None
 
 	@normal.setter
@@ -2178,7 +2370,7 @@ class CircleMeasurement(GeometricMeasurement):
 	def plane_normal(self):
 		'''	Normal a drawing plane of the measurement must be parallel to.
 
-			@returns tuple of 3 float, or None
+			@returns ImageCoord (unitless), or None
 		'''
 		return self.normal
 
@@ -2283,7 +2475,7 @@ class CircleMeasurement(GeometricMeasurement):
 	def construction_points(self):
 		'''	The three circumference points the circle was derived from.
 
-			@returns tuple of 3 tuples of float, or None
+			@returns tuple of 3 PixelCoord or ImageCoord, or None
 		'''
 		return self._construction_points
 
@@ -2311,13 +2503,13 @@ class CircleMeasurement(GeometricMeasurement):
 			self._geometry = Geometry(DCMSR_GEOMETRY_DOMAIN_PATIENT, DCMSR_GRAPHIC_ELLIPSE,
 				circle_ellipse_points(circle['center'], circle['radius'], circle['normal'], u))
 			self._legacy_normal = None
-		self._construction_points = points
+		self._construction_points = _as_points(points)
 
 	@property
 	def construction_points_raw(self):
 		'''	The construction points as recorded, without any check (the reader's view).
 
-			@returns tuple of 3 tuples of float, or None
+			@returns tuple of PixelCoord or ImageCoord, or None
 		'''
 		return self._construction_points
 
@@ -2325,7 +2517,7 @@ class CircleMeasurement(GeometricMeasurement):
 	def construction_points_raw(self, points):
 		'''	Record construction points as given, without recomputing the circle (the reader's path).
 		'''
-		self._construction_points = None if points is None else tuple(tuple(float(c) for c in p) for p in points)
+		self._construction_points = None if points is None else _as_points(points)
 
 	@property
 	def construction_points_changed(self):
@@ -2677,6 +2869,351 @@ class CircleMeasurement(GeometricMeasurement):
 		return srparse_circle(group, tracking_id, tracking_uid, set(), strict=strict, diagnostics=diagnostics, calibrations=calibrations)
 
 
+# Bidirectional
+
+DCMSR_CONCEPT_LONG_AXIS = Code('103339001', 'SCT', 'Long Axis')
+DCMSR_CONCEPT_SHORT_AXIS = Code('103340004', 'SCT', 'Short Axis')
+
+# Smallest axis length written (mm, or pixels on an uncalibrated frame); also the tolerance a stored length
+# is verified to
+DCMSR_BIDIRECTIONAL_LENGTH_TOLERANCE = 0.01
+
+BIDIRECTIONAL_VALUE_LONG_AXIS = 'long_axis'
+BIDIRECTIONAL_VALUE_SHORT_AXIS = 'short_axis'
+BIDIRECTIONAL_VALUE_ROLES = (BIDIRECTIONAL_VALUE_LONG_AXIS, BIDIRECTIONAL_VALUE_SHORT_AXIS)
+
+
+class BidirectionalMeasurement(GeometricMeasurement):
+	'''	Bidirectional measurement (Cornerstone `Bidirectional` tool): a long axis and a short axis, two
+		independent line segments of two points each, written as a Long Axis NUM then a Short Axis NUM, each
+		`INFERRED FROM` its own two-point `POLYLINE`. The per-measurement properties are children of the Long
+		Axis NUM; the Short Axis NUM carries only its own unmodelled children.
+
+		The axes are held as drawn. The long axis is the pair under the Long Axis NUM, whatever its length:
+		this client never swaps the axes, and places no perpendicularity or intersection constraint on them.
+		Each length follows the rules of `LengthMeasurement`: millimetres in the patient domain and on a
+		calibrated image frame, pixels on a frame without Pixel Spacing. A stored length is authoritative
+		while its axis and the referenced image are unchanged; editing one axis recomputes that axis's
+		length only.
+
+		The model holds the four points as one geometry, long axis then short axis, so that the image
+		reference, the Frame of Reference, the drawing plane (valid only when all four points lie within
+		1 mm of it) and a frame conversion apply to both axes at once.
+
+		@property long_axis, short_axis (tuple of 2 PixelCoord or ImageCoord): the axes as drawn; settable
+			with any pair of points
+		@property length (float or None): long axis length, in `unit`; also `value`, which is settable: on a
+			parsed measurement whose long axis is unchanged the assigned number replaces the stored one
+			(written in the stored unit, without the old numeric value qualifier); an edited axis is
+			recomputed instead
+		@property width (float or None): short axis length, in `width_unit`; also in `values` under its concept
+		@property width_unit (Code or CodedConcept): unit of `width`
+		@property value_names (dict): concept read for each of `long_axis` and `short_axis`, written back
+		@property short_axis_extra_items (tuple of pydicom.Dataset): unmodelled children of the Short Axis
+			NUM item, re-emitted under it
+	'''
+	default_type = SONADOR_MEASUREMENT_TYPE_BIDIRECTIONAL
+	default_name = DCMSR_CONCEPT_LONG_AXIS
+	default_unit = DCMSR_UNITS_MM
+	point_count = 4
+
+	def __init__(self, width=None, width_unit=None, value_names=None, short_axis_extra_items=None, **kwargs):
+		'''	Initialize the measurement from its four points (long axis then short axis) or a `Geometry` of
+			them. Callers building a new measurement use `from_axes`.
+
+			@input width (number, default=None): stored short axis length; the document reader sets it
+			@input width_unit (Code or CodedConcept, default=mm): unit of the stored short axis length
+			@input value_names (dict, default=None): concept read for each of `long_axis`, `short_axis`
+			@input short_axis_extra_items (iterable of pydicom.Dataset, default=None): unmodelled children
+				of the Short Axis NUM item
+			@input kwargs: `GeometricMeasurement` arguments (the stored long axis length is `value`)
+		'''
+		self._stored_width = width
+		self._stored_width_unit = width_unit or DCMSR_UNITS_MM
+		self._stored_items = {}
+		self._stored_qualifiers = {}
+		self._num_coordinates = {}
+		self.value_names = dict(value_names or {})
+		super().__init__(**kwargs)
+		self.short_axis_extra_items = tuple(short_axis_extra_items or ())
+
+	@classmethod
+	def from_axes(cls, long_axis, short_axis, reference=None, frame_of_reference_uid=None, calibration=None, series_uid=None,
+			drawing_plane=None, transform=None, **kwargs):
+		'''	Bidirectional measurement from its two axes, as drawn: `(column, row)` pixel pairs on `reference`
+			(image domain) or `(x, y, z)` millimetre triples (patient domain). The axes are not reordered,
+			and need not cross or be perpendicular.
+
+			@input long_axis, short_axis (pair of points): the axes
+			@input reference (ImageReference, default=None): image the axes were drawn on
+			@input frame_of_reference_uid (str, default=the transform's target frame): Frame of Reference
+			@input calibration (ImageFrameGeometry, default=None): spatial calibration of the image frame
+			@input series_uid (str, default=None): imaging series, written as the Source-Series of a
+				patient-domain measurement
+			@input drawing_plane (pair of 3-vectors, default=None): orientation of the view the axes were
+				drawn in; all four points must lie within 1 mm of it
+			@input transform (ImageTransformMatrix, default=None): rigid conversion of patient-domain axes
+				from another frame, applied to both axes and to the drawing plane (rotation only)
+			@input kwargs: further measurement arguments
+
+			@returns BidirectionalMeasurement
+			@raises ValueError for an axis that is not two points, axes of different dimensions, or a
+				transform that is not rigid, unnamed, or aimed at another frame
+		'''
+		long_axis, short_axis = tuple(tuple(p) for p in long_axis), tuple(tuple(p) for p in short_axis)
+		if len(long_axis) != 2 or len(short_axis) != 2:
+			raise ValueError('A bidirectional measurement holds two axes of two points each')
+		if len({len(p) for p in long_axis + short_axis}) != 1:
+			raise ValueError('The two axes must both be 2D (image) or both be 3D (patient)')
+		return cls(points=long_axis + short_axis, reference=reference, frame_of_reference_uid=frame_of_reference_uid,
+			calibration=calibration, series_uid=series_uid, drawing_plane=drawing_plane, transform=transform, **kwargs)
+
+	# ---- axes ----
+
+	@property
+	def long_axis(self):
+		return self._axis_points(BIDIRECTIONAL_VALUE_LONG_AXIS)
+
+	@long_axis.setter
+	def long_axis(self, axis):
+		'''	Replace the long axis; its length is recomputed, the stored short axis length is kept.
+		'''
+		axis = tuple(tuple(float(c) for c in p) for p in axis)
+		if len(axis) != 2:
+			raise ValueError('An axis is two points')
+		self.points = axis + self.short_axis
+
+	@property
+	def short_axis(self):
+		return self._axis_points(BIDIRECTIONAL_VALUE_SHORT_AXIS)
+
+	@short_axis.setter
+	def short_axis(self, axis):
+		'''	Replace the short axis; its length is recomputed, the stored long axis length is kept.
+		'''
+		axis = tuple(tuple(float(c) for c in p) for p in axis)
+		if len(axis) != 2:
+			raise ValueError('An axis is two points')
+		self.points = self.long_axis + axis
+
+	def _axis_points(self, role, points=None):
+		'''	Points of an axis, of the current geometry or of `points` (the points read from the document).
+
+			@returns tuple of 2 PixelCoord or ImageCoord
+		'''
+		points = self._geometry.points if points is None else points
+		return tuple(points[:2] if role == BIDIRECTIONAL_VALUE_LONG_AXIS else points[2:])
+
+	def axis_changed(self, role):
+		'''	Whether an axis differs from the one read from the document.
+
+			@input role (str): `long_axis` or `short_axis`
+			@returns bool: True for a measurement created in Python
+		'''
+		return self._parsed_points is None or self._axis_points(role) != self._axis_points(role, self._parsed_points)
+
+	def _stored(self, role):
+		return (self._val, self._unit) if role == BIDIRECTIONAL_VALUE_LONG_AXIS else (self._stored_width, self._stored_width_unit)
+
+	def _value_replaced(self, role):
+		'''	Whether the long axis length was assigned (`value`) since the document was read, so that its
+			stored Measured Value Sequence item and numeric value qualifier no longer apply.
+
+			@input role (str): `long_axis` or `short_axis`
+			@returns bool: False for the short axis, whose length is not assignable
+		'''
+		return role == BIDIRECTIONAL_VALUE_LONG_AXIS and self.is_parsed and self._val != self._parsed_value
+
+	def keeps_axis_value(self, role):
+		'''	Whether the stored length of an axis is the one exposed and written: read from the document,
+			and the axis and the referenced image unchanged since.
+
+			@input role (str): `long_axis` or `short_axis`
+			@returns bool
+		'''
+		return self._stored(role)[0] is not None and not self.axis_changed(role) and not self.reference_changed
+
+	@property
+	def keeps_stored_value(self):
+		'''	Whether the stored long axis length is re-emitted (`keeps_axis_value`).
+
+			@returns bool
+		'''
+		return self.keeps_axis_value(BIDIRECTIONAL_VALUE_LONG_AXIS)
+
+	# ---- lengths ----
+
+	def _axis_stored_in_pixels(self, role):
+		'''	Whether the stored length of an axis is in the pixel unit.
+
+			@input role (str): `long_axis` or `short_axis`
+			@returns bool
+		'''
+		value, unit = self._stored(role)
+		return value is not None and getattr(unit, 'value', None) == DCMSR_UNITS_PIXEL.value
+
+	def computed_axis_value(self, role):
+		'''	Length of an axis computed from its points, as `LengthMeasurement` computes it: millimetres in
+			the patient domain or with a calibrated frame; pixels with a frame known to be uncalibrated, or
+			without a calibration when this axis's own stored length is in pixels. The other axis's unit
+			plays no part. Makes no request.
+
+			@input role (str): `long_axis` or `short_axis`
+			@returns
+				- tuple (float, unit): millimetres, or pixels on an uncalibrated frame
+				- None for an image-domain axis without a calibration whose stored length is not in pixels,
+					an unusable calibration, or a result that is not finite
+		'''
+		geometry, points = self._geometry, self._axis_points(role)
+		if self._calibration_unusable:
+			return None
+		if geometry.is_patient or (self.calibration is not None and self.calibration.is_calibrated):
+			value, unit = _distance(*self._calculation_points(points)), DCMSR_UNITS_MM
+		elif self.calibration is not None or self._axis_stored_in_pixels(role):
+			value, unit = _distance(*points), DCMSR_UNITS_PIXEL
+		else:
+			return None
+		return (value, unit) if math.isfinite(value) else None
+
+	def computed_value(self):
+		'''	Long axis length computed from its points (`computed_axis_value`).
+
+			@returns tuple (float, unit), or None
+		'''
+		return self.computed_axis_value(BIDIRECTIONAL_VALUE_LONG_AXIS)
+
+	def axis_value(self, role):
+		'''	Length of an axis and its unit: the stored pair while the axis is unchanged, else computed.
+
+			@input role (str): `long_axis` or `short_axis`
+			@returns tuple (float or None, unit)
+		'''
+		value, unit = self._stored(role)
+		if self.keeps_axis_value(role):
+			return value, unit
+		computed = self.computed_axis_value(role)
+		return computed if computed is not None else (None, unit)
+
+	@property
+	def length(self):
+		return self.axis_value(BIDIRECTIONAL_VALUE_LONG_AXIS)[0]
+
+	@property
+	def width(self):
+		return self.axis_value(BIDIRECTIONAL_VALUE_SHORT_AXIS)[0]
+
+	@property
+	def width_unit(self):
+		return self.axis_value(BIDIRECTIONAL_VALUE_SHORT_AXIS)[1]
+
+	@property
+	def is_degenerate(self):
+		'''	Whether either axis is shorter than 0.01 mm (pixels on an uncalibrated frame).
+
+			@returns bool
+		'''
+		return any(_distance(*self._calculation_points(self._axis_points(role))) < DCMSR_BIDIRECTIONAL_LENGTH_TOLERANCE
+			for role in BIDIRECTIONAL_VALUE_ROLES)
+
+	@property
+	def axes_ordered(self):
+		'''	Whether the long axis is at least as long as the short axis. Lengths in different units, or a
+			length that cannot be computed, count as ordered: they are not compared.
+
+			@returns bool
+		'''
+		length, unit = self.axis_value(BIDIRECTIONAL_VALUE_LONG_AXIS)
+		width, width_unit = self.axis_value(BIDIRECTIONAL_VALUE_SHORT_AXIS)
+		if length is None or width is None or getattr(unit, 'value', None) != getattr(width_unit, 'value', None):
+			return True
+		return width <= length
+
+	@property
+	def values(self):
+		'''	The short axis length with its unit, keyed by its concept `(code value, scheme designator)`.
+
+			@returns OrderedDict of MeasurementValue (without source item)
+		'''
+		name = self.value_names.get(BIDIRECTIONAL_VALUE_SHORT_AXIS) or DCMSR_CONCEPT_SHORT_AXIS
+		return OrderedDict((((name.value, name.scheme_designator), MeasurementValue(name, self.width, self.width_unit)),))
+
+	@values.setter
+	def values(self, val):
+		'''	Accept only an empty mapping (the measurement constructor's default).
+
+			@raises ValueError for values given explicitly
+		'''
+		if val:
+			raise ValueError('The short axis length of a bidirectional measurement follows from its points; it cannot be set')
+
+	def resolve_axis_values(self, diagnostics=None):
+		'''	Values written for the two NUM items. A stored length whose axis is unchanged is re-emitted
+			verbatim, with its unit, its Measured Value Sequence item and its numeric value qualifier; a long
+			axis length assigned through `value` is written as assigned, in the stored unit, without the old
+			item and qualifier; any other length is computed from its axis.
+
+			@input diagnostics (list, default=None): list the diagnostics are appended to
+
+			@returns OrderedDict: role (`long_axis`, `short_axis`) -> tuple (value, unit, stored item or None,
+				stored qualifier sequence or None)
+			@raises SRDiagnosticError for degenerate geometry (`degenerate-geometry`), or a length that
+				cannot be computed (`measurement-not-computable`)
+		'''
+		from ..sr import SRDiagnostic, SRDiagnosticError, sr_diagnostic, SR_DIAGNOSTIC_ERROR, SR_DIAGNOSTIC_INFO, \
+			SR_CONDITION_DEGENERATE_GEOMETRY, SR_CONDITION_MEASUREMENT_NOT_COMPUTABLE, SR_CONDITION_MEASUREMENT_UNCALIBRATED
+		if self.is_degenerate:
+			raise SRDiagnosticError(SRDiagnostic(SR_DIAGNOSTIC_ERROR, SR_CONDITION_DEGENERATE_GEOMETRY, None, self.tracking_uid,
+				'BidirectionalMeasurement has an axis shorter than %s and cannot be written' % DCMSR_BIDIRECTIONAL_LENGTH_TOLERANCE))
+		resolved, uncalibrated = OrderedDict(), False
+		for role in BIDIRECTIONAL_VALUE_ROLES:
+			value, unit = self._stored(role)
+			if self.keeps_axis_value(role):
+				if self._value_replaced(role):
+					resolved[role] = (value, unit, None, None)
+				else:
+					resolved[role] = (value, unit, self._stored_items.get(role), self._stored_qualifiers.get(role))
+				continue
+			computed = self.computed_axis_value(role)
+			if computed is None:
+				raise SRDiagnosticError(SRDiagnostic(SR_DIAGNOSTIC_ERROR, SR_CONDITION_MEASUREMENT_NOT_COMPUTABLE, None, self.tracking_uid,
+					'BidirectionalMeasurement %s cannot be computed: its image frame has no usable calibration; '
+					'set `calibration` to the ImageFrameGeometry of the referenced frame' % role.replace('_', ' ')))
+			uncalibrated = uncalibrated or getattr(computed[1], 'value', None) == DCMSR_UNITS_PIXEL.value
+			resolved[role] = computed + (None, None)
+		if uncalibrated:
+			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_MEASUREMENT_UNCALIBRATED,
+				'image frame without Pixel Spacing; axis lengths written in pixels', value=self.tracking_uid)
+		return resolved
+
+	def resolve_value(self, diagnostics=None):
+		'''	Long axis length and unit written (`resolve_axis_values`).
+
+			@returns tuple (number, unit)
+			@raises SRDiagnosticError as `resolve_axis_values`
+		'''
+		value, unit, _, _ = self.resolve_axis_values(diagnostics=diagnostics)[BIDIRECTIONAL_VALUE_LONG_AXIS]
+		return value, unit
+
+	@classmethod
+	def from_sr(cls, item, group=None, strict=False, diagnostics=None, calibrations=None, **kwargs):
+		'''	Build a bidirectional measurement from its measurement group. Pass the group itself as `item`, or
+			either NUM item together with the enclosing `group`: a NUM item alone carries neither the tracking
+			identifier nor the other axis, and reads as None. See
+			`sonador.apisettings.sr.measurements.srparse_bidirectional`.
+
+			@input item (pydicom.Dataset): the measurement group, or one of its NUM items with `group`
+			@input group (pydicom.Dataset, default=None): the enclosing measurement group of a NUM `item`
+
+			@returns BidirectionalMeasurement, a generic Measurement for a group the model cannot hold, or None
+		'''
+		from ..sr.measurements import srparse_bidirectional, _group_tracking
+		if group is None and item.get('ValueType') == 'NUM':
+			return None
+		group = group if group is not None else item
+		tracking_id, tracking_uid = _group_tracking(group)
+		return srparse_bidirectional(group, tracking_id, tracking_uid, set(), strict=strict, diagnostics=diagnostics, calibrations=calibrations)
+
+
 # Measurement class by measurement type: the factory behind `Measurement.from_sr`
 MEASUREMENT_CLASSES = {}
 
@@ -2700,7 +3237,7 @@ def measurement_class_for_type(measurement_type):
 	return MEASUREMENT_CLASSES.get(measurement_type, Measurement)
 
 
-for _measurement_class in (LengthMeasurement, AngleMeasurement, CobbAngleMeasurement, CircleMeasurement):
+for _measurement_class in (LengthMeasurement, AngleMeasurement, CobbAngleMeasurement, CircleMeasurement, BidirectionalMeasurement):
 	register_measurement_class(_measurement_class)
 
 

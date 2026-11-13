@@ -23,7 +23,7 @@ from client.utils.object import pick
 from client.utils.microservices import server_controloperation_json_response, RemotePage
 from client.utils.colors import RGB
 
-from ...apisettings import ImageCoord, ImageSpacing, ImageOrientation, ImageStackShape, \
+from ...apisettings import ImageCoord, PixelCoord, ImageSpacing, ImageOrientation, ImageStackShape, \
 	MeasurementCollection, RGBColor, LABColor, XYZColor, EUCLID_COORD_ORIGIN, DicomDatetimePairKey, DicomDatetimePair, DicomMetaKey, DicomMeta, \
 	IMAGING_SERVER_RESOURCE_PATIENT, IMAGING_SERVER_RESOURCE_STUDY, IMAGING_SERVER_RESOURCE_SERIES, \
 	IMAGING_SERVER_RESOURCE_IMAGE, IMAGING_SERVER_LAST_UPDATE, IMAGING_SERVER_RECEPTION_DATE, IMAGING_SERVER_DICOMTAGS_SIGNATURE, \
