@@ -10,12 +10,14 @@
 	(`UPDATE_SR_FIXTURES=1`). `cornerstone-adapters.bidirectional-image.2026-1113.dcm` and
 	`cornerstone-adapters.bidirectional-patient.2026-1113.dcm` are written by the stock `@cornerstonejs/adapters`
 	4.22.13 `Bidirectional` writer (the Sonador Viewer's locked version) from synthetic annotation state, by the
-	jest harness in `fixtures/generators/cornerstone-adapters`. Viewer-authored fixtures
-	(`sonador-viewer.bidirectional-image.*.dcm`, `sonador-viewer.bidirectional-oblique.*.dcm`) are read when present.
+	jest harness in `fixtures/generators/cornerstone-adapters`. `sonador-viewer.bidirectional-image.2026-1113.dcm`
+	(image domain) and `sonador-viewer.bidirectional-oblique.2026-1113.dcm` (patient domain, on a plane turned 45
+	degrees between sagittal and axial) are written by the Sonador Viewer over its synthetic CT, copied unchanged
+	from oak-tree/medical-imaging/ohif-viewers `platform/core/src/DICOMSR/__fixtures__`.
 
 	Run from the directory containing the `sonador` package: python -m unittest sonador.ftests.test_sr.sr_bidirectional
 '''
-import copy, glob, logging, math, os, unittest
+import copy, logging, math, os, unittest
 from collections import OrderedDict
 
 import numpy as np
@@ -43,7 +45,7 @@ from .sr_seriestag import read, roundtrip, new_model, synthetic_reference, named
 from .sr_measurements import FOR_UID, CALIBRATION, UNCALIBRATED, written, reparse, measurements_of, group_of, conditions, text_item, \
 	length_patient, angle_patient, OBLIQUE_WIDTH, OBLIQUE_HEIGHT, OBLIQUE_ORIGIN, SAGITTAL
 from .sr_circle import OracleMixin, nums_of, num_value, coordinates_of, set_ucum, set_number, qualifier_item, circle_axial, AXIAL, LINE_TEXT, \
-	VIEWER_CT_CALIBRATION
+	VIEWER_CT_CALIBRATION, VIEWER_CT_SERIES, VIEWER_CT_FRAME, VIEWER_CT_SLICE
 
 
 __all__ = ['BidirectionalRegistryTestCase', 'BidirectionalModelTestCase', 'BidirectionalWriterTestCase', 'BidirectionalReaderTestCase',
@@ -778,36 +780,72 @@ class BidirectionalAdapterFixtureTestCase(OracleMixin, unittest.TestCase):
 		self.assertIsInstance(measurements_of(reparse(again, strict=True))[0], BidirectionalMeasurement)
 
 
-def viewer_fixture(topic):
-	'''	Path of a Viewer-authored fixture, the latest when several dates are present; None until it exists
-	'''
-	found = sorted(glob.glob(os.path.join(FIXTURES, 'sonador-viewer.%s.*.dcm' % topic)))
-	return found[-1] if found else None
+VIEWER_FIXTURES = {topic: os.path.join(FIXTURES, 'sonador-viewer.%s.2026-1113.dcm' % topic)
+	for topic in ('bidirectional-image', 'bidirectional-oblique')}
 
 
 class BidirectionalViewerFixtureTestCase(OracleMixin, unittest.TestCase):
-	'''	Documents written by the Sonador Viewer over its synthetic CT, read when the fixtures are present
+	'''	Documents written by the Sonador Viewer over its synthetic CT (0.8 mm rows, 1.2 mm columns), read with
+		the calibration of the slice they reference
 	'''
-	def check_fixture(self, topic, domain):
-		path = viewer_fixture(topic)
-		if path is None:
-			self.skipTest('Viewer-authored fixture %s not present yet' % topic)
-		doc = read(path)
+	# topic -> (domain, long axis, short axis, stored Long Axis and Short Axis text, description)
+	H = math.sqrt(50.0)
+	EXPECTED = OrderedDict((
+		('bidirectional-image', ('image', ((27.5, 17.0), (37.5, 32.0)), ((34.5, 21.5), (30.5, 27.5)),
+			['16.9705627484771', '6.78822509939085'], 'Bidirectional (image)')),
+		('bidirectional-oblique', ('patient', ((-H, 0.0, 15.0 + H), (H, 0.0, 15.0 - H)), ((0.0, -6.0, 15.0), (0.0, 6.0, 15.0)),
+			['20', '12'], 'Bidirectional (oblique)')),
+	))
+
+	def read_viewer(self, topic):
+		doc = read(VIEWER_FIXTURES[topic])
+		self.assertEqual(str(doc.SOPClassUID), DCMSR_SOP_CLASS_COMPREHENSIVE_3D)
 		model = reparse(doc, strict=True, calibrations=VIEWER_CT_CALIBRATION)
+		self.assertFalse(sr_diagnostics_with(model.diagnostics, severity=SR_DIAGNOSTIC_WARNING), topic)
 		m = measurements_of(model)[0]
-		self.assertIsInstance(m, BidirectionalMeasurement)
-		self.assertEqual(m.geometry.domain, domain)
-		self.assertEqual(concepts_of(group_of(doc)), [LONG_CODE, SHORT_CODE])
-		self.assertFalse(sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_MEASUREMENT_VALUE_MISMATCH))
+		domain, long_axis, short_axis, stored, description = self.EXPECTED[topic]
+		self.assertIsInstance(m, BidirectionalMeasurement, topic)
+		self.assertEqual((m.geometry.domain, m.tracking_id, m.description), (domain, BIDIRECTIONAL_ID, description), topic)
+		np.testing.assert_allclose(m.long_axis, long_axis, atol=1e-4, err_msg=topic)
+		np.testing.assert_allclose(m.short_axis, short_axis, atol=1e-4, err_msg=topic)
+
+		# Long Axis then Short Axis; the stored values kept verbatim and within 0.01 mm of the points
+		group = group_of(doc)
+		self.assertEqual(concepts_of(group), [LONG_CODE, SHORT_CODE], topic)
+		self.assertEqual([str(v) for v in stored_numbers(group)], stored, topic)
+		self.assertEqual((m.length, m.width), tuple(float(v) for v in stored), topic)
+		for role, value in zip(('long_axis', 'short_axis'), stored):
+			computed, unit = m.computed_axis_value(role)
+			self.assertEqual(unit.value, 'mm', topic)
+			self.assertLess(abs(computed - float(value)), 0.01, '%s %s' % (topic, role))
+		self.assertFalse(sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_MEASUREMENT_VALUE_MISMATCH), topic)
+
+		# The properties are children of the Long Axis NUM only
+		long_num, short_num = nums_of(group)
+		self.assertEqual([c.ValueType for c in srdoc_children(group)], ['TEXT', 'UIDREF', 'NUM', 'NUM'], topic)
+		self.assertEqual([c.TextValue for c in named(srdoc_children(long_num), DCMSR_MEASUREMENT_DESCRIPTION.value)], [description], topic)
+		self.assertEqual([c.get('RelationshipType') for c in srdoc_children(short_num)], ['INFERRED FROM'], topic)
+
+		# An unchanged re-save writes the same content tree
 		again = roundtrip(model.create_sr())
-		self.assertEqual(stored_numbers(group_of(again)), stored_numbers(group_of(doc)))
+		self.assertEqual(stored_numbers(group_of(again)), stored_numbers(group))
 		self.assert_same_content(doc, again)
+		return doc, m, long_num
 
 	def test_image_domain(self):
-		self.check_fixture('bidirectional-image', 'image')
+		doc, m, long_num = self.read_viewer('bidirectional-image')
+		self.assertEqual(m.reference.sop_instance_uid, VIEWER_CT_SLICE)
+		self.assertEqual((m.drawing_plane_text, m.views), (None, ()))
+		self.assertEqual((m.text, m.location), ('Synthetic', 'Synthetic location'))
+		self.assertTrue(named(srdoc_children(long_num), DCMSR_DISPLAY_ATTRIBUTES.value))
 
 	def test_oblique_patient_domain(self):
-		self.check_fixture('bidirectional-oblique', 'patient')
+		doc, m, long_num = self.read_viewer('bidirectional-oblique')
+		self.assertEqual((m.frame_of_reference_uid, m.series_uid), (VIEWER_CT_FRAME, VIEWER_CT_SERIES))
+		self.assertEqual((m.drawing_plane_text, m.views), ('0.707107,0,-0.707107,0,-1,0', ('oblique',)))
+		self.assertEqual((m.text, m.location, m.display), (None, None, None))
+		self.assertIsNotNone(m.drawing_plane)
+		self.assertEqual([c.UID for c in named(srdoc_children(long_num), DCMSR_MEASUREMENT_SOURCE_SERIES.value)], [VIEWER_CT_SERIES])
 
 
 class BidirectionalDocumentTestCase(OracleMixin, unittest.TestCase):
