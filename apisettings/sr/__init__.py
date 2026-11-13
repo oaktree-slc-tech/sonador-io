@@ -40,7 +40,7 @@ from highdicom.uid import UID as DcmUid
 from client.utils.object import pick
 
 
-from ..base import ImageCoord, ImageCoordCollection, ImageTransformMatrix, \
+from ..base import ImageCoord, ImageCoordCollection, PixelCoord, ImageTransformMatrix, \
 	Measurement, MeasurementCollection, Finding, FindingCollection, \
 	DCMHEADER_CODE_VALUE, DCMHEADER_CODING_SCHEME_DESIGNATOR, \
 	DCMHEADER_CODING_SCHEME_VERSION, DCMHEADER_CODE_MEANING, \
@@ -216,6 +216,8 @@ SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN = 'patient-provenance-on-image-domain'
 SR_CONDITION_UNKNOWN_SOURCE_SERIES = 'unknown-source-series'
 SR_CONDITION_LEGACY_CIRCLE = 'legacy-circle-scoord3d'
 SR_CONDITION_QUALIFIER_DROPPED = 'measurement-qualifier-dropped'
+SR_CONDITION_AXES_NOT_ORDERED = 'axes-not-ordered'
+SR_CONDITION_AXES_UNITS_DIFFER = 'axes-units-differ'
 SR_CONDITION_STATISTICS_DROPPED = 'statistics-dropped'
 SR_CONDITION_CONSTRUCTION_POINTS_DROPPED = 'construction-points-dropped'
 
@@ -648,36 +650,55 @@ SONADOR_SCOORD3D_TYPE_SUPPORTED = {
 }
 
 
-def points2array(pts: Union[ImageCoord,Sequence[ImageCoord],ImageCoordCollection,np.ndarray]) -> np.ndarray:
-	'''	Convert the provided sequence of points to numpy array.
+def points2array(pts: Union[ImageCoord,PixelCoord,Sequence,ImageCoordCollection,np.ndarray]) -> np.ndarray:
+	'''	Convert a point or a sequence of points to a numpy array. A numpy array is returned unchanged,
+		with its own dtype and shape and without any check; the normalisation and validation below apply to
+		every other input.
+
+		@input pts: one of
+			- a single point: `ImageCoord`, `PixelCoord`, or a tuple or list of 2 or 3 numbers
+			- a sequence of points of one dimension (2 or 3 values each), or an `ImageCoordCollection`
+			- a numpy array, returned unchanged
+		@returns numpy.ndarray:
+			- for a point or sequence of points, a float array of shape `(3,)` or `(2,)` for a single point,
+				`(N, 3)` or `(N, 2)` for a sequence
+			- for a numpy array, the same array
+		@raises ValueError, for input that is not a numpy array: an empty sequence, points of mixed or other
+			dimensions, values that are not numbers, or another type
 	'''
-	# Image coordinate instance (single point)
-	if isinstance(pts, ImageCoord):
-		_p = np.array([*pts])
+	if isinstance(pts, np.ndarray):
+		return pts
 
-	# Sequence of points
-	elif isinstance(pts, ImageCoordCollection) \
-		or (isinstance(pts, (tuple, list)) and len(pts) and isinstance(pts[0], ImageCoord)):
-		_p = np.array([[*p] for p in pts])
+	if isinstance(pts, (ImageCoord, PixelCoord)):
+		return np.array(tuple(pts), dtype=float)
 
-	# List/tuple encoding x,y,z data
-	elif isinstance(pts, (tuple, list)) and len(pts) == 3 and isinstance(pts[0], numbers.Number):
-		_p = np.array(pts)
+	if isinstance(pts, ImageCoordCollection):
+		pts = list(pts)
+	elif not isinstance(pts, (tuple, list)):
+		raise ValueError('Unable to encode points, unsupported data type: "%s"' % type(pts))
 
-	# Sequence of list/tuple encoding x,y,z data
-	elif isinstance(pts, (tuple, list)) and len(pts) and all(
-		[(len(p) == 3 and isinstance(p[0], numbers.Number)) for p in pts]):
-		_p = np.array([p for p in pts])
-	
-	# NumPy array
-	elif isinstance(pts, np.ndarray):
-		_p = pts
+	if not pts:
+		raise ValueError('Unable to encode points: no points were given')
 
-	else:
-		raise ValueError(
-			'Unable to encode points, unsupported data type: "%s"' % type(pts))
+	# A single point: a tuple or list of numbers
+	if all(isinstance(v, numbers.Number) for v in pts):
+		if len(pts) not in (2, 3):
+			raise ValueError('Unable to encode points: a point has 2 or 3 values, got %d' % len(pts))
+		return np.array(pts, dtype=float)
 
-	return _p
+	# A sequence of points of one dimension
+	try:
+		rows = [tuple(p) for p in pts]
+	except TypeError:
+		raise ValueError('Unable to encode points: mixed numbers and points, or a point that is not a sequence')
+	dimensions = {len(r) for r in rows}
+	if len(dimensions) != 1 or not dimensions <= {2, 3}:
+		raise ValueError('Unable to encode points: every point must have 2 or 3 values, all the same; got %s'
+			% sorted(dimensions))
+	try:
+		return np.array(rows, dtype=float)
+	except (TypeError, ValueError):
+		raise ValueError('Unable to encode points: point values must be numbers')
 
 
 def srencode_coord3d(
@@ -706,12 +727,10 @@ def srencode_coord3d(
 	# Coerce spatial data to numpy array
 	_p = points2array(coord3d)
 
-	# Ensure that the spatial data array includes x,y,z dimensions.
-	if (len(_p.shape) == 1 and _p.shape[0] != 3) \
-		or (len(_p.shape) == 2 and _p.shape[1] != 3):
-		_cidx = 1 if len(_p.shape) == 2 else 0
-		raise ValueError(('Unable to encode spatial coordinates, incorrect number of columns: "%s". '
-			+ 'Point instances must possess 3 columns of data (x,y,z).') % len(_p.shape[_cidx]))
+	# SCOORD3D points have three values each (x, y, z)
+	if _p.ndim not in (1, 2) or _p.shape[-1] != 3:
+		raise ValueError('Unable to encode spatial coordinates: SCOORD3D needs 3 values per point (x, y, z); '
+			'got an array of shape %s' % (_p.shape,))
 
 	# Determine the type of point from the size of the spatial_data: POINT or MULTIPOINT.
 	# For more specialized forms of point data (ELLIPSE, ELLIPSOID, POLYGON, POLYLINE),
@@ -760,10 +779,13 @@ def srencode_measurement(measurement:Measurement, name_default=SONADOR_LENGTH, s
 		@raises SRDiagnosticError for degenerate geometry, a value that cannot be computed, or under
 			`strict` an unregistered View value
 	'''
-	from .measurements import srencode_measurement_coordinates, srencode_measurement_children, srencode_measurement_values, srencode_circle
-	from ..base import CircleMeasurement
+	from .measurements import srencode_measurement_coordinates, srencode_measurement_children, srencode_measurement_values, srencode_circle, \
+		srencode_bidirectional
+	from ..base import CircleMeasurement, BidirectionalMeasurement
 	if isinstance(measurement, CircleMeasurement):
 		return srencode_circle(measurement, sr_template=sr_template, layout=layout, diagnostics=diagnostics, strict=strict)
+	if isinstance(measurement, BidirectionalMeasurement):
+		return srencode_bidirectional(measurement, sr_template=sr_template, layout=layout, diagnostics=diagnostics, strict=strict)
 	mname = measurement.name or name_default
 
 	if not mname or not isinstance(mname, (DcmCode, DcmCodedConcept)):

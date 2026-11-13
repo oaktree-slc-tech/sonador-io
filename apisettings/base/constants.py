@@ -772,6 +772,7 @@ SONADOR_MEASUREMENT_TYPE_LENGTH = 'length'
 SONADOR_MEASUREMENT_TYPE_ANGLE = 'angle'
 SONADOR_MEASUREMENT_TYPE_COBB_ANGLE = 'cobb-angle'
 SONADOR_MEASUREMENT_TYPE_CIRCLE = 'circle'
+SONADOR_MEASUREMENT_TYPE_BIDIRECTIONAL = 'bidirectional'
 SONADOR_MEASUREMENT_TYPE_ARROW = 'arrow'			# reserved: routed but not parsed
 SONADOR_MEASUREMENT_TYPE_GENERIC = 'generic'		# a NUM group with an unknown tracking identifier
 

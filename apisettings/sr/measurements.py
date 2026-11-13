@@ -1,5 +1,7 @@
-'''	Sonador-SR 0.3: quantitative measurements (Length, Angle, Cobb angle, Circle) exchanged with the
-	Sonador Viewer, specified in oak-tree/medical-imaging/sonador-client#37.
+'''	Sonador-SR 0.3: quantitative measurements (Length, Angle, Cobb angle, Circle, Bidirectional) exchanged
+	with the Sonador Viewer, specified in oak-tree/medical-imaging/sonador-client#37 (the shared model),
+	oak-tree/medical-imaging/sonador-client#41 (Circle) and oak-tree/medical-imaging/sonador-client#43
+	(Bidirectional).
 
 	A measurement is one TID 1501 group holding a TID 300 NUM item whose tracking identifier names
 	the Cornerstone tool. The geometry is a child of the NUM: `INFERRED FROM` SCOORD3D with a Frame
@@ -28,6 +30,11 @@
 	per statistic after the Radius NUM) are read and written back while the circle is unchanged; this
 	client never computes them.
 
+	A bidirectional measurement (`Bidirectional`) is two NUM items, Long Axis then Short Axis, each `INFERRED
+	FROM` its own two-point `POLYLINE`, with the per-measurement properties under the Long Axis NUM. The axes
+	are kept as drawn, never swapped and never constrained to cross or be perpendicular; each stored length is
+	authoritative while its own axis is unchanged.
+
 	`Measurement.values` is keyed by the NUM item's concept, with its Derivation modifier when it has one.
 
 	The identifier decides the type, the geometry never does: a group with an unknown identifier or
@@ -35,8 +42,8 @@
 	that are not modelled stay under their own item as `extra_items`.
 
 	Contents: the concepts and accepted codes, `image_frame_geometry`, the drawing-plane codec, the content
-	item encoders (`srencode_measurement_*`, `srencode_circle`) and the parsers (`srparse_measurement`,
-	`srparse_circle`, `srparse_group_measurement`).
+	item encoders (`srencode_measurement_*`, `srencode_circle`, `srencode_bidirectional`) and the parsers
+	(`srparse_measurement`, `srparse_circle`, `srparse_bidirectional`, `srparse_group_measurement`).
 	The model classes are in `sonador.apisettings.base.sr`; the group router is
 	`sonador.apisettings.sr.seriestag.srparse_report_group`.
 '''
@@ -66,7 +73,9 @@ from ..base import SONADOR_MANUFACTURER, SONADOR_SR, SONADOR_SCHEME_VERSION_03, 
 	drawing_plane_vectors, drawing_plane_normal, normals_parallel, CircleMeasurement, circle_from_ellipse, DCMSR_GRAPHIC_CIRCLE, \
 	DCMSR_GRAPHIC_ELLIPSE, DCMSR_CONCEPT_AREA, DCMSR_CONCEPT_PERIMETER, DCMSR_CONCEPT_RADIUS, DCMSR_CIRCLE_LENGTH_TOLERANCE, \
 	DCMSR_CIRCLE_AREA_TOLERANCE, DCMSR_CIRCLE_AREA_RELATIVE_TOLERANCE, DCMSR_CIRCLE_PARALLEL_DEGREES, DCMSR_UNITS_MM, \
-	CIRCLE_VALUE_AREA, CIRCLE_VALUE_PERIMETER, CIRCLE_VALUE_RADIUS, CIRCLE_VALUE_ROLES, circle_unit_scale
+	CIRCLE_VALUE_AREA, CIRCLE_VALUE_PERIMETER, CIRCLE_VALUE_RADIUS, CIRCLE_VALUE_ROLES, circle_unit_scale, BidirectionalMeasurement, \
+	SONADOR_MEASUREMENT_TYPE_BIDIRECTIONAL, DCMSR_CONCEPT_LONG_AXIS, DCMSR_CONCEPT_SHORT_AXIS, DCMSR_BIDIRECTIONAL_LENGTH_TOLERANCE, \
+	BIDIRECTIONAL_VALUE_LONG_AXIS, BIDIRECTIONAL_VALUE_SHORT_AXIS, BIDIRECTIONAL_VALUE_ROLES, DCMSR_GRAPHIC_POLYLINE
 from . import dcm_code_value, dcm_code_matches, srcontent_is_named, srcontent_extra_items, srcontent_from_dataset, sr_diagnostic, \
 	SR_DIAGNOSTIC_INFO, SR_DIAGNOSTIC_WARNING, SR_DIAGNOSTIC_ERROR, SR_CONDITION_MEASUREMENT_VALUE_MISMATCH, \
 	SR_CONDITION_MEASUREMENT_VALUE_UNVERIFIED, SR_CONDITION_MEASUREMENT_UNCALIBRATED, SR_CONDITION_MEASUREMENT_WITHOUT_VALUE, \
@@ -76,7 +85,8 @@ from .seriestag import srparse_item_properties, srencode_meta_items, srencode_di
 	image_reference_from_dataset, measurement_type_for_tracking_id, DCMSR_LAYOUT_NESTED, DCMSR_LAYOUTS_WRITTEN, \
 	_children, _value_type, _text_value, _relationship, _path, _note_by_reference, _note_missing_relationships, _UNNAMED_MARKER, DCMSR_IMAGE_REFERENCE_NAME
 from . import srcontent_name, SR_CONDITION_UNREGISTERED_VIEW, SR_CONDITION_INVALID_DRAWING_PLANE, SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN, \
-	SR_CONDITION_LEGACY_CIRCLE, SR_CONDITION_QUALIFIER_DROPPED, SR_CONDITION_STATISTICS_DROPPED, SR_CONDITION_CONSTRUCTION_POINTS_DROPPED
+	SR_CONDITION_LEGACY_CIRCLE, SR_CONDITION_QUALIFIER_DROPPED, SR_CONDITION_STATISTICS_DROPPED, SR_CONDITION_CONSTRUCTION_POINTS_DROPPED, \
+	SR_CONDITION_AXES_NOT_ORDERED, SR_CONDITION_AXES_UNITS_DIFFER
 from ..base import CircleStatistics
 from .seriestag import DCMSR_MEASUREMENT_META, DCMSR_DISPLAY_ATTRIBUTES, DCMSR_DISPLAY_COLOR_ROLES
 
@@ -143,6 +153,13 @@ DCMSR_CIRCLE_CONCEPTS = OrderedDict((
 	(CIRCLE_VALUE_AREA, (DCMSR_CONCEPT_AREA, Code('G-A166', 'SRT', 'Area'))),
 	(CIRCLE_VALUE_PERIMETER, (DCMSR_CONCEPT_PERIMETER, Code('G-A197', 'SRT', 'Perimeter'))),
 	(CIRCLE_VALUE_RADIUS, (DCMSR_CONCEPT_RADIUS, Code('G-A196', 'SRT', 'Radius'))),
+))
+
+# Concepts of a bidirectional measurement's NUM items by role, in writing order: the SCT code written, then the SRT
+# equivalent read
+DCMSR_BIDIRECTIONAL_CONCEPTS = OrderedDict((
+	(BIDIRECTIONAL_VALUE_LONG_AXIS, (DCMSR_CONCEPT_LONG_AXIS, Code('G-A185', 'SRT', 'Long Axis'))),
+	(BIDIRECTIONAL_VALUE_SHORT_AXIS, (DCMSR_CONCEPT_SHORT_AXIS, Code('G-A186', 'SRT', 'Short Axis'))),
 ))
 
 # Derivation modifier of a NUM item (`HAS CONCEPT MOD` CODE): the statistic a value is
@@ -282,7 +299,7 @@ def drawing_plane_to_text(plane):
 	'''
 	width, height = drawing_plane_vectors(plane)
 	numbers = []
-	for value in width + height:
+	for value in tuple(width) + tuple(height):
 		text = ('%.*f' % (DCMSR_DRAWING_PLANE_DECIMALS, value)).rstrip('0').rstrip('.')
 		numbers.append('0' if text in ('-0', '') else text)
 	return ','.join(numbers)
@@ -294,7 +311,7 @@ def drawing_plane_from_text(text):
 
 		@input text (str): the text read
 		@returns
-			- tuple (width, height) of two 3-tuples of float
+			- tuple (width, height) of two `ImageCoord`
 			- None when the text is not six finite decimal numbers
 	'''
 	parts = [part.strip() for part in str(text or '').split(',')]
@@ -805,24 +822,40 @@ def _note_value_checks(measurement, stored_unit, diagnostics, strict, path):
 		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_MEASUREMENT_WITHOUT_VALUE,
 			'NUM item without a value; the value is computed on write', path=path, strict=strict)
 		return
+	_note_stored_value(stored, stored_unit, measurement.computed_value(), diagnostics, path)
+
+
+def _note_stored_value(stored, stored_unit, computed, diagnostics, path, label=None):
+	'''	Compare one stored value with the value computed from the points: within 0.01 when both are in
+		the same unit; a stored unit that differs from the computed one is reported, not converted. The
+		stored value stays authoritative; only diagnostics are recorded.
+
+		Diagnostics raised here (info): `measurement-uncalibrated` (a value stored in pixels),
+		`measurement-value-unverified` (nothing computed) and `measurement-value-mismatch`.
+
+		@input stored (float): the stored value
+		@input stored_unit (CodedConcept or None): its unit as read
+		@input computed (tuple (float, unit) or None): the value computed from the points
+		@input diagnostics (list), path (str): diagnostics list and content tree location
+		@input label (str, default=None): which value of a multi-value measurement, prefixed to the messages
+	'''
+	prefix = '%s ' % label if label else ''
 	if getattr(stored_unit, 'value', None) == DCMSR_UNITS_PIXEL.value:
 		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_MEASUREMENT_UNCALIBRATED,
-			'value stored in pixels: the measurement is uncalibrated', path=path, value=stored)
-
-	computed = measurement.computed_value()
+			'%svalue stored in pixels: the measurement is uncalibrated' % prefix, path=path, value=stored)
 	if computed is None:
 		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_MEASUREMENT_VALUE_UNVERIFIED,
-			'no usable calibration for the image frame; the stored value is kept and not verified', path=path, value=stored)
+			'%sno usable calibration for the image frame; the stored value is kept and not verified' % prefix, path=path, value=stored)
 		return
 	value, unit = computed
 	if getattr(unit, 'value', None) != getattr(stored_unit, 'value', None):
 		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_MEASUREMENT_VALUE_MISMATCH,
-			'stored unit %s differs from computed unit %s; the stored value is kept' % (getattr(stored_unit, 'value', None), getattr(unit, 'value', None)),
-			path=path, value=stored)
+			'%sstored unit %s differs from computed unit %s; the stored value is kept' % (prefix, getattr(stored_unit, 'value', None),
+			getattr(unit, 'value', None)), path=path, value=stored)
 	elif abs(value - stored) > DCMSR_VALUE_TOLERANCE:
 		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_MEASUREMENT_VALUE_MISMATCH,
-			'stored value %s differs from computed value %s by more than %s; the stored value is kept' % (stored, value, DCMSR_VALUE_TOLERANCE),
-			path=path, value=stored)
+			'%sstored value %s differs from computed value %s by more than %s; the stored value is kept' % (prefix, stored, value,
+			DCMSR_VALUE_TOLERANCE), path=path, value=stored)
 
 
 def _group_tracking(group):
@@ -1096,7 +1129,8 @@ def srparse_measurement(item, group=None, strict=False, diagnostics=None, measur
 def srparse_group_measurement(group, measurement_type, tracking_id, tracking_uid, consumed, strict=False, diagnostics=None,
 		calibrations=None, allow_group_level=True):
 	'''	Measurement of a measurement group: the NUM item the tool's concept names, else the first NUM
-		item, the other ones becoming its `values`; a circle group is read by `srparse_circle`. Used by
+		item, the other ones becoming its `values`; a circle group is read by `srparse_circle` and a bidirectional
+		group by `srparse_bidirectional`. Used by
 		the group router.
 
 		@input group (pydicom.Dataset): Measurement Group content item
@@ -1113,6 +1147,9 @@ def srparse_group_measurement(group, measurement_type, tracking_id, tracking_uid
 	'''
 	if measurement_type == SONADOR_MEASUREMENT_TYPE_CIRCLE:
 		return srparse_circle(group, tracking_id, tracking_uid, consumed, strict=strict, diagnostics=diagnostics,
+			calibrations=calibrations, allow_group_level=allow_group_level)
+	if measurement_type == SONADOR_MEASUREMENT_TYPE_BIDIRECTIONAL:
+		return srparse_bidirectional(group, tracking_id, tracking_uid, consumed, strict=strict, diagnostics=diagnostics,
 			calibrations=calibrations, allow_group_level=allow_group_level)
 	numbers = [child for idx, child in enumerate(_children(group))
 		if idx not in consumed and _value_type(child) == 'NUM' and child.get('ConceptNameCodeSequence')]
@@ -1152,24 +1189,63 @@ def _carries_typed_properties(children):
 	return any(srcontent_is_named(child, code) for child in children for code in concepts)
 
 
+def _preserved_children(children, consumed, diagnostics, strict, path):
+	'''	Children of a NUM item kept unmodelled under it: every child not yet read, each checked by the
+		validity checks of preserved items (an invalid one is dropped with their diagnostic).
+
+		@input children (list of pydicom.Dataset): the children of the NUM item
+		@input consumed (set): indices of `children` already read
+		@input diagnostics (list), strict (bool), path (str): diagnostics list, strict mode, location
+
+		@returns list of pydicom.Dataset
+	'''
+	found = []
+	for idx, child in enumerate(children):
+		if idx in consumed:
+			continue
+		if _note_by_reference(child, diagnostics, path):
+			pass
+		elif not srcontent_is_valid(child, diagnostics=diagnostics, strict=strict, path=path):
+			continue
+		found.append(_preserved(child))
+	return found
+
+
 def _circle_coordinates(measurement, source):
-	'''	Coordinate item of one NUM item of a circle: the item that NUM was read with, copied with its
-		points, Frame of Reference and image reference updated, while it can hold the geometry; else a
-		new `ELLIPSE` (patient domain) or `CIRCLE` (image domain) item.
+	'''	Coordinate item of one NUM item of a circle (`_coordinates_item`): a new item is an `ELLIPSE`
+		(patient domain) or `CIRCLE` (image domain).
 
 		@input measurement (CircleMeasurement)
 		@input source (pydicom.Dataset or None): coordinate item of the NUM item as read
 
 		@returns highdicom CoordinatesForMeasurement3D or CoordinatesForMeasurement
-		@raises ValueError for a patient-domain circle without a Frame of Reference, or an image-domain
-			circle without a SOP Instance UID
+		@raises ValueError as `_coordinates_item`
 	'''
 	geometry = measurement.geometry
-	data = np.asarray(geometry.points, dtype=float)
+	return _coordinates_item(measurement, source, geometry.points, DCMSR_GRAPHIC_ELLIPSE if geometry.is_patient else DCMSR_GRAPHIC_CIRCLE)
+
+
+def _coordinates_item(measurement, source, points, graphic_type):
+	'''	Coordinate item of one NUM item of a multi-NUM measurement: the item that NUM was read with, copied
+		with its points, Frame of Reference and image reference updated, while it is of the same value type
+		and graphic type; else a new item of `graphic_type`, a SCOORD3D with the Frame of Reference (patient
+		domain) or a SCOORD `SELECTED FROM` the referenced image (image domain).
+
+		@input measurement (GeometricMeasurement): gives the domain, Frame of Reference and image reference
+		@input source (pydicom.Dataset or None): coordinate item of the NUM item as read
+		@input points (sequence of points): the points of this NUM item
+		@input graphic_type (str): graphic type of the item
+
+		@returns highdicom CoordinatesForMeasurement3D or CoordinatesForMeasurement
+		@raises ValueError for a patient-domain measurement without a Frame of Reference, or an image-domain
+			measurement without a SOP Instance UID
+	'''
+	geometry = measurement.geometry
+	data = np.asarray(points, dtype=float)
 	value_type = 'SCOORD3D' if geometry.is_patient else 'SCOORD'
 	if geometry.is_patient and not measurement.frame_of_reference_uid:
-		raise ValueError('A patient-domain circle needs a Frame of Reference UID to be written')
-	if source is not None and source.get('ValueType') == value_type and source.get('GraphicType') == geometry.graphic_type:
+		raise ValueError('A patient-domain measurement needs a Frame of Reference UID to be written')
+	if source is not None and source.get('ValueType') == value_type and source.get('GraphicType') == graphic_type:
 		item = copy.deepcopy(source)
 		item.GraphicData = [float(v) for v in data.flatten()]
 		if geometry.is_patient:
@@ -1179,13 +1255,13 @@ def _circle_coordinates(measurement, source):
 		_mark_source_unnamed(item)
 		return CoordinatesForMeasurement3D.from_dataset(item, copy=False) if geometry.is_patient else CoordinatesForMeasurement.from_dataset(item, copy=False)
 	if geometry.is_patient:
-		return _mark_unnamed(CoordinatesForMeasurement3D(GraphicTypeValues3D.ELLIPSE, data, measurement.frame_of_reference_uid))
+		return _mark_unnamed(CoordinatesForMeasurement3D(GraphicTypeValues3D(graphic_type), data, measurement.frame_of_reference_uid))
 	reference = geometry.reference
 	if reference is None or not reference.sop_instance_uid:
-		raise ValueError('An image-domain circle needs an image reference with a SOP Instance UID to be written')
+		raise ValueError('An image-domain measurement needs an image reference with a SOP Instance UID to be written')
 	frames = [reference.frame_number] if reference.frame_number else None
 	source_image = _mark_unnamed(SourceImageForRegion(reference.sop_class_uid or '', reference.sop_instance_uid, referenced_frame_numbers=frames))
-	return _mark_unnamed(CoordinatesForMeasurement(GraphicTypeValues.CIRCLE, data, source_image))
+	return _mark_unnamed(CoordinatesForMeasurement(GraphicTypeValues(graphic_type), data, source_image))
 
 
 def srencode_construction_points(measurement):
@@ -1656,16 +1732,7 @@ def srparse_circle(group, tracking_id, tracking_uid, consumed, strict=False, dia
 				geometry, tracking_uid, normal=normal) + (construction,)
 			extras[role] = properties[7]
 		else:
-			found = []
-			for cidx, child in enumerate(entry['children']):
-				if cidx in entry['consumed']:
-					continue
-				if _note_by_reference(child, diagnostics, path):
-					pass
-				elif not srcontent_is_valid(child, diagnostics=diagnostics, strict=strict, path=path):
-					continue
-				found.append(_preserved(child))
-			extras[role] = found
+			extras[role] = _preserved_children(entry['children'], entry['consumed'], diagnostics, strict, path)
 	meta, display, views, source_series, plane, plane_text, finding_sites, _, construction = properties
 
 	stored, names, stored_items, qualifiers = {}, {}, {}, {}
@@ -1703,4 +1770,271 @@ def srparse_circle(group, tracking_id, tracking_uid, consumed, strict=False, dia
 		measurement._set_parsed_statistics(statistics, statistic_items)
 	measurement._mark_parsed(stored_items.get(CIRCLE_VALUE_RADIUS), per_num[source_role]['source'])
 	_note_circle_value_checks(measurement, stored, diagnostics, strict, path)
+	return measurement
+
+
+# Bidirectional: a Long Axis and a Short Axis NUM item, each with its own POLYLINE, properties under the Long Axis NUM
+
+def _bidirectional_role(item):
+	'''	Role of a NUM item in a bidirectional group: matched by code (SCT, or the SRT equivalent), else by
+		code meaning, as the Cornerstone3D reader matches it.
+
+		@input item (pydicom.Dataset): a NUM content item
+		@returns str (`long_axis`, `short_axis`), or None for any other concept
+	'''
+	for role, concepts in DCMSR_BIDIRECTIONAL_CONCEPTS.items():
+		if any(srcontent_is_named(item, code) for code in concepts):
+			return role
+	name = srcontent_name(item)
+	meaning = str((name.get(DCMHEADER_CODE_MEANING) if name is not None else '') or '').strip().lower()
+	return next((role for role, concepts in DCMSR_BIDIRECTIONAL_CONCEPTS.items() if concepts[0].meaning.lower() == meaning), None)
+
+
+def srencode_bidirectional(measurement, sr_template=None, layout=None, diagnostics=None, strict=False):
+	'''	The two NUM items of a bidirectional measurement, Long Axis then Short Axis, each `INFERRED FROM` its
+		own two-point `POLYLINE`. The Long Axis NUM carries the per-measurement children: description, text,
+		location, View items, Source-Series and Drawing-Plane (patient domain), the display container, then
+		its preserved children; the Short Axis NUM carries its own preserved children. A stored length whose
+		axis is unchanged is re-emitted verbatim with its unit and numeric value qualifier; an edited axis is
+		recomputed, and a qualifier of its replaced value is not written (the `info`
+		`measurement-qualifier-dropped`). The axes are written as held, never swapped: a short axis longer
+		than the long axis is recorded as the `info` `axes-not-ordered`. Concepts are written as read, else
+		with their SCT codes. Makes no request.
+
+		@input measurement (BidirectionalMeasurement)
+		@input sr_template (class, default=highdicom Measurement): template class instantiated per NUM item
+		@input layout (str, default=`DCMSR_LAYOUT_NESTED`): the only layout written
+		@input diagnostics (list, default=None): list the write diagnostics are appended to
+		@input strict (bool, default=False): refuse an unregistered View value
+
+		@returns highdicom.sr.Measurement: the Long Axis NUM item, followed by the Short Axis NUM item
+		@raises ValueError for a missing Frame of Reference or image reference, or a drawing plane that
+			fails validation
+		@raises SRDiagnosticError for degenerate geometry, a length that cannot be computed, or under
+			`strict` an unregistered View value
+	'''
+	from highdicom.sr import Measurement as DcmMeasurement
+	sr_template = sr_template or DcmMeasurement
+	layout = layout or DCMSR_LAYOUT_NESTED
+	if layout not in DCMSR_LAYOUTS_WRITTEN:
+		raise ValueError('Unsupported per-item property layout: %s' % layout)
+	resolved = measurement.resolve_axis_values(diagnostics=diagnostics)
+	path = _path(measurement.tracking_uid)
+	if not measurement.axes_ordered:
+		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_AXES_NOT_ORDERED,
+			'short axis longer than the long axis; written as given, the axes are not swapped', path=path,
+			value=resolved[BIDIRECTIONAL_VALUE_SHORT_AXIS][0])
+	extras = {BIDIRECTIONAL_VALUE_LONG_AXIS: measurement.extra_items, BIDIRECTIONAL_VALUE_SHORT_AXIS: measurement.short_axis_extra_items}
+
+	encoded = None
+	for role in BIDIRECTIONAL_VALUE_ROLES:
+		value, unit, stored, qualifier = resolved[role]
+		if value is not None and not math.isfinite(value):
+			raise ValueError('Bidirectional %s value %s is not finite and cannot be written' % (role.replace('_', ' '), value))
+		name = _coded(measurement.value_names.get(role) or DCMSR_BIDIRECTIONAL_CONCEPTS[role][0])
+		is_long = role == BIDIRECTIONAL_VALUE_LONG_AXIS
+		options = pick(measurement, ('qualifier', 'derivation', 'finding_sites', 'method', 'properties')) if is_long else {}
+		coordinates = _coordinates_item(measurement, measurement._num_coordinates.get(role), measurement._axis_points(role),
+			DCMSR_GRAPHIC_POLYLINE)
+		template = sr_template(name=name, value=value, unit=unit, algorithm_id=measurement.algorithm if is_long else None,
+			referenced_coordinates=[coordinates], **options)
+		item = template[0]
+		if stored is not None:
+			item.MeasuredValueSequence = Sequence([copy.deepcopy(stored)])
+		if qualifier is not None:
+			item.NumericValueQualifierCodeSequence = copy.deepcopy(qualifier)
+		elif role in measurement._stored_qualifiers:
+			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_QUALIFIER_DROPPED,
+				'numeric value qualifier of the %s qualified the stored value, which the edited axis replaces; not written' % role.replace('_', ' '),
+				path=path, value=dcm_code_value(measurement._stored_qualifiers[role][0]))
+		children = []
+		if is_long:
+			children = srencode_meta_items(measurement)
+			children.extend(srencode_measurement_views(measurement, diagnostics=diagnostics, strict=strict))
+			children.extend(srencode_measurement_provenance(measurement))
+			children.extend(srencode_display_items(measurement.display, layout=layout))
+		children.extend(srcontent_extra_items(extras[role]))
+		if children:
+			if not hasattr(item, 'ContentSequence'):
+				item.ContentSequence = ContentSequence()
+			for child in children:
+				item.ContentSequence.append(child)
+		if encoded is None:
+			encoded = template
+		else:
+			encoded.append(item)
+	return encoded
+
+
+def _note_bidirectional_value_checks(measurement, stored, diagnostics, strict, path):
+	'''	Diagnostics of a parsed bidirectional measurement: degenerate geometry, axes whose units differ,
+		axes not ordered, and each stored length compared with the length computed from its axis
+		(`_note_stored_value`). The stored lengths stay authoritative.
+
+		Diagnostics raised here: `degenerate-geometry` and `axes-units-differ` (warning), `axes-not-ordered`
+		and those of `_note_stored_value` (info).
+
+		@input measurement (BidirectionalMeasurement)
+		@input stored (dict): role -> (value or None, unit or None) as read
+	'''
+	if measurement.is_degenerate:
+		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_DEGENERATE_GEOMETRY,
+			'an axis shorter than %s; kept as read, but refused on write' % DCMSR_BIDIRECTIONAL_LENGTH_TOLERANCE, path=path, strict=strict)
+		return
+	units = [getattr(unit, 'value', None) for value, unit in stored.values() if value is not None]
+	if len(set(units)) > 1:
+		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_AXES_UNITS_DIFFER,
+			'long and short axis lengths are stored in different units (%s); read as stored and written back as read' % ', '.join(units),
+			path=path, value=measurement.tracking_uid, strict=strict)
+	if not measurement.axes_ordered:
+		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_AXES_NOT_ORDERED,
+			'short axis longer than the long axis; read as labelled, the axes are not swapped', path=path, value=measurement.width)
+	for role in BIDIRECTIONAL_VALUE_ROLES:
+		value, unit = stored[role]
+		if value is None:
+			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_MEASUREMENT_WITHOUT_VALUE,
+				'%s NUM item without a value; the length is computed on write' % role.replace('_', ' '), path=path, strict=strict)
+			continue
+		_note_stored_value(value, unit, measurement.computed_axis_value(role), diagnostics, path, label=role.replace('_', ' '))
+
+
+def srparse_bidirectional(group, tracking_id, tracking_uid, consumed, strict=False, diagnostics=None, calibrations=None, allow_group_level=True):
+	'''	Bidirectional measurement of a `Bidirectional` measurement group: the Long Axis and Short Axis NUM
+		items (by code, SCT or SRT, else by meaning, in any order), each with its own two-point `POLYLINE`
+		(SCOORD on the same image, or SCOORD3D in the same Frame of Reference), the typed properties from
+		the first of the two NUM items in document order that carries any (with the legacy group-level
+		layout; on write they are placed under the Long Axis NUM), and every other child, the other NUM's
+		property items included, kept under its own NUM item. A group with one axis only, a NUM item
+		without its own geometry (none, by reference, or a copy of the other axis's), or axes of another
+		form, domain, image or Frame of Reference reads as a generic `Measurement` with the `warning`
+		`measurement-read-as-generic`. Makes no request.
+
+		The axes are read as labelled: a short axis longer than the long axis is the `info`
+		`axes-not-ordered`. The stored lengths are authoritative, each kept with its unit and numeric value
+		qualifier; lengths stored in different units are the `warning` `axes-units-differ`. A Drawing-Plane is
+		valid only when all four points lie within 1 mm of it.
+
+		Diagnostics raised here: `degenerate-geometry`, `axes-units-differ`, `measurement-without-value`,
+		`measurement-read-as-generic` and `invalid-drawing-plane` (warning), `axes-not-ordered` and the value
+		checks of `_note_stored_value` (info), and those of `_parse_num_properties`. `strict` raises on
+		`warning` and `error`.
+
+		@input group (pydicom.Dataset): the measurement group
+		@input tracking_id, tracking_uid (str or None): tracking identifier and UID of the group
+		@input consumed (set): indices into the group's content sequence already read; those read here are added
+		@input strict (bool, default=False): raise SRDiagnosticError on `warning` and `error` diagnostics
+		@input diagnostics (list, default=None): list the diagnostics are appended to
+		@input calibrations (mapping, default=None): see `srparse_measurement`
+		@input allow_group_level (bool, default=True): read the legacy group-level properties
+
+		@returns
+			- BidirectionalMeasurement
+			- Measurement (generic) for a group the bidirectional model cannot hold
+			- None for a group without a NUM item the model can hold
+	'''
+	path = _path(tracking_uid)
+	group_children = _children(group)
+	nums = OrderedDict()
+	for idx, child in enumerate(group_children):
+		if idx in consumed or _value_type(child) != 'NUM' or not child.get('ConceptNameCodeSequence'):
+			continue
+		role = _bidirectional_role(child)
+		if role is not None and role not in nums:
+			nums[role] = (idx, child)
+
+	def generic(message):
+		'''	The group read as a generic `Measurement` (its Long Axis NUM, else its first NUM, as the primary
+			item), with the `measurement-read-as-generic` warning.
+
+			@returns Measurement, or None for a group without a NUM item
+		'''
+		numbers = [child for idx, child in enumerate(group_children)
+			if idx not in consumed and _value_type(child) == 'NUM' and child.get('ConceptNameCodeSequence')]
+		if not numbers:
+			return None
+		_generic(diagnostics, strict, path, message)
+		primary = nums[BIDIRECTIONAL_VALUE_LONG_AXIS][1] if BIDIRECTIONAL_VALUE_LONG_AXIS in nums else numbers[0]
+		return srparse_measurement(primary, group=group, strict=strict, diagnostics=diagnostics, measurement_class=Measurement,
+			tracking_id=tracking_id, tracking_uid=tracking_uid, group_consumed=consumed, allow_group_level=allow_group_level,
+			calibrations=calibrations, repaired=True)
+
+	if len(nums) != 2:
+		return generic('bidirectional group without both a Long Axis and a Short Axis NUM item')
+
+	# Each NUM item's own geometry: its first coordinate child, a two-point POLYLINE
+	per_num = OrderedDict()
+	for role in BIDIRECTIONAL_VALUE_ROLES:
+		idx, item = nums[role]
+		children = _children(item)
+		position = next((cidx for cidx, child in enumerate(children) if _is_measurement_geometry(child)), None)
+		if position is None:
+			return generic('%s NUM item without its own geometry' % role.replace('_', ' '))
+		geometry, frame_uid = _parse_coordinates(children[position], diagnostics, strict, path)
+		if geometry is None:
+			return generic('%s NUM item without usable geometry' % role.replace('_', ' '))
+		if geometry.graphic_type != DCMSR_GRAPHIC_POLYLINE or len(geometry.points) != 2:
+			return generic('%s geometry %s of %d points is not a two-point POLYLINE' % (role.replace('_', ' '), geometry.graphic_type,
+				len(geometry.points)))
+		per_num[role] = {'idx': idx, 'item': item, 'children': children, 'consumed': {position}, 'geometry': geometry,
+			'frame_uid': frame_uid, 'source': copy.deepcopy(children[position])}
+	long_entry, short_entry = per_num[BIDIRECTIONAL_VALUE_LONG_AXIS], per_num[BIDIRECTIONAL_VALUE_SHORT_AXIS]
+	long_geometry, short_geometry = long_entry['geometry'], short_entry['geometry']
+	if long_geometry.domain != short_geometry.domain:
+		return generic('the two axes are in different coordinate domains')
+	if long_geometry.is_patient and long_entry['frame_uid'] != short_entry['frame_uid']:
+		return generic('the two axes are in different Frames of Reference')
+	if long_geometry.is_image and (long_geometry.reference is None or short_geometry.reference is None
+			or (long_geometry.reference.sop_instance_uid, long_geometry.reference.frame_number)
+			!= (short_geometry.reference.sop_instance_uid, short_geometry.reference.frame_number)):
+		return generic('the two axes are on different images or frames')
+	if [tuple(p) for p in long_geometry.points] == [tuple(p) for p in short_geometry.points]:
+		return generic('the two NUM items share one geometry')
+	geometry = long_geometry.with_points(long_geometry.points + short_geometry.points)
+	frame_uid = long_entry['frame_uid']
+
+	# The typed properties: the first NUM in document order carrying any, else the Long Axis NUM. They are written
+	# under the Long Axis NUM; every other child stays under the NUM it was read from
+	ordered = sorted(per_num.items(), key=lambda entry: entry[1]['idx'])
+	source_role = next((role for role, entry in ordered
+		if _carries_typed_properties([c for i, c in enumerate(entry['children']) if i not in entry['consumed']])), BIDIRECTIONAL_VALUE_LONG_AXIS)
+	group_items = group_children if allow_group_level else []
+	extras, properties = {}, None
+	for role, entry in ordered:
+		if role == source_role:
+			properties = _parse_num_properties(entry['children'], entry['consumed'], group_items, consumed, diagnostics, strict, path,
+				geometry, tracking_uid)
+			extras[role] = properties[7]
+		else:
+			extras[role] = _preserved_children(entry['children'], entry['consumed'], diagnostics, strict, path)
+	meta, display, views, source_series, plane, plane_text, finding_sites, _ = properties
+
+	stored, names, stored_items, qualifiers = {}, {}, {}, {}
+	for role, entry in per_num.items():
+		_note_by_reference(entry['item'], diagnostics, path)
+		value, unit, measured = _measured_value(entry['item'])
+		stored[role] = (value, unit)
+		names[role] = CodedConcept.from_dataset(entry['item'].ConceptNameCodeSequence[0], copy=True)
+		stored_items[role] = copy.deepcopy(measured) if measured is not None and value is not None else None
+		if entry['item'].get('NumericValueQualifierCodeSequence'):
+			qualifiers[role] = copy.deepcopy(entry['item'].NumericValueQualifierCodeSequence)
+		consumed.add(entry['idx'])
+
+	group_sites = [CodedConcept.from_dataset(sibling.ConceptCodeSequence[0], copy=True) for idx, sibling in enumerate(group_children)
+		if idx not in consumed and _is_finding_site(sibling) and sibling.get('ConceptCodeSequence')]
+
+	long_value, long_unit = stored[BIDIRECTIONAL_VALUE_LONG_AXIS]
+	short_value, short_unit = stored[BIDIRECTIONAL_VALUE_SHORT_AXIS]
+	measurement = BidirectionalMeasurement(geometry=geometry, value=long_value, unit=long_unit if long_value is not None else None,
+		name=names[BIDIRECTIONAL_VALUE_LONG_AXIS], width=short_value, width_unit=short_unit if short_value is not None else None,
+		value_names=names, calibration=_calibration_for(calibrations, geometry.reference), tracking_id=tracking_id,
+		tracking_uid=tracking_uid, frame_of_reference_uid=frame_uid, display=display, views=views, series_uid=source_series,
+		extra_items=extras[BIDIRECTIONAL_VALUE_LONG_AXIS], short_axis_extra_items=extras[BIDIRECTIONAL_VALUE_SHORT_AXIS],
+		group_finding_sites=group_sites, finding_sites=finding_sites or None, **meta)
+	if plane_text is not None:
+		measurement._set_parsed_drawing_plane(plane, plane_text)
+	measurement._stored_items = stored_items
+	measurement._stored_qualifiers = qualifiers
+	measurement._num_coordinates = {role: entry['source'] for role, entry in per_num.items()}
+	measurement._mark_parsed(stored_items.get(BIDIRECTIONAL_VALUE_LONG_AXIS), long_entry['source'])
+	_note_bidirectional_value_checks(measurement, stored, diagnostics, strict, path)
 	return measurement
