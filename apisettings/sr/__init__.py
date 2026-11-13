@@ -216,6 +216,8 @@ SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN = 'patient-provenance-on-image-domain'
 SR_CONDITION_UNKNOWN_SOURCE_SERIES = 'unknown-source-series'
 SR_CONDITION_LEGACY_CIRCLE = 'legacy-circle-scoord3d'
 SR_CONDITION_QUALIFIER_DROPPED = 'measurement-qualifier-dropped'
+SR_CONDITION_STATISTICS_DROPPED = 'statistics-dropped'
+SR_CONDITION_CONSTRUCTION_POINTS_DROPPED = 'construction-points-dropped'
 
 
 class SRDiagnostic(namedtuple('SRDiagnostic', ('severity', 'condition', 'path', 'value', 'message'))):
