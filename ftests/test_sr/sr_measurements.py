@@ -15,10 +15,13 @@
 	Frame of Reference). `sonador-viewer.out-of-plane.2026-1110.dcm` is the Viewer's out-of-plane report
 	(oak-tree/medical-imaging/ohif-viewers!122): Length, Angle and Cobb angle drawn in a sagittal view and a
 	Length on an oblique plane, with Source-Series, View and Drawing-Plane, on the Viewer's synthetic CT.
-	`sonador-viewer.length-image.2026-1108.dcm` is written by the other side: an image-domain Length
-	produced by the Sonador Viewer's classic SR writer (oak-tree/medical-imaging/ohif-viewers `master`
-	revision 0fae4bdc, version recorded in Software Versions) from a synthetic tool state, with the
-	`@cornerstonejs/adapters` and dcmjs versions of that revision's lockfile. It was not drawn in a browser.
+	`sonador-viewer.length-image.2026-1110.dcm`, `sonador-viewer.angle-image.2026-1108.dcm` and
+	`sonador-viewer.cobb-angle-image.2026-1108.dcm` are written by the other side: an image-domain Length, Angle
+	and Cobb angle produced by the Sonador Viewer's classic SR writer from a synthetic tool state on a 1 mm image,
+	copied unchanged from oak-tree/medical-imaging/ohif-viewers `platform/core/src/DICOMSR/__fixtures__`. They
+	were not drawn in a browser. The Length's tool state carries no cached length, so its NUM is written without
+	a Numeric Value: it reads with the `measurement-without-value` warning and is written back with the length
+	computed from its points.
 
 	Run from the directory containing the `sonador` package: python -m unittest sonador.ftests.test_sr.sr_measurements
 '''
@@ -62,7 +65,7 @@ from .sr_seriestag import read, roundtrip, tobytes, new_model, synthetic_referen
 from .sr_retrieval import MockPacs, CT_SERIES_UID
 
 
-__all__ = ['ViewerWrittenLengthTestCase', 'InvalidGeometryTestCase', 'SpatialEditTestCase', 'SecondaryValueEditTestCase', 'RegistryAndModelTestCase', 'FrameConversionTestCase', 'CalibrationTestCase', 'LengthRoundTripTestCase', 'AngleTestCase',
+__all__ = ['ViewerWrittenLengthTestCase', 'ViewerWrittenAngleTestCase', 'InvalidGeometryTestCase', 'SpatialEditTestCase', 'SecondaryValueEditTestCase', 'RegistryAndModelTestCase', 'FrameConversionTestCase', 'CalibrationTestCase', 'LengthRoundTripTestCase', 'AngleTestCase',
 	'PropertyLayoutTestCase', 'ValueRuleTestCase', 'DocumentTestCase', 'MeasurementRetrievalTestCase', 'MeasurementFixtureTestCase',
 	'ViewRegistryTestCase', 'DrawingPlaneTestCase', 'SourceSeriesTestCase', 'SourceSeriesRetrievalTestCase', 'DocumentClassTestCase',
 	'SourceSeriesEvidenceTestCase', 'SourceSeriesCachedEvidenceTestCase', 'ViewerOutOfPlaneTestCase']
@@ -1316,82 +1319,110 @@ class SecondaryValueEditTestCase(unittest.TestCase):
 		self.assert_child_kept(num)
 
 
-class ViewerWrittenLengthTestCase(unittest.TestCase):
-	'''	The document of an independent writer: what the Viewer's classic writer produces
+VIEWER_COLORS = {'Border': (255, 136, 0), 'Value': (138, 208, 168), 'Meaning': (192, 199, 248)}
+VIEWER_SQUARE = {SYNTHETIC['SOPInstanceUID']: ImageFrameGeometry(None, None, (1.0, 1.0))}
+
+
+def assert_same_content(testcase, source, resaved):
+	'''	The content-tree oracle of the circle suite, imported when called (that suite imports this one)
 	'''
-	FIXTURE = os.path.join(FIXTURES, 'sonador-viewer.length-image.2026-1108.dcm')
+	from .sr_circle import OracleMixin
+	OracleMixin.assert_same_content(testcase, source, resaved)
+
+
+class ViewerWrittenPropertiesMixin:
+	'''	The properties the Viewer's fixture generator gives every tool, written under the NUM item
+	'''
+	def assert_viewer_properties(self, m, group):
+		self.assertEqual((m.description, m.text, m.location, m.views), ('Hip abduction', 'Synthetic', 'Synthetic location', ()))
+		self.assertEqual({role: tuple(color) for role, color in m.display.color.items()}, VIEWER_COLORS)
+		self.assertEqual([c.ValueType for c in srdoc_children(group)], ['TEXT', 'UIDREF', 'NUM'])
+		num = num_of(group)
+		for concept, value in ((DCMSR_MEASUREMENT_DESCRIPTION, 'Hip abduction'), (DCMSR_MEASUREMENT_TEXT, 'Synthetic'),
+				(DCMSR_MEASUREMENT_LOCATION, 'Synthetic location')):
+			self.assertEqual([(c.RelationshipType, c.TextValue) for c in named(srdoc_children(num), concept.value)], [('HAS PROPERTIES', value)])
+		self.assertEqual([c.RelationshipType for c in named(srdoc_children(num), DCMSR_DISPLAY_ATTRIBUTES.value)], ['HAS PROPERTIES'])
+
+
+class ViewerWrittenLengthTestCase(ViewerWrittenPropertiesMixin, unittest.TestCase):
+	'''	The document of an independent writer: an image-domain Length from the Viewer's classic writer, its NUM
+		written without a Numeric Value
+	'''
+	FIXTURE = os.path.join(FIXTURES, 'sonador-viewer.length-image.2026-1110.dcm')
 	SQUARE = ImageFrameGeometry(None, None, (1.0, 1.0))
+	LENGTH = math.sqrt(500.0)
 
 	def source(self):
 		return read(self.FIXTURE)
 
 	def parsed(self, **kwargs):
-		model = reparse(self.source(), **kwargs)
+		model = reparse(self.source(), calibrations=VIEWER_SQUARE, **kwargs)
 		return model, measurements_of(model)[0]
 
 	def test_writer_is_recorded(self):
 		doc = self.source()
-		self.assertEqual((doc.Manufacturer, doc.ManufacturerModelName), ('Sonador', 'Sonador-Viewer'))
-		self.assertEqual(doc.SoftwareVersions, '0.5.0-a2+0fae4bdc')
+		self.assertEqual((doc.Manufacturer, doc.ManufacturerModelName, doc.SoftwareVersions), ('Sonador', 'Sonador-Viewer', 'dev'))
 		self.assertEqual((doc.PatientID, str(doc.StudyInstanceUID)), ('ANONYMOUS', SYNTHETIC['StudyInstanceUID']))
+		self.assertEqual(str(doc.SOPClassUID), DCMSR_SOP_CLASS_COMPREHENSIVE_3D)
 
 	def test_reader(self):
 		model, m = self.parsed()
 		self.assertIsInstance(m, LengthMeasurement)
-		self.assertEqual(m.points, ((10.0, 10.0), (14.0, 13.0)))
+		self.assertEqual(m.points, ((0.5, 0.5), (10.5, 20.5)))
 		self.assertEqual(m.geometry.domain, 'image')
-		self.assertEqual(m.value, 5.0)
+		self.assertAlmostEqual(m.value, self.LENGTH, places=9)
 		self.assertEqual((m.unit.value, m.unit.scheme_designator), ('mm', 'UCUM'))
 		self.assertEqual((m.name.value, m.name.scheme_designator), ('410668003', 'SCT'))
 		self.assertEqual((m.reference.sop_instance_uid, m.reference.frame_number), (SYNTHETIC['SOPInstanceUID'], None))
 		self.assertEqual(m.series_uid, SYNTHETIC['SeriesInstanceUID'])
-		self.assertEqual(m.tracking_id, LENGTH_ID)
-		self.assertTrue(m.tracking_uid)
-		self.assertEqual((m.description, m.text, m.location), ('Viewer length', 'Viewer text', 'Viewer location'))
-		self.assertEqual(tuple(m.display.color['Background']), (16, 32, 48))
-		self.assertEqual(tuple(m.display.color['Border']), (200, 100, 50))
-		self.assertIn(SR_CONDITION_GROUP_LEVEL_PROPERTIES, conditions(sr_diagnostics_with(model.diagnostics, severity=SR_DIAGNOSTIC_WARNING)))
-		self.assertIn(SR_CONDITION_MEASUREMENT_VALUE_UNVERIFIED, conditions(model.diagnostics))
-
-	def test_stored_value_agrees_with_the_points(self):
-		model, _ = self.parsed(calibrations={SYNTHETIC['SOPInstanceUID']: self.SQUARE})
+		self.assertEqual((m.tracking_id, m.tracking_uid), (LENGTH_ID, '2.25.900000'))
+		self.assert_viewer_properties(m, group_of(self.source()))
+		# The NUM has units but no Numeric Value
+		measured = num_of(group_of(self.source())).MeasuredValueSequence[0]
+		self.assertNotIn('NumericValue', measured)
+		self.assertEqual(measured.MeasurementUnitsCodeSequence[0].CodeValue, 'mm')
+		warnings = sr_diagnostics_with(model.diagnostics, severity=SR_DIAGNOSTIC_WARNING)
+		self.assertEqual(conditions(warnings), [SR_CONDITION_MEASUREMENT_WITHOUT_VALUE])
 		self.assertNotIn(SR_CONDITION_MEASUREMENT_VALUE_MISMATCH, conditions(model.diagnostics))
 
-	def test_unchanged_resave(self):
-		doc = self.source()
-		_, m = self.parsed()
-		again = roundtrip(reparse(doc).create_sr())
+	def test_strict_read_refuses_the_missing_value(self):
+		with self.assertRaises(SRDiagnosticError) as raised:
+			reparse(self.source(), strict=True, calibrations=VIEWER_SQUARE)
+		self.assertEqual(raised.exception.diagnostic.condition, SR_CONDITION_MEASUREMENT_WITHOUT_VALUE)
+
+	def test_resave_writes_the_computed_value(self):
+		model, m = self.parsed()
+		again = roundtrip(model.create_sr())
 		self.assertEqual(str(again.SOPClassUID), DCMSR_SOP_CLASS_COMPREHENSIVE_3D)
-		self.assertNotEqual(again.SOPInstanceUID, doc.SOPInstanceUID)
+		self.assertNotEqual(again.SOPInstanceUID, self.source().SOPInstanceUID)
 		group = group_of(again)
-		self.assertEqual([c.ValueType for c in srdoc_children(group)], ['TEXT', 'UIDREF', 'NUM'])
 		self.assertEqual(srdoc_children(group)[1].UID, m.tracking_uid)
 		num = num_of(group)
 		self.assertEqual((num.ConceptNameCodeSequence[0].CodeValue, num.ConceptNameCodeSequence[0].CodingSchemeDesignator), ('410668003', 'SCT'))
 		measured = num.MeasuredValueSequence[0]
-		self.assertEqual(measured.NumericValue.original_string, num_of(group_of(doc)).MeasuredValueSequence[0].NumericValue.original_string)
-		self.assertEqual(measured.MeasurementUnitsCodeSequence[0].CodingSchemeVersion, '1.4')
+		self.assertEqual(str(measured.NumericValue), '22.3606797749979')
+		self.assertEqual((measured.MeasurementUnitsCodeSequence[0].CodeValue, measured.MeasurementUnitsCodeSequence[0].CodingSchemeDesignator), ('mm', 'UCUM'))
 		scoord = srdoc_children(num)[0]
-		self.assertEqual((scoord.ValueType, scoord.GraphicType, list(scoord.GraphicData)), ('SCOORD', 'POLYLINE', [10.0, 10.0, 14.0, 13.0]))
-		self.assertNotIn('ConceptNameCodeSequence', scoord)
+		self.assertEqual((scoord.ValueType, scoord.GraphicType, list(scoord.GraphicData)), ('SCOORD', 'POLYLINE', [0.5, 0.5, 10.5, 20.5]))
 		image = srdoc_children(scoord)[0]
 		self.assertEqual((image.RelationshipType, image.ReferencedSOPSequence[0].ReferencedSOPInstanceUID), ('SELECTED FROM', SYNTHETIC['SOPInstanceUID']))
-		self.assertNotIn('ConceptNameCodeSequence', image)
-		self.assertEqual(named(srdoc_children(num), DCMSR_MEASUREMENT_DESCRIPTION.value)[0].TextValue, 'Viewer length')
-		self.assertTrue(named(srdoc_children(num), DCMSR_DISPLAY_ATTRIBUTES.value))
+		self.assert_viewer_properties(m, group)
+		# Read back strictly: the value is now stored, and agrees with the points
+		reread = reparse(again, strict=True, calibrations=VIEWER_SQUARE)
+		self.assertAlmostEqual(measurements_of(reread)[0].value, self.LENGTH, places=9)
+		self.assertFalse(sr_diagnostics_with(reread.diagnostics, severity=SR_DIAGNOSTIC_WARNING))
 
 	def test_parse_edit_write_reparse(self):
 		model, m = self.parsed()
 		tracking = m.tracking_uid
-		m.p2 = (18.0, 16.0)
-		m.calibration = self.SQUARE
+		m.p2 = (6.5, 8.5)
 		m.description = 'Edited in Python'
 		again = roundtrip(model.create_sr())
 		edited = measurements_of(reparse(again))[0]
 		self.assertAlmostEqual(edited.value, 10.0)
 		self.assertEqual(edited.unit.value, 'mm')
-		self.assertEqual(edited.points, ((10.0, 10.0), (18.0, 16.0)))
-		self.assertEqual((edited.tracking_uid, edited.description, edited.location), (tracking, 'Edited in Python', 'Viewer location'))
+		self.assertEqual(edited.points, ((0.5, 0.5), (6.5, 8.5)))
+		self.assertEqual((edited.tracking_uid, edited.description, edited.location), (tracking, 'Edited in Python', 'Synthetic location'))
 		self.assertEqual(edited.reference.sop_instance_uid, SYNTHETIC['SOPInstanceUID'])
 
 	def test_unknown_children_survive_the_rewrite(self):
@@ -1400,9 +1431,53 @@ class ViewerWrittenLengthTestCase(unittest.TestCase):
 		num.ContentSequence = Sequence(srdoc_children(num) + [text_item(CONSUMER_PROPERTY, 'kept')])
 		group = group_of(doc)
 		group.ContentSequence = Sequence(srdoc_children(group) + [text_item(CONSUMER_VALUE, 'kept in the group', relationship='CONTAINS')])
-		again = group_of(roundtrip(reparse(doc).create_sr()))
+		again = group_of(roundtrip(reparse(doc, calibrations=VIEWER_SQUARE).create_sr()))
 		self.assertEqual(named(srdoc_children(num_of(again)), CONSUMER_PROPERTY.value)[0].TextValue, 'kept')
 		self.assertEqual(named(srdoc_children(again), CONSUMER_VALUE.value)[0].TextValue, 'kept in the group')
+
+
+class ViewerWrittenAngleTestCase(ViewerWrittenPropertiesMixin, unittest.TestCase):
+	'''	An image-domain Angle and Cobb angle from the Viewer's classic writer: the tool resolved by the tracking
+		identifier, the stored value kept verbatim
+	'''
+	# fixture -> (class, measurement type, tracking identifier, points as read, stored value text)
+	FIXTURES = OrderedDict((
+		('sonador-viewer.angle-image.2026-1108.dcm', (AngleMeasurement, SONADOR_MEASUREMENT_TYPE_ANGLE, ANGLE_ID,
+			((20.5, 10.5), (10.5, 10.5), (10.5, 10.5), (10.5, 20.5)), '90')),
+		('sonador-viewer.cobb-angle-image.2026-1108.dcm', (CobbAngleMeasurement, SONADOR_MEASUREMENT_TYPE_COBB_ANGLE, COBB_ID,
+			((0.5, 0.5), (10.5, 0.5), (0.5, 10.5), (10.5, 20.5)), '135')),
+	))
+
+	def read_viewer(self, name):
+		doc = read(os.path.join(FIXTURES, name))
+		self.assertEqual((doc.Manufacturer, doc.ManufacturerModelName, doc.PatientID), ('Sonador', 'Sonador-Viewer', 'ANONYMOUS'))
+		model = reparse(doc, strict=True, calibrations=VIEWER_SQUARE)
+		self.assertFalse(sr_diagnostics_with(model.diagnostics, severity=SR_DIAGNOSTIC_WARNING), name)
+		return doc, model, measurements_of(model)[0]
+
+	def test_hydration(self):
+		for name, (cls, measurement_type, tracking_id, points, stored) in self.FIXTURES.items():
+			doc, model, m = self.read_viewer(name)
+			self.assertIsInstance(m, cls, name)
+			self.assertEqual((m.tracking_id, measurement_type_for_tracking_id(m.tracking_id)), (tracking_id, measurement_type), name)
+			self.assertEqual((m.geometry.domain, m.points), ('image', points), name)
+			self.assertEqual((m.reference.sop_instance_uid, m.series_uid), (SYNTHETIC['SOPInstanceUID'], SYNTHETIC['SeriesInstanceUID']), name)
+			num = num_of(group_of(doc))
+			self.assertEqual(num.MeasuredValueSequence[0].NumericValue.original_string, stored, name)
+			self.assertEqual((m.value, m.unit.value), (float(stored), 'deg'), name)
+			computed, unit = m.computed_value()
+			self.assertAlmostEqual(computed, float(stored), places=6, msg=name)
+			self.assertNotIn(SR_CONDITION_MEASUREMENT_VALUE_MISMATCH, conditions(model.diagnostics), name)
+			self.assert_viewer_properties(m, group_of(doc))
+
+	def test_unchanged_resave(self):
+		for name, (cls, measurement_type, tracking_id, points, stored) in self.FIXTURES.items():
+			doc, model, m = self.read_viewer(name)
+			again = roundtrip(model.create_sr())
+			self.assertEqual(num_of(group_of(again)).MeasuredValueSequence[0].NumericValue.original_string, stored, name)
+			self.assertEqual(srdoc_children(group_of(again))[1].UID, m.tracking_uid, name)
+			self.assert_viewer_properties(measurements_of(reparse(again, strict=True, calibrations=VIEWER_SQUARE))[0], group_of(again))
+			assert_same_content(self, doc, again)
 
 
 class MeasurementRetrievalPacs(MockPacs):

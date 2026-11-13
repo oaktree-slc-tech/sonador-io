@@ -19,6 +19,9 @@
 	Pixel statistics: `sonador-io.circle-statistics-ct.2026-1112.dcm` (quantity form, patient domain) and
 	`sonador-io.circle-statistics-stock.2026-1112.dcm` (stock Cornerstone3D form, image domain) hold a circle of
 	this client with three statistic NUM items added the way a Viewer writes them.
+	`sonador-viewer.circle-statistics.2026-1113.dcm` is written by the Sonador Viewer (copied unchanged from its
+	`platform/core/src/DICOMSR/__fixtures__`): an image-domain circle of radius 6 mm inside the 400 HU cylinder of
+	its synthetic CT, with Mean, Std dev and Max in the quantity form.
 
 	Run from the directory containing the `sonador` package: python -m unittest sonador.ftests.test_sr.sr_circle
 '''
@@ -57,7 +60,8 @@ from .sr_measurements import FOR_UID, CALIBRATION, COLORS, model_of, written, re
 
 __all__ = ['CircleRegistryTestCase', 'CircleModelTestCase', 'CircleWriterTestCase', 'CircleReaderTestCase', 'CircleAdapterFixtureTestCase',
 	'CircleFixtureTestCase', 'CircleDocumentTestCase', 'DisplayColorRoleTestCase', 'CircleUnitsAndEditsTestCase', 'CircleReadFidelityTestCase',
-	'CircleViewerFixtureTestCase', 'CircleStatisticsTestCase', 'MeasurementValueKeyTestCase', 'CircleConstructionPointsDroppedTestCase']
+	'CircleViewerFixtureTestCase', 'CircleStatisticsTestCase', 'CircleViewerStatisticsTestCase', 'MeasurementValueKeyTestCase',
+	'CircleConstructionPointsDroppedTestCase']
 
 
 TRACKING = '2.25.9901'
@@ -1293,6 +1297,78 @@ class CircleStatisticsTestCase(OracleMixin, unittest.TestCase):
 		self.assertNotIsInstance(m, CircleMeasurement)
 		self.assertEqual([k for k in m.values if len(k) == 4],
 			[('112031', 'DCM', '373098007', 'SCT'), ('112031', 'DCM', '386136009', 'SCT'), ('112031', 'DCM', '56851009', 'SCT')])
+
+
+VIEWER_STATISTICS_FIXTURE = os.path.join(FIXTURES, 'sonador-viewer.circle-statistics.2026-1113.dcm')
+VIEWER_STATISTICS = OrderedDict((('mean', 400.0), ('std_dev', 0.0), ('max', 400.0)))
+
+
+class CircleViewerStatisticsTestCase(OracleMixin, unittest.TestCase):
+	'''	Pixel statistics written by the Sonador Viewer: Mean, Std dev and Max of a circle on its synthetic CT,
+		every pixel inside the circle 400 HU
+	'''
+	def read_viewer(self):
+		doc = read(VIEWER_STATISTICS_FIXTURE)
+		model = reparse(doc, strict=True, calibrations=VIEWER_CT_CALIBRATION)
+		self.assertFalse(sr_diagnostics_with(model.diagnostics, severity=SR_DIAGNOSTIC_WARNING))
+		return doc, model, measurements_of(model)[0]
+
+	def test_hydrates_as_a_circle_with_statistics(self):
+		doc, model, m = self.read_viewer()
+		self.assertIsInstance(m, CircleMeasurement)
+		self.assertEqual((m.tracking_id, m.geometry.domain, m.reference.sop_instance_uid), (CIRCLE_ID, 'image', VIEWER_CT_SLICE))
+		self.assertEqual((tuple(m.center), tuple(m.edge)), ((32.5, 24.5), (37.5, 24.5)))
+		calibration = VIEWER_CT_CALIBRATION[VIEWER_CT_SLICE]
+		np.testing.assert_allclose(calibration.patient_point(*m.center), (0.0, 0.0, 9.0), atol=1e-6)
+		np.testing.assert_allclose(calibration.patient_point(*m.edge), (6.0, 0.0, 9.0), atol=1e-6)
+		self.assertAlmostEqual(m.radius, 6.0, places=6)
+		self.assertEqual(m.description, 'Circle (statistics)')
+
+		s = m.statistics
+		self.assertIsInstance(s, CircleStatistics)
+		self.assertEqual((s.mean, s.std_dev, s.max), tuple(VIEWER_STATISTICS.values()))
+		self.assertEqual(((s.quantity.value, s.quantity.scheme_designator), (s.unit.value, s.unit.scheme_designator)),
+			(('112031', 'DCM'), ("[hnsf'U]", 'UCUM')))
+		self.assertEqual(list(m.values), [('42798000', 'SCT'), ('131191004', 'SCT')])
+
+		# Area, Perimeter, Radius, then the statistics, each with the Derivation modifier and its own geometry copy
+		nums = nums_of(group_of(doc))
+		self.assertEqual([dcm_code_value(n.ConceptNameCodeSequence[0]) for n in nums],
+			['42798000', '131191004', '131190003', '112031', '112031', '112031'])
+		for num, derivation, value in zip(nums[3:], ('373098007', '386136009', '56851009'), VIEWER_STATISTICS.values()):
+			self.assertEqual(num_value(num), (value, "[hnsf'U]"))
+			modifiers = [c for c in srdoc_children(num) if c.RelationshipType == 'HAS CONCEPT MOD']
+			self.assertEqual([(dcm_code_value(c.ConceptNameCodeSequence[0]), dcm_code_value(c.ConceptCodeSequence[0])) for c in modifiers],
+				[('121401', derivation)])
+		for num in nums:
+			coordinates = coordinates_of(num)
+			self.assertEqual([(c.RelationshipType, c.ValueType, c.GraphicType) for c in coordinates], [('INFERRED FROM', 'SCOORD', 'CIRCLE')])
+			self.assertEqual(list(coordinates[0].GraphicData), [32.5, 24.5, 37.5, 24.5])
+
+	def test_unchanged_resave_keeps_the_statistics_verbatim(self):
+		doc, model, m = self.read_viewer()
+		again = roundtrip(model.create_sr())
+		src, out = nums_of(group_of(doc)), nums_of(group_of(again))
+		self.assertEqual(len(out), 6)
+		for source, written_item in zip(src[3:], out[3:]):
+			compare_nodes(self, Node(source), Node(written_item), 'statistic')
+			self.assertEqual(str(written_item.MeasuredValueSequence[0].NumericValue), str(source.MeasuredValueSequence[0].NumericValue))
+		self.assertFalse(sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_STATISTICS_DROPPED))
+		self.assert_same_content(doc, again)
+		self.assertEqual(measurements_of(reparse(again, strict=True, calibrations=VIEWER_CT_CALIBRATION))[0].statistics.mean, 400.0)
+
+	def test_edit_drops_the_statistics(self):
+		edits = OrderedDict((('center', lambda m: setattr(m, 'center', (33.5, 24.5))), ('radius', lambda m: setattr(m, 'radius', 4.8))))
+		for case, edit in edits.items():
+			doc, model, m = self.read_viewer()
+			edit(m)
+			self.assertIsNone(m.statistics, case)
+			again = roundtrip(model.create_sr())
+			out = nums_of(group_of(again))
+			self.assertEqual([dcm_code_value(n.ConceptNameCodeSequence[0]) for n in out], ['42798000', '131191004', '131190003'], case)
+			dropped = sr_diagnostics_with(model.diagnostics, condition=SR_CONDITION_STATISTICS_DROPPED)
+			self.assertEqual([(d.severity, d.value) for d in dropped], [('info', 3)], case)
+			self.assertIsNone(measurements_of(reparse(again, calibrations=VIEWER_CT_CALIBRATION))[0].statistics, case)
 
 
 class MeasurementValueKeyTestCase(unittest.TestCase):
