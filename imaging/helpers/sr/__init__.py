@@ -9,6 +9,7 @@
 	hold the local data model of a document (`sonador.apisettings.base.sr`: findings, measurements,
 	report groups, reference frames) together with the document-level state a round trip needs: the
 	parsed document, the root template, the observers, the preserved root items and the diagnostics.
+	The frame graph of a report, its conversion, representability and writer policy are in `.frames`.
 
 	Entry points:
 	* `SonadorBaseSR.from_sr(document)` builds the model of one document given as a file, bytes, a
@@ -62,6 +63,7 @@ from ...orthanc.base import ImagingResourceBaseCollection
 from ...orthanc.sr import DcmSRSeries, DcmSRInstance
 
 from .encoding import SonadorSRMeasurementReport
+from .frames import SRFrameMixin
 from .parse import srdoc_parse, srdoc_read, srdoc_document_class, srdoc_sop_class, srdoc_evidence_headers, srdoc_synthetic_evidence, srdoc_set_study, \
 	srdoc_predecessor_items, srdoc_predecessors, SRPredecessor, SRParsedDocument, DCMSR_WRITER_CLASSES
 from ....dcmcompat import require_oaktree_highdicom
@@ -590,7 +592,7 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 					yield from getattr(display, 'color_extra_items', ())
 
 
-class SonadorComprehensiveSR3D(SonadorBaseSR):
+class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 	'''	Report model for writing and reading measurements, findings and other structured data to and
 		from DICOM-SR documents.
 
@@ -610,8 +612,13 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 		the parsed document. The profile is held in class attributes, inherited by subclasses and
 		overridden per call through the constructor arguments.
 
-		@property reference_frames (ImageTransformMatrixCollection): reference frames
-			(encoded as transform matrixes) associated with the report.
+		@property frames (FrameGraph): the report's reference frames and their rigid edges: imaging-backed frames from
+			the references (cached, no request), the frames, edges and declarations of the parsed document, the
+			caller's application frames and edges (`frames.add_frame`, `frames.add_edge`). See
+			`sonador.imaging.helpers.sr.frames` and `sonador.apisettings.sr.frames`.
+		@property reference_frames (ImageTransformMatrixCollection): transform matrices the caller declares as
+			application frames: each becomes a frame named by its comment (or `source_frame`) with an edge to its
+			`target_frame`, else to the primary.
 		@property measurements (MeasurementCollection): measurements for the report. One with a group
 			identity (a typed measurement) is written as its own TID 1501 measurement group; the others
 			go to the primary group.
@@ -654,6 +661,10 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 				(`Finding.series_tag`) is written as its own measurement group
 			@input groups (iterable of ReportGroup, default=the parsed document's groups): report groups,
 				written as given
+			@input primary_frame_uid (str, default=the persisted primary, else the single imaging frame): primary
+				imaging frame for this session; must be a referenced imaging frame
+			@input imaging_frames (mapping `{series_uid: frame_uid}` or iterable of frame UIDs, default=None): Frame of
+				Reference UIDs of the referenced imaging series, for references whose cached records do not carry them
 		'''
 		# Report components
 		parsed = kwargs.get('parsed')
@@ -680,6 +691,11 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 		# Initialize base class
 		super().__init__(**omit(kwargs, ('report_title',)))
+
+		# Reference frames: resolved on first use; a parsed document's at once, so that its diagnostics are recorded
+		self._init_frames(**pick(kwargs, ('primary_frame_uid', 'imaging_frames', 'study_frames', 'frames_strict')))
+		if parsed is not None:
+			self.frames
 
 	@property
 	def reference_frames(self):
@@ -1027,7 +1043,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			observation_context=observation_context,
 			imaging_measurements=[g.create_sr(layout=layout, diagnostics=self.diagnostics, strict=strict) for g in imaging_groups],
 			meta_groups=[g.sr for g in meta_groups],
-			volume_measurements=[g.sr for g in volume_groups],
+			volume_measurements=[g.create_sr(frame_uid=self._unframed_target()) for g in volume_groups],
 			**omit(kwargs, tuple(k for k in kwargs.keys() if 'observation_context' in k or 'primary_group' in k)))
 
 		# Image Library before the Imaging Measurements container; preserved root items last
@@ -1037,7 +1053,8 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			position = next((i for i, item in enumerate(root.ContentSequence)
 				if item.name == dcmcodes.DCM.ImagingMeasurements), len(root.ContentSequence))
 			root.ContentSequence.insert(position, library)
-		for item in srcontent_extra_items(self.extra_items):
+		plan = self._pending_plan if self._pending_plan is not None else self.frame_write_plan()
+		for item in self._root_tail(plan):
 			root.ContentSequence.append(item)
 
 		return report
@@ -1215,7 +1232,7 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			dcmsr_series_number=None, dcmsr_instance_number=1, ts=None, is_complete=None,
 			is_final=None, is_verified=None, series_headers_kwargs=None, record_instances=None,
 			person_observer=None, device_observer_uid=None, template_id=None, previous=_PARSED_PREDECESSOR,
-			document_template=None, strict=False, **kwargs):
+			document_template=None, strict=False, require=None, target=None, **kwargs):
 		'''	Create the DICOM-SR document from the model data: the report content (`create_report_sr`),
 			the evidence, the document flags, the predecessor links, the root template and the series
 			headers. Specific Character Set `ISO_IR 192` is set whenever a text value of the document is
@@ -1255,13 +1272,25 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 				written as Comprehensive 3D SR with the `info` diagnostic `document-class-upgraded`.
 			@input strict (bool, default=False): refuse a report without content, or a measurement View
 				value outside the registry (`create_report_sr`), instead of writing it with a `warning`
+			@input require (str, default=None): writer policy for patient-domain geometry against `target`: None
+				writes every frame as given, `'registered'` refuses geometry with no trusted path, `'native'` refuses
+				anything not stored in the target frame (see `sonador.imaging.helpers.sr.frames`)
+			@input target (str, default=the primary): target frame of the policy; required without a primary
 			@input kwargs: further document class, report template, observation context and primary
 				group arguments (see `create_report_sr`)
+
+			Frames: the frame graph (`frames`) is written as frame containers, root declarations and Registration
+			Sequence items; records read from the parsed document are written back verbatim in their slots, the
+			declarations regenerated from the read's classification (`.Primary` for a selected primary, `.Legacy` for
+			an accepted legacy item, `.Unverified` for every retained record the read did not trust).
 
 			@returns highdicom.sr.Comprehensive3DSR, also kept as the model's last document (`sr`)
 
 			@raises SRDiagnosticError when the model holds a by-reference content item (such a document is
-				never rewritten), or under `strict` for a report without content
+				never rewritten), under `strict` for a report without content, for a write the policy refuses or that
+				carries new geometry in an unknown frame (`frame-policy-refused`), a frame or edge the graph refuses
+				(`frame-edge-invalid`), or a primary change that would rebind a saved legacy edge (`legacy-target-change`)
+			@raises FrameConversionError for a policy without a target on a report with no primary
 			@raises ConfigurationError when no procedure reported is set
 			@raises ValueError when a Series Tag finding has no image reference and no reference series
 				to take one from, when the model has no evidence source at all, when a document class
@@ -1298,6 +1327,10 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 		if parsed is not None and srdoc_sop_class(parsed) == DCMSR_SOP_CLASS_ENHANCED:
 			sr_diagnostic(self.diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_DOCUMENT_CLASS_UPGRADED,
 				'Enhanced SR parent written as Comprehensive 3D SR', value=EnhancedSR.__name__)
+
+		# Frames: the policy and the frame records are settled before anything is built
+		self._apply_write_policy(require=require, target=target)
+		self._pending_plan = self.frame_write_plan()
 
 		# Source series resolved before the content is built, so that an unresolvable one writes nothing
 		source_references = self.source_series_references()
@@ -1382,22 +1415,24 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 		# UTF-8 for a document with text that is not ASCII; an all-ASCII document keeps the character set
 		# highdicom gives it
 		srdoc_apply_character_set(_srdoc)
+		self._pending_plan = None
 		self._sr = _srdoc
 		return _srdoc
 
 	def dcmsr_series_headers(self, srdoc, *args, **kwargs):
-		'''	Add the series headers of the base class and the reference frames of the model (Registration
-			Sequence) to the SR document. A model without reference frames keeps the parsed document's,
-			carried through by the base class.
+		'''	Add the series headers of the base class and the Registration Sequence of the frame graph: the
+			retained items of the parsed document in their slots, then the items of the edges generated here.
 
 			@returns highdicom SR document: `srdoc`
 		'''
 		# Add headers from parent instance
 		srdoc = super().dcmsr_series_headers(srdoc, *args, **kwargs)
 
-		# Add reference frames (the parsed document's are carried by the base class when the model has none)
-		if self.reference_frames:
-			setattr(srdoc, DCMHEADER_REGISTRATION_SEQUENCE, DcmSequence([rf.sr for rf in self.reference_frames]))
+		plan = self._pending_plan if self._pending_plan is not None else self.frame_write_plan()
+		if plan['items']:
+			setattr(srdoc, DCMHEADER_REGISTRATION_SEQUENCE, DcmSequence([copy.deepcopy(i) for i in plan['items']]))
+		elif DCMHEADER_REGISTRATION_SEQUENCE in srdoc:
+			delattr(srdoc, DCMHEADER_REGISTRATION_SEQUENCE)
 
 		return srdoc
 

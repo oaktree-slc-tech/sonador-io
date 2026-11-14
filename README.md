@@ -96,7 +96,8 @@ Each `Finding` links back to its `ImagingSeries`, `DcmInstance` and `DcmSRInstan
 ### Quantitative Measurements
 Length, Angle, Cobb angle, Circle and Bidirectional measurements are read from and written to DICOM-SR documents
 (`sonador.apisettings.sr.measurements`) with the coordinates they were made from: one measurement group
-each, in the patient domain (millimetres, in the imaging series' Frame of Reference) or the image domain.
+each, in the patient domain (millimetres, in the frame their Frame of Reference UID names: an imaging series'
+own, or an application frame of the document, see [Reference Frames](#reference-frames)) or the image domain.
 
 ```python
 from sonador.apisettings.base import LengthMeasurement, CobbAngleMeasurement, ImageReference
@@ -346,6 +347,45 @@ offset = np.asarray(length.p2) - length.p1          # arithmetic is done in nump
   roles of other `ImageCoord` values are those of the table above: unitless directions, frame-conversion points
   in the transform's units, and the legacy SCOORD points of `sr2points` below.
 * `sr2points` reads SCOORD points as `ImageCoord` with `z = 0`, as before.
+
+### Reference Frames
+A reference frame is a coordinate system: an origin and three axes that give the numbers of a point their
+meaning. DICOM gives every imaging series that locates the patient in space a frame, and names it with a
+Frame of Reference UID. Two series with the same UID share a space, so the point (10, 20, 30) mm is the
+same place in both. Under different UIDs the same numbers are different places, until a transform relates
+the two frames.
+
+Applications that work with images often bring coordinate systems of their own: a planning tool that
+measures in a frame aligned to the anatomy, or a 3D model with its own origin and units. Sonador IO lets a
+report name those frames, record the rigid transform that relates each one to the images, and store
+measurements, arrows and points in the frame they were made in. A reader of the document can then tell
+which geometry lies on the images, which can be converted to them, and which cannot be placed at all.
+
+```python
+from sonador.apisettings.base import ReferenceFrame, LengthMeasurement
+
+model = SonadorImagingMeasurementReport(sonador_ref_series=series, report_procedure=code)
+frames = model.frames
+
+# Declare a frame and relate it to the imaging frame with a rigid 4x4 matrix (mm)
+planned = frames.add_frame(ReferenceFrame(name='Planned'))
+frames.add_edge(planned_to_image, planned, frames.primary_uid)
+
+# Store a measurement in the frame it was made in, or convert it to the imaging frame first
+length = LengthMeasurement(points, frame_of_reference_uid=planned.uid)
+in_image = model.convert(length, frames.primary_uid)
+```
+
+* Nothing is converted implicitly. Geometry keeps its frame until `report.convert` moves it.
+* `report.representability(obj)` reports whether an object is stored in the imaging frame (`'native'`), can
+  be converted to it (`'registered'`) or cannot (`'unregistered'`).
+* `create_sr(require='native')` refuses to write a document unless all of its geometry is in the imaging
+  frame. The Sonador Viewer draws geometry only on a series that shares its frame, so use this for
+  documents meant to be seen on the images.
+
+The full reference is [Reference Frames in DICOM-SR Documents](https://code.oak-tree.tech/oak-tree/medical-imaging/imaging-development-env/-/wikis/integrations/sonador-io/reference-frames):
+units, the primary frame, the rules for trusting a transform, what the document stores, and how documents
+written by earlier versions are read.
 
 ### Coordinate System and Units of M3D Models
 Encapsulated STL instances (M3D modality) carry a Frame of Reference UID (the origin and axes implicit

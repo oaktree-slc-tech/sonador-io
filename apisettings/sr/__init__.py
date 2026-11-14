@@ -4,7 +4,9 @@
 	`sonador.apisettings.sr` is a package. This module holds the grammar shared by every Sonador-SR
 	document (codes, content items, templates, diagnostics); each measurement profile is a submodule
 	with its own concept registry, encoder and parser: `seriestag` (Series Tags), `measurements`
-	(Length, Angle, Cobb angle, Circle, Bidirectional) and `arrow` (Arrow annotations).
+	(Length, Angle, Cobb angle, Circle, Bidirectional) and `arrow` (Arrow annotations). `frames` holds the
+	reference frames of a document: frame containers, root declarations and Registration items, and their
+	resolution into a frame graph.
 
 	Besides the encoders of the report templates (`srencode_*`) and the coded concept conversions
 	(`srcode2dataset`, `dataset2srcode`), the module holds:
@@ -226,6 +228,23 @@ SR_CONDITION_ARROW_LABEL_FROM_COMMENT = 'arrow-label-from-comment'
 SR_CONDITION_ARROW_WITHOUT_LABEL = 'arrow-without-label'
 SR_CONDITION_DEGENERATE_ARROW = 'degenerate-arrow'
 SR_CONDITION_ARROW_READ_AS_FINDING = 'arrow-read-as-finding'
+SR_CONDITION_FRAME_UID_COLLISION = 'frame-uid-collision'
+SR_CONDITION_FRAME_EDGE_INVALID = 'frame-edge-invalid'
+SR_CONDITION_FRAME_EDGE_UNVERIFIED = 'frame-edge-unverified'
+SR_CONDITION_FRAME_NODE_QUARANTINED = 'frame-node-quarantined'
+SR_CONDITION_FRAME_STATUS_CONFLICT = 'frame-status-conflict'
+SR_CONDITION_FRAME_STATUS_DEMOTED = 'frame-status-demoted'
+SR_CONDITION_FRAME_EDGE_LEGACY = 'frame-edge-legacy'
+SR_CONDITION_FRAME_NODE_INVALID = 'frame-node-invalid'
+SR_CONDITION_FRAME_NODE_CONFLICT = 'frame-node-conflict'
+SR_CONDITION_FRAME_NODE_MENTIONED_ONLY = 'frame-node-mentioned-only'
+SR_CONDITION_FRAME_PRIMARY_UNRESOLVED = 'frame-primary-unresolved'
+SR_CONDITION_FRAME_PRIMARY_INVALID = 'frame-primary-invalid'
+SR_CONDITION_FRAME_PRIMARY_CHANGED = 'frame-primary-changed'
+SR_CONDITION_LEGACY_TARGET_CHANGE = 'legacy-target-change'
+SR_CONDITION_UNKNOWN_FRAME = 'unknown-frame'
+SR_CONDITION_FRAME_CONVENTION_AMBIGUOUS = 'frame-convention-ambiguous'
+SR_CONDITION_FRAME_POLICY_REFUSED = 'frame-policy-refused'
 
 
 class SRDiagnostic(namedtuple('SRDiagnostic', ('severity', 'condition', 'path', 'value', 'message'))):

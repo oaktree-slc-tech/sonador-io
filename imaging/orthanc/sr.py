@@ -39,8 +39,11 @@
 	whole study and `ImagingSeries.findings` the `{measurement_type: FindingCollection}` of one series;
 	`measurements` has the same shape with `MeasurementCollection`. A patient-domain measurement has
 	no image reference: it is keyed by its source series (`Sonador-Measurement.Source-Series`) when
-	it names one the study holds, else by the document's own series, and in both cases is also
-	reachable with `measurements(frame_of_reference_uid=...)`, which the series and study accessors
+	it names one the study holds; without one, by the series of its stored frame when that is the imaging frame of
+	exactly one referenced series, else by the document's own series (an application frame, a frame the document
+	declares only in part, or an unknown frame, diagnosed `unknown-frame` when the document is read). In every case
+	it is also reachable with `measurements(frame_of_reference_uid=...)`, which filters on the stored frame UID
+	independently of the bucket, and which the series and study accessors
 	resolve from what is cached, without a request. Request budget of the default current-document retrieval: after
 	`bulkpopulate_related(child_instances=True)` on the study collection, the first `findings` or
 	`measurements` access costs one `file` GET per SR series and later accesses none, since the
@@ -110,6 +113,25 @@ def _measurement_frame_uid(measurement):
 	if measurement.frame_of_reference_uid:
 		return measurement.frame_of_reference_uid
 	return dcmsr_series_frame_uid(measurement.series) if measurement.series is not None else None
+
+
+def _frame_bucket(report, frame_uid):
+	'''	Series a patient-domain item without a Source-Series is keyed by, from its stored frame: the series of an
+		imaging-backed frame that exactly one referenced series has. An item in any other known frame, or in an
+		unknown one, is keyed by the document's series (None here). Makes no request.
+
+		@input report: the parsed report model (with `frames`), or another model
+		@input frame_uid (str or None)
+		@returns str or None
+	'''
+	graph = getattr(report, 'frames', None)
+	if graph is None or not frame_uid:
+		return None
+	frame = graph.frame(frame_uid)
+	series = graph.imaging_series.get(frame_uid) or []
+	if frame is not None and frame.imaging_backed and len(series) == 1:
+		return series[0]
+	return None
 
 
 def _filter_frame(results, frame_of_reference_uid, collection_class=MeasurementCollection):
@@ -534,6 +556,10 @@ class DcmSRInstance(DcmStructuredInstance):
 			@returns the report model
 		'''
 		report_class = report_class or self._default_report_class()
+		study_series = self._study_series()
+		if study_series is not None and 'study_frames' not in kwargs:
+			kwargs['study_frames'] = OrderedDict((sx.series_uid, dcmsr_series_frame_uid(sx)) for sx in study_series
+				if sx.series_uid and dcmsr_series_frame_uid(sx))
 		report = report_class.from_sr(self.dcmfile(cache=True), strict=strict, **kwargs)
 		if self.__dict__.get('_parent') is not None and self.__dict__.get('pacs') is not None:
 			report.series = self._parent
@@ -708,6 +734,9 @@ class DcmSRInstance(DcmStructuredInstance):
 					continue
 				self._link_finding(finding)
 				series_uid = finding.series_uid or self.series
+				geometry = getattr(finding, 'geometry', None)
+				if geometry is not None and geometry.is_patient and not finding.series_uid:
+					series_uid = _frame_bucket(self.report, finding.frame_of_reference_uid) or series_uid
 				bucket = results.setdefault(series_uid, OrderedDict()).setdefault(finding.type, [])
 				bucket.append(finding)
 		return OrderedDict((uid, OrderedDict((mtype, FindingCollection(items)) for mtype, items in by_type.items()))
@@ -743,6 +772,8 @@ class DcmSRInstance(DcmStructuredInstance):
 						sr_diagnostic(self.report.diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_UNKNOWN_SOURCE_SERIES,
 							'source series is not a series of the study; keyed by the series of the document',
 							path='group %s' % measurement.tracking_uid, value=measurement.series_uid)
+				if patient and series_uid == self.series and not measurement.series_uid:
+					series_uid = _frame_bucket(self.report, measurement.frame_of_reference_uid) or series_uid
 				bucket = results.setdefault(series_uid, OrderedDict()).setdefault(measurement.type or SONADOR_MEASUREMENT_TYPE_GENERIC, [])
 				bucket.append(measurement)
 		return OrderedDict((uid, OrderedDict((mtype, MeasurementCollection(items)) for mtype, items in by_type.items()))
