@@ -75,7 +75,7 @@ from ..base import SONADOR_MANUFACTURER, SONADOR_SR, SONADOR_SCHEME_VERSION_03, 
 	DCMSR_CIRCLE_AREA_TOLERANCE, DCMSR_CIRCLE_AREA_RELATIVE_TOLERANCE, DCMSR_CIRCLE_PARALLEL_DEGREES, DCMSR_UNITS_MM, \
 	CIRCLE_VALUE_AREA, CIRCLE_VALUE_PERIMETER, CIRCLE_VALUE_RADIUS, CIRCLE_VALUE_ROLES, circle_unit_scale, BidirectionalMeasurement, \
 	SONADOR_MEASUREMENT_TYPE_BIDIRECTIONAL, DCMSR_CONCEPT_LONG_AXIS, DCMSR_CONCEPT_SHORT_AXIS, DCMSR_BIDIRECTIONAL_LENGTH_TOLERANCE, \
-	BIDIRECTIONAL_VALUE_LONG_AXIS, BIDIRECTIONAL_VALUE_SHORT_AXIS, BIDIRECTIONAL_VALUE_ROLES, DCMSR_GRAPHIC_POLYLINE
+	BIDIRECTIONAL_VALUE_LONG_AXIS, BIDIRECTIONAL_VALUE_SHORT_AXIS, BIDIRECTIONAL_VALUE_ROLES, DCMSR_GRAPHIC_POLYLINE, DCMSR_FREE_TEXT_VALUE
 from . import dcm_code_value, dcm_code_matches, srcontent_is_named, srcontent_extra_items, srcontent_from_dataset, sr_diagnostic, \
 	SR_DIAGNOSTIC_INFO, SR_DIAGNOSTIC_WARNING, SR_DIAGNOSTIC_ERROR, SR_CONDITION_MEASUREMENT_VALUE_MISMATCH, \
 	SR_CONDITION_MEASUREMENT_VALUE_UNVERIFIED, SR_CONDITION_MEASUREMENT_UNCALIBRATED, SR_CONDITION_MEASUREMENT_WITHOUT_VALUE, \
@@ -199,7 +199,7 @@ DCMSR_MEASUREMENT_CONCEPTS = {
 
 DCMSR_COMMENT = Code('121106', 'DCM', 'Comment')
 DCMSR_FINDING_SITE_CONCEPTS = (Code('363698007', 'SCT', 'Finding Site'), Code('G-C0E3', 'SRT', 'Finding Site'))
-DCMSR_CORNERSTONE_FREE_TEXT = 'CORNERSTONEFREETEXT'
+DCMSR_CORNERSTONE_FREE_TEXT = DCMSR_FREE_TEXT_VALUE
 
 # Allowed difference between a stored value and the value computed from the points
 DCMSR_VALUE_TOLERANCE = 0.01
@@ -388,8 +388,8 @@ def _mark_source_unnamed(item):
 
 
 def _set_image_reference(item, reference):
-	'''	Point the IMAGE child of a coordinate item at another SOP instance and frame, adding the child
-		when the item has none. Other children are left alone. Modifies the item in place.
+	'''	Point the source IMAGE child (`SELECTED FROM`) of a coordinate item at another SOP instance and frame,
+		adding the child when the item has none. Other children are left alone. Modifies the item in place.
 
 		@input item (pydicom.Dataset): the SCOORD item
 		@input reference (ImageReference): the new reference
@@ -399,6 +399,8 @@ def _set_image_reference(item, reference):
 	if reference is None or not reference.sop_instance_uid:
 		raise ValueError('An image-domain measurement needs an image reference with a SOP Instance UID to be written')
 	images = [child for child in item.get('ContentSequence') or [] if child.get('ValueType') == 'IMAGE']
+	# The source image is the SELECTED FROM child; an IMAGE of another relationship is left alone
+	images = [child for child in images if child.get('RelationshipType') in (None, 'SELECTED FROM')]
 	if not images:
 		frames = [reference.frame_number] if reference.frame_number else None
 		source_image = _mark_unnamed(SourceImageForRegion(reference.sop_class_uid or '', reference.sop_instance_uid, referenced_frame_numbers=frames))
@@ -876,7 +878,7 @@ def _group_tracking(group):
 
 
 def _parse_num_properties(children, consumed, group_items, group_consumed, diagnostics, strict, path, geometry, tracking_uid,
-		normal=None):
+		normal=None, foreign_labels=True, owner='NUM item'):
 	'''	Read the per-measurement properties under a NUM item: the extended meta items and display
 		attributes (with the legacy group-level layout), the View items, Source-Series and Drawing-Plane
 		(patient domain only), a foreign label, coded finding sites, and every other child preserved.
@@ -894,13 +896,16 @@ def _parse_num_properties(children, consumed, group_items, group_consumed, diagn
 		@input tracking_uid (str or None): tracking UID, the value of the drawing-plane diagnostic
 		@input normal (sequence of 3 numbers, default=None): plane normal a drawing plane must be
 			parallel to within 1 degree (circles)
+		@input foreign_labels (bool, default=True): read a dcmjs label as the description and the coded finding
+			sites; when False they stay with the preserved children
+		@input owner (str, default='NUM item'): name of the item in the diagnostic messages
 
 		@returns tuple (dict, DisplayAttributes or None, list of str, str or None, tuple or None, str or None,
 			list of FindingSite, list of pydicom.Dataset): meta attributes, display, views, source series,
 			drawing plane, drawing-plane text, finding sites, preserved children
 	'''
 	# Properties of the NUM item, then the legacy group level
-	meta, display = srparse_item_properties(children, group_items, consumed, group_consumed, diagnostics, strict, path, {}, owner='NUM item')
+	meta, display = srparse_item_properties(children, group_items, consumed, group_consumed, diagnostics, strict, path, {}, owner=owner)
 
 	views = []
 	for idx, child in enumerate(children):
@@ -927,7 +932,7 @@ def _parse_num_properties(children, consumed, group_items, group_consumed, diagn
 			continue
 		if geometry is None or not geometry.is_patient:
 			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_PROVENANCE_ON_IMAGE_DOMAIN,
-				'%s under a NUM item without patient-domain geometry; ignored and preserved' % dcm_code_value(srcontent_name(child)), path=path)
+				'%s under a %s without patient-domain geometry; ignored and preserved' % (dcm_code_value(srcontent_name(child)), owner), path=path)
 		elif is_series and source_series is None:
 			consumed.add(idx)
 			source_series = str(child.get('UID') or '').strip() or None
@@ -943,7 +948,7 @@ def _parse_num_properties(children, consumed, group_items, group_consumed, diagn
 					path=path, value=tracking_uid, strict=strict)
 
 	# A dcmjs label becomes the description; it is written back only in that form
-	if meta.get('description') is None:
+	if foreign_labels and meta.get('description') is None:
 		label = None
 		for idx, child in enumerate(children):
 			if idx not in consumed and _foreign_label(child):
@@ -964,7 +969,7 @@ def _parse_num_properties(children, consumed, group_items, group_consumed, diagn
 	# Coded finding sites under the NUM item
 	finding_sites = []
 	for idx, child in enumerate(children):
-		if idx not in consumed and _is_finding_site(child) and _relationship(child) == RelationshipTypeValues.HAS_CONCEPT_MOD.value:
+		if foreign_labels and idx not in consumed and _is_finding_site(child) and _relationship(child) == RelationshipTypeValues.HAS_CONCEPT_MOD.value:
 			consumed.add(idx)
 			finding_sites.append(FindingSite.from_dataset(child, copy=True))
 

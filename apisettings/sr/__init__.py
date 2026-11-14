@@ -3,8 +3,8 @@
 
 	`sonador.apisettings.sr` is a package. This module holds the grammar shared by every Sonador-SR
 	document (codes, content items, templates, diagnostics); each measurement profile is a submodule
-	with its own concept registry, encoder and parser: `seriestag` (Series Tags) and `measurements`
-	(Length, Angle, Cobb angle).
+	with its own concept registry, encoder and parser: `seriestag` (Series Tags), `measurements`
+	(Length, Angle, Cobb angle, Circle, Bidirectional) and `arrow` (Arrow annotations).
 
 	Besides the encoders of the report templates (`srencode_*`) and the coded concept conversions
 	(`srcode2dataset`, `dataset2srcode`), the module holds:
@@ -220,6 +220,12 @@ SR_CONDITION_AXES_NOT_ORDERED = 'axes-not-ordered'
 SR_CONDITION_AXES_UNITS_DIFFER = 'axes-units-differ'
 SR_CONDITION_STATISTICS_DROPPED = 'statistics-dropped'
 SR_CONDITION_CONSTRUCTION_POINTS_DROPPED = 'construction-points-dropped'
+SR_CONDITION_ARROW_LEGACY_GEOMETRY = 'arrow-legacy-geometry'
+SR_CONDITION_ARROW_LABEL_FROM_FINDING_SITE = 'arrow-label-from-finding-site'
+SR_CONDITION_ARROW_LABEL_FROM_COMMENT = 'arrow-label-from-comment'
+SR_CONDITION_ARROW_WITHOUT_LABEL = 'arrow-without-label'
+SR_CONDITION_DEGENERATE_ARROW = 'degenerate-arrow'
+SR_CONDITION_ARROW_READ_AS_FINDING = 'arrow-read-as-finding'
 
 
 class SRDiagnostic(namedtuple('SRDiagnostic', ('severity', 'condition', 'path', 'value', 'message'))):
@@ -825,8 +831,11 @@ def srencode_finding(finding:Finding, sr_template=DcmQualitativeEvaluation, layo
 			layout written
 
 		@returns highdicom.sr.QualitativeEvaluation: a one-item content sequence
+		@raises ValueError for a finding without a value
 	'''
 	from .seriestag import srencode_finding_children
+	if finding.finding is None:
+		raise ValueError('Finding %r has no coded value and cannot be written' % (finding,))
 	evaluation = sr_template(finding.name, finding.finding)
 	children = srencode_finding_children(finding, layout=layout)
 	if children:
@@ -863,7 +872,8 @@ def srencode_report_group(tracking_id:Union[TrackingIdentifier,str],
 		@input measurements (sonador.apisettings.MeasurementCollection, default=None): measurements
 			to be encoded to the provided template.
 		@input findings (sonador.apisettings.FindingCollection): findings to be encoded to the
-			provided template.
+			provided template; the placeholder of a group read without a Finding (`is_group_placeholder`) is not
+			written
 		@input tracking_uid (str, default=None): tracking unique identifier paired with a string
 			`tracking_id` (generated when None)
 		@input extra_items (iterable of pydicom.Dataset, default=None): preserved content items of the
@@ -874,13 +884,18 @@ def srencode_report_group(tracking_id:Union[TrackingIdentifier,str],
 
 		@returns highdicom.sr.templates.MeasurementsAndQualitativeEvaluations (an instance of `sr_template`)
 	'''
+	# The placeholder finding of a group read without a Finding (an unreadable arrow group) writes nothing of
+	# its own: the group's preserved items carry its content. Every other finding is written, and one without
+	# a value is refused by `srencode_finding`
+	written_findings = [f for f in (findings or []) if not getattr(f, 'is_group_placeholder', False)]
+
 	# Convert string value to DICOM-SR Tracking Identifier instance
 	if isinstance(tracking_id, str):
 		tracking_id = TrackingIdentifier(uid=tracking_uid, identifier=tracking_id)
 
 	group = sr_template(tracking_identifier=tracking_id, 
 		measurements=[m.create_sr(layout=layout, diagnostics=diagnostics, strict=strict) for m in measurements] if measurements else measurements, 
-		qualitative_evaluations=[f.create_sr(layout=layout) for f in findings] if findings else findings, **kwargs)
+		qualitative_evaluations=[f.create_sr(layout=layout, diagnostics=diagnostics, strict=strict) for f in written_findings] or None, **kwargs)
 
 	# Preserved items are re-emitted under the group, after the template-owned items
 	preserved = srcontent_extra_items(extra_items)

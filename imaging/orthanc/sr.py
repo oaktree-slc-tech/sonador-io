@@ -402,7 +402,7 @@ class DcmSRSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingServerChildCo
 			imaging-series UID and measurement type.
 
 			@input series_uid (str, default=None): imaging series to narrow to
-			@input measurement_type (str, default=None): measurement type to narrow to (`series-tag`)
+			@input measurement_type (str, default=None): measurement type to narrow to (`series-tag`, `arrow`)
 			@input kwargs: passed to `DcmSRInstanceCollection.findings` (`all_revisions`, `diagnostics`,
 				`strict`)
 			@returns
@@ -696,8 +696,8 @@ class DcmSRInstance(DcmStructuredInstance):
 		'''	Qualitative findings of the document, parsed with `report` (one `file` request on first
 			access): the findings of every group of the report that carry a measurement type, each
 			linked to its models (`_link_finding`) and keyed by the imaging series its reference
-			resolves to. A finding without a series reference is keyed by the identifier of the
-			document's own series.
+			resolves to; a patient-domain arrow by its source series (`Sonador-Measurement.Source-Series`).
+			A finding without a series is keyed by the identifier of the document's own series.
 
 			@returns dict keyed to imaging-series UID: `{series_uid: {measurement_type: FindingCollection}}`
 		'''
@@ -848,7 +848,7 @@ class DcmSRInstanceCollection(DcmStructuredInstanceCollection):
 			report is cached on the instance.
 
 			@input series_uid (str, default=None): imaging series to narrow to
-			@input measurement_type (str, default=None): measurement type to narrow to (`series-tag`)
+			@input measurement_type (str, default=None): measurement type to narrow to (`series-tag`, `arrow`)
 			@input all_revisions (bool, default=False): aggregate every document of the series, the
 				superseded revisions included (one `file` request per revision whose file is not cached)
 			@input diagnostics (list, default=None): list the current-document selection diagnostics

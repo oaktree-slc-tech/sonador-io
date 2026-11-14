@@ -225,6 +225,84 @@ calibration (for example zero spacing) is refused. A parsed length stored in mil
 keeps that value even when no calibration is available. Points given in another frame are
 converted at construction with `transform`, a rigid `ImageTransformMatrix`.
 
+### Arrow Annotations
+An arrow (the Cornerstone `ArrowAnnotate` tool) is a text annotation anchored on an image by an arrow. It
+has no value: `ArrowAnnotation` is a `Finding` with geometry (`sonador.apisettings.sr.arrow`), listed by
+`findings` under the type `arrow` and never by `measurements`.
+
+```python
+from sonador.apisettings.base import ArrowAnnotation, ImageReference
+
+# Image domain: (column, row) pixels on the referenced image, tip first
+arrow = ArrowAnnotation.from_points((30, 20), (10, 40), 'Cyst', reference=ImageReference(sop_class, sop_instance, None, series_uid),
+	description='...', text='...', location='...', display={'Line': '#C81E28', 'Text': '#FAFA0A'})
+
+# Patient domain: (x, y, z) mm in the series' Frame of Reference, with where it was drawn
+oblique = ArrowAnnotation.from_points(tip, tail, 'Margin', frame_of_reference_uid=frame_uid, series_uid=series.series_uid,
+	drawing_plane=((0.707107, -0.707107, 0), (0.408248, 0.408248, -0.816497)), views=['oblique'])
+
+arrow.label = 'Renamed'                   # the finding becomes (CORNERSTONEFREETEXT, CST4, "Renamed")
+arrow.tip, arrow.tail                     # PixelCoord / ImageCoord; tail None for an arrow of its tip only
+arrow.finding, arrow.is_coded             # a coded finding is carried verbatim, with label None
+
+model = SonadorImagingMeasurementReport(sonador_ref_series=series, findings=[arrow, oblique], report_procedure=code)
+study.findings(series_uid, 'arrow')       # FindingCollection: ArrowAnnotation, plus a plain Finding for a
+                                          # group that cannot be read as an arrow (see `arrow-read-as-finding`)
+```
+
+| Model | DICOM-SR |
+| --- | --- |
+| `tracking_id`, `tracking_uid` | `cornerstoneTools@^4.0.0:ArrowAnnotate` and the group's UID (generated when absent); `Cornerstone3DTools@^0.1.0:ArrowAnnotate` is read and kept |
+| `finding`, `label` | the Finding CODE `(121071, DCM, "Finding")`; its value `(CORNERSTONEFREETEXT, CST4, <label>)`, or a coded finding verbatim |
+| `tip`, `tail`, `geometry`, `reference` | `INFERRED FROM` the Finding: SCOORD `POLYLINE` (tip, tail) `SELECTED FROM` the image; a `POINT` of the tip without a tail |
+| `tip`, `tail`, `frame_of_reference_uid` | `INFERRED FROM` the Finding: SCOORD3D `POLYLINE` (tip, tail) with the Frame of Reference; a `POINT` without a tail |
+| description, text, location, views, `display` | `HAS PROPERTIES` the Finding: `Sonador-Measurement.Description`, `.Text`, `.Location`, `.View`, the display container (`Line`, `Text`) |
+| `series_uid`, `drawing_plane` (patient domain) | `HAS PROPERTIES` the Finding: `Sonador-Measurement.Source-Series`, `.Drawing-Plane` |
+| `extra_items` | the Finding's unmodelled children, re-emitted under it |
+
+No NUM item is written. The label is the Code Meaning, written verbatim at any length; `text` is a separate
+property, never a copy of the label. Three forms are read into the same model:
+
+- the Sonador form above;
+- the Viewer's current form (the classic adapter's TID300 Point): a NUM `(111010, DCM, "Center")` with a zero
+  value, `INFERRED FROM` a one-point `POINT` (the tip), the label in the Finding;
+- the stock Cornerstone3D form: a NUM `(111010, DCM, "label")` `INFERRED FROM` a two-point `POLYLINE`, tip first,
+  labelled by a `CORNERSTONEFREETEXT` Finding. When the annotation carries `data.label`, the stock 4.22.13 writer
+  puts the label in a group-level Comment `(121106, DCM)` instead and writes no Finding: that Comment is read as
+  the label (`arrow-label-from-comment`) and written back as the Finding; a Sonador text property stays separate.
+
+The NUM carrier is recognised by its concept `(111010, DCM)`, a zero value in the UCUM unit `1` (or no value),
+no numeric value qualifier and its coordinate child; any other NUM item in the group is kept where it is. A
+free-text label is matched by the code value `CORNERSTONEFREETEXT` and the scheme `CST4`, read from `CodeValue`
+or `LongCodeValue` and written to `LongCodeValue` (the 19-character value exceeds `CodeValue`'s 16); the same
+value in another scheme is a coded finding. An image-domain arrow's image is the `SELECTED FROM` IMAGE of its
+SCOORD; an IMAGE of another relationship is never taken as the source.
+
+A re-save writes the Sonador form: the NUM carrier is dropped, any other children of it move under the Finding,
+and an arrow read with a tip only is written back as a `POINT`. The properties are read in the nested, flat and
+legacy group-level layouts.
+
+| Diagnostic | Severity | When |
+| --- | --- | --- |
+| `arrow-legacy-geometry` | info | geometry read from a NUM carrier, and again when the carrier is not written back |
+| `arrow-label-from-finding-site` | info | a group without a Finding labelled by a `CORNERSTONEFREETEXT` Finding Site; written back as the Finding |
+| `arrow-label-from-comment` | info | a group without a Finding or such a site, labelled by a group-level Comment (the stock Cornerstone3D form); written back as the Finding |
+| `arrow-without-label` | warning | a free-text Finding with an empty meaning: `label` is `''`, written back as read |
+| `degenerate-arrow` | warning on read, error on write | tip and tail closer than 0.01 mm (0.01 px on an uncalibrated frame) |
+| `arrow-read-as-finding` | warning | no usable arrow geometry (none, another graphic type, or an image item without a `SELECTED FROM` image naming its SOP Instance): a plain `Finding` of type `arrow`, geometry preserved; a group without a Finding, site or Comment: a plain `Finding` without a value, not written, the group's content re-emitted as read |
+| `measurement-uncalibrated` | info | an image-domain arrow with a tail on a frame without calibration: the tip-to-tail distance is in pixels |
+| `overlength-code-meaning` | info | a label longer than 64 characters, read or written verbatim |
+
+An empty label (new or edited) is refused on write with `ValueError`. A Drawing-Plane must hold both points
+within 1 mm (refused on write; on read a failing one is exposed as `None` and written back verbatim), and a
+frame conversion (`transform`) must be rigid and moves both points and the plane. Retrieval keys an arrow as a
+Series Tag: by the series its image reference resolves to, a patient-domain arrow by its Source-Series.
+
+#### Character set
+Every document is written with Specific Character Set `ISO_IR 192` (UTF-8) whenever any text value in it is
+not ASCII, whatever the tool: labels, descriptions, texts, locations, header values. A document whose text is
+all ASCII is written as before, with the character set highdicom takes from the evidence.
+
 ### Points
 Two classes hold coordinates. Neither carries a unit: the API that returns a value states its role and unit.
 

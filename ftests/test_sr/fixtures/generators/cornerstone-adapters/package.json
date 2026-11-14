@@ -2,7 +2,7 @@
   "name": "sonador-io-cornerstone-adapter-fixtures",
   "version": "1.0.0",
   "private": true,
-  "description": "Writes the stock-adapter circle and bidirectional fixtures of ftests/test_sr. Run in node:16: npm i --legacy-peer-deps --ignore-scripts, then npx jest; the files are written to out/.",
+  "description": "Writes the stock-adapter circle, bidirectional and arrow fixtures of ftests/test_sr. Run in node:16: npm i --legacy-peer-deps --ignore-scripts, then npx jest; the files are written to out/.",
   "devDependencies": {
     "@babel/core": "7.26.10",
     "@babel/preset-env": "7.26.9",
