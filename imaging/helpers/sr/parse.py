@@ -33,7 +33,8 @@ from highdicom.sr import EnhancedSR, ComprehensiveSR, Comprehensive3DSR
 from highdicom.sr.templates import CodedConcept
 from highdicom.sr.enum import RelationshipTypeValues
 
-from ....apisettings.base import ReportGroup, ReportGroupCollection, ImageReference, \
+from ....apisettings.sr.frames import srdoc_frame_records, DCMSR_FRAME_CONTAINER, DCMSR_FRAME_DECLARATIONS
+from ....apisettings.base import ImageCoord, ReportGroup, ReportGroupCollection, ImageReference, \
 	DCMHEADER_SR_EVIDENCE_SEQUENCES, DCMHEADER_SR_REF_SERIES_SEQ, DCMHEADER_SR_REF_SOP_SEQ, DCMHEADER_SR_REF_INSTANCE_UID, \
 	DCMHEADER_SR_SOP_CLASS_UID, DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_STUDY_INSTANCE_UID, DCMHEADER_SOP_CLASS_UID, \
 	DCMHEADER_SOP_INSTANCE_UID, DCMHEADER_SR_VALUE_TYPE, DCMHEADER_PATIENT_ID, DCMHEADER_PATIENT_NAME, \
@@ -89,7 +90,13 @@ SRPredecessor = namedtuple('SRPredecessor', ('study_uid', 'series_uid', 'sop_cla
 # What the document-level reader found, handed to the report model constructor
 SRParsedDocument = namedtuple('SRParsedDocument', (
 	'dataset', 'highdicom', 'title', 'template_id', 'mapping_resource', 'procedures', 'person_observer',
-	'device_observer_uid', 'groups', 'extra_items', 'evidence', 'predecessors', 'diagnostics'))
+	'device_observer_uid', 'groups', 'extra_items', 'evidence', 'predecessors', 'diagnostics', 'frame_records',
+	'point_collections'))
+SRParsedDocument.__new__.__defaults__ = (None, ())
+
+# Point collection read from a document's Volume Measurements container: the group's tracking identity and
+# one SCOORD3D item, in the frame it names. The container itself is preserved as a root item.
+SRPointCollection = namedtuple('SRPointCollection', ('tracking_id', 'tracking_uid', 'graphic_type', 'points', 'frame_uid'))
 
 
 # Reading
@@ -491,8 +498,11 @@ def srdoc_parse(dcmsr, report_class, strict=False, diagnostics=None, calibration
 
 	# Root items: title, procedures, observers; everything TID 1500 does not own is preserved
 	title = CodedConcept.from_dataset(ds.ConceptNameCodeSequence[0], copy=True) if dcm_header_value(ds, 'ConceptNameCodeSequence') else None
-	procedures, person_observer, device_observer_uid, extra_items = [], None, None, []
+	procedures, person_observer, device_observer_uid, extra_items, frame_items = [], None, None, [], []
 	for item in srdoc_children(ds):
+		if srdoc_is_frame_record(item):
+			frame_items.append((item, len(extra_items)))
+			continue
 		if srcontent_is_named(item, DCMSR_ROOT_PROCEDURE_REPORTED) and dcm_header_value(item, DCMHEADER_SR_VALUE_TYPE) == 'CODE':
 			procedures.append(CodedConcept.from_dataset(item.ConceptCodeSequence[0], copy=True))
 		elif srcontent_is_named(item, dcmcodes.DCM.PersonObserverName) and dcm_header_value(item, DCMHEADER_SR_VALUE_TYPE) == 'PNAME':
@@ -522,13 +532,53 @@ def srdoc_parse(dcmsr, report_class, strict=False, diagnostics=None, calibration
 			_resolve_reference(measurement, evidence, diagnostics, strict)
 		groups.append(group)
 
+	frame_records, _ = srdoc_frame_records(ds, frame_items, extra_items)
 	parsed = SRParsedDocument(
 		dataset=ds, highdicom=highdicom_doc, title=title, template_id=template_id,
 		mapping_resource=mapping_resource or mapping_resource_for_template(template_id),
 		procedures=procedures, person_observer=person_observer, device_observer_uid=device_observer_uid,
 		groups=groups, extra_items=extra_items, evidence=evidence, predecessors=srdoc_predecessors(ds),
-		diagnostics=diagnostics)
+		diagnostics=diagnostics, frame_records=frame_records, point_collections=tuple(srdoc_point_collections(ds)))
+	kwargs.setdefault('frames_strict', strict)
 	return report_class._from_parsed(parsed, **kwargs)
+
+
+def srdoc_is_frame_record(item):
+	'''	Whether a root content item is a frame record: a `Sonador-ReferenceFrame` container or a root declaration
+		(`.Primary`, `.Legacy`, `.Unverified`). Frame records are read by `srdoc_frame_records`, not preserved as
+		opaque root items: containers are written back verbatim in their slots, declarations are regenerated.
+
+		@returns bool
+	'''
+	return (srcontent_is_named(item, DCMSR_FRAME_CONTAINER) and dcm_header_value(item, DCMHEADER_SR_VALUE_TYPE) == 'CONTAINER') \
+		or (any(srcontent_is_named(item, code) for code in DCMSR_FRAME_DECLARATIONS) and dcm_header_value(item, DCMHEADER_SR_VALUE_TYPE) == 'UIDREF')
+
+
+def srdoc_point_collections(ds):
+	'''	Point collections of a document's Volume Measurements container: one per SCOORD3D item of each group, with
+		the group's tracking identifier and UID and the frame the item names. Read only; the container is
+		preserved as a root item.
+
+		@returns list of SRPointCollection
+	'''
+	from ....apisettings.sr import DCMSR_REPORT_VOLUME_MEAUREMENTS
+	found = []
+	for container in srdoc_root_items(ds, DCMSR_REPORT_VOLUME_MEAUREMENTS):
+		for group in srdoc_children(container):
+			tracking_id = tracking_uid = None
+			for child in srdoc_children(group):
+				if srcontent_is_named(child, dcmcodes.DCM.TrackingIdentifier):
+					tracking_id = str(dcm_header_value(child, 'TextValue') or '') or None
+				elif srcontent_is_named(child, dcmcodes.DCM.TrackingUniqueIdentifier):
+					tracking_uid = str(dcm_header_value(child, 'UID') or '') or None
+			for child in srdoc_children(group):
+				if dcm_header_value(child, DCMHEADER_SR_VALUE_TYPE) != 'SCOORD3D':
+					continue
+				values = [float(v) for v in (dcm_header_value(child, 'GraphicData') or [])]
+				points = tuple(ImageCoord(*values[i:i + 3]) for i in range(0, len(values) - len(values) % 3, 3))
+				frame_uid = str(dcm_header_value(child, 'ReferencedFrameOfReferenceUID') or '') or None
+				found.append(SRPointCollection(tracking_id, tracking_uid, str(dcm_header_value(child, 'GraphicType') or ''), points, frame_uid))
+	return found
 
 
 def _resolve_reference(finding, evidence, diagnostics, strict):

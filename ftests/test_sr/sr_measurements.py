@@ -321,6 +321,24 @@ class FrameConversionTestCase(unittest.TestCase):
 		ds = ImageTransformMatrix(self.MATRIX, uid='2.25.7').sr
 		self.assertEqual(ds.FrameOfReferenceUID, '2.25.7')
 
+		# The whole Registration item, as written before reference frames were declared: tags, VRs, values, nesting
+		from ...apisettings.sr import DCMSR_COORDINATE_TRANSFORM
+		ds = ImageTransformMatrix(self.MATRIX, uid='2.25.7', comment='Planning frame', codes=[DCMSR_COORDINATE_TRANSFORM]).sr
+		expected = Dataset()
+		expected.FrameOfReferenceUID = '2.25.7'
+		code = Dataset()
+		code.CodeValue, code.CodingSchemeDesignator, code.CodingSchemeVersion, code.CodeMeaning = \
+			'SCoord3DTx', 'Sonador-SR', '0.2', '3D spatial coordinate transformation'
+		matrix = Dataset()
+		matrix.FrameOfReferenceTransformationMatrixType = 'RIGID'
+		matrix.FrameOfReferenceTransformationMatrix = [float(v) for v in np.asarray(self.MATRIX, dtype=float).flatten()]
+		registration = Dataset()
+		registration.ConceptNameCodeSequence = Sequence([code])
+		registration.MatrixSequence = Sequence([matrix])
+		registration.FrameOfReferenceTransformationComment = 'Planning frame'
+		expected.MatrixRegistrationSequence = Sequence([registration])
+		self.assertEqual(serialised(ds), serialised(expected))
+
 
 class CalibrationTestCase(unittest.TestCase):
 	def test_anisotropic_spacing_honoured(self):
@@ -1515,10 +1533,10 @@ class MeasurementRetrievalTestCase(unittest.TestCase):
 		self.assertEqual(self.pacs.count('GET'), 3)
 		before = len(self.pacs.requests)
 
-		# The image-domain length is keyed by its image's series, the patient-domain one by the document's series
-		self.assertEqual(set(by_series.keys()), set([CT_SERIES_UID, 'sx-src']))
-		image = by_series[CT_SERIES_UID]['length'][0]
-		patient = by_series['sx-src']['length'][0]
+		# The image-domain length is keyed by its image's series; the patient-domain one, without a Source-Series, by the
+		# series of its stored frame, which exactly one referenced series has (the frame accessor rule)
+		self.assertEqual(set(by_series.keys()), set([CT_SERIES_UID]))
+		patient, image = sorted(by_series[CT_SERIES_UID]['length'], key=lambda m: m.geometry.is_image)
 		self.assertEqual((image.tracking_uid, patient.tracking_uid), ('2.25.9301', TRACKING))
 
 		# Links, from the cache
@@ -1530,11 +1548,11 @@ class MeasurementRetrievalTestCase(unittest.TestCase):
 		self.assertIsNone(patient.instance)
 
 		# Shapes
-		self.assertEqual(len(self.study.measurements(CT_SERIES_UID, 'length')), 1)
-		self.assertEqual(sorted(self.study.measurements(measurement_type='length').keys()), sorted([CT_SERIES_UID, 'sx-src']))
+		self.assertEqual(len(self.study.measurements(CT_SERIES_UID, 'length')), 2)
+		self.assertEqual(sorted(self.study.measurements(measurement_type='length').keys()), [CT_SERIES_UID])
 		self.assertEqual(len(self.study.measurements('2.25.none', 'length')), 0)
 		series = next(sx for sx in self.study.series_collection if sx.pk == 'sx-ct')
-		self.assertEqual(len(series.measurements('length')), 1)
+		self.assertEqual(len(series.measurements('length')), 2)
 		self.assertEqual(self.study.findings(series.series_uid, 'series-tag')[0].type, 'series-tag')
 		self.assertEqual(len(self.pacs.requests), before)
 
@@ -1631,6 +1649,17 @@ def provenance_written(measurements, **kwargs):
 	'''
 	kwargs.setdefault('dcm_evidence', two_series_evidence())
 	return roundtrip(new_model([], measurements=list(measurements), **kwargs).create_sr(record_instances=True))
+
+
+def serialised(ds):
+	'''	Explicit VR little endian encoding of a dataset: tags, VRs, values and nesting
+	'''
+	from pydicom.filewriter import write_dataset
+	from pydicom.filebase import DicomBytesIO
+	out = DicomBytesIO()
+	out.is_little_endian, out.is_implicit_VR = True, False
+	write_dataset(out, ds)
+	return out.getvalue()
 
 
 def children_named(item, concept):

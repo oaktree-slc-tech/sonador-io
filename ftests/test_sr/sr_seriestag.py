@@ -992,7 +992,7 @@ class ReSaveTestCase(OracleMixin, unittest.TestCase):
 		from ...apisettings.base import VolumePointCollectionGroup, ImageCoord
 		model = SonadorComprehensiveSR3D.from_sr(LEGACY)
 		model.groups = list(model.groups) + [VolumePointCollectionGroup(
-			points=[ImageCoord(1.0, 2.0, 3.0)], tracking_id='points')]
+			points=[ImageCoord(1.0, 2.0, 3.0, reference_frame='2.25.880001')], tracking_id='points')]
 		resaved = roundtrip(model.create_sr())
 		self.assertEqual(str(resaved.SOPClassUID), DCMSR_SOP_CLASS_COMPREHENSIVE_3D)
 		self.assertEqual(srdoc_root_template(resaved), ('1500', 'DCMR'))

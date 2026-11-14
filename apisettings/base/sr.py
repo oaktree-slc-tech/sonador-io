@@ -3,6 +3,13 @@
 
 	* `SRDataObject` / `SRDataCollectionMember` / `SRDataObjectCollection`: base classes. Every object
 		encodes itself with `create_sr` and exposes the result as `.sr`, built on every access.
+	* Reference frames: `ReferenceFrame` (an imaging-backed frame, the Frame of Reference of a referenced series,
+		or an application frame with a name and the unit of its points), `FrameEdge` (a rigid matrix from a frame
+		to its single parent) and `FrameGraph`, the forest of frames a report holds. Paths use trusted and accepted
+		legacy edges, forwards or through their inverses, and never pass through a quarantined frame; `convert`,
+		`rotate`, `transform` and `representability` answer through them. Points are ingested once in the frame's
+		unit (`Unit`, `DCMSR_FRAME_UNITS`) and stored in millimetres. The wire format and the resolution rules are in
+		`sonador.apisettings.sr.frames`.
 	* Spatial data: `ImageTransformMatrix`, `ImageCoord` and their collections, and `PixelCoord`. The two
 		point classes carry no unit: `PixelCoord` is a `(column, row)` position on an image grid and
 		`ImageCoord` an `(x, y, z)` triple, a position or a direction; the API returning a value states
@@ -188,13 +195,93 @@ def _point_rows(points):
 	if rows.ndim != 2 or rows.shape[1] != 3:
 		raise ValueError('A frame conversion takes a sequence of (x, y, z) points; got an array of shape %s' % (rows.shape,))
 	return rows
-DCMSR_TRANSFORM_UNIT_SCALES = {'mm': 1.0, 'm': 1000.0}
+
+
+class Unit(namedtuple('Unit', ('ucum', 'to_mm'))):
+	'''	Length unit of the points a caller gives in a reference frame: a UCUM code and its factor to
+		millimetres. Stored geometry, matrix translations and conversion results are always millimetres;
+		the unit applies once, when caller points are ingested (`ReferenceFrame.to_mm`).
+
+		@property ucum (str): UCUM code (`mm`, `m`)
+		@property to_mm (float): millimetres per unit
+	'''
+	__slots__ = ()
+
+
+# Units of caller points, keyed by UCUM code
+DCMSR_UNIT_MM = Unit('mm', 1.0)
+DCMSR_UNIT_M = Unit('m', 1000.0)
+DCMSR_FRAME_UNITS = OrderedDict((unit.ucum, unit) for unit in (DCMSR_UNIT_MM, DCMSR_UNIT_M))
+DCMSR_TRANSFORM_UNIT_SCALES = OrderedDict((code, unit.to_mm) for code, unit in DCMSR_FRAME_UNITS.items())
+
+
+def frame_unit(unit):
+	'''	Registry entry of a length unit.
+
+		@input unit (str or Unit): UCUM code, or a registry entry
+		@returns Unit
+		@raises ValueError for a unit outside the registry
+	'''
+	code = unit.ucum if isinstance(unit, Unit) else unit
+	if code not in DCMSR_FRAME_UNITS:
+		raise ValueError('Unsupported unit: %s (supported: %s)' % (code, ', '.join(DCMSR_FRAME_UNITS)))
+	return DCMSR_FRAME_UNITS[code]
+
+
+# Matrix conventions: `column` is the DICOM layout (`p_target = M . [p_source, 1]`), `row` the row-vector
+# layout (`[p_target, 1] = [p_source, 1] . M`, translation in the fourth row), transposed on import
+DCMSR_MATRIX_CONVENTION_COLUMN = 'column'
+DCMSR_MATRIX_CONVENTION_ROW = 'row'
+DCMSR_MATRIX_CONVENTIONS = (DCMSR_MATRIX_CONVENTION_COLUMN, DCMSR_MATRIX_CONVENTION_ROW)
+
+# Rigid checks, in the order they are applied
+DCMSR_RIGID_CHECK_FINITE = 'finite values'
+DCMSR_RIGID_CHECK_HOMOGENEOUS = 'homogeneous row'
+DCMSR_RIGID_CHECK_ORTHONORMAL = 'orthonormal rotation'
+DCMSR_RIGID_CHECK_DETERMINANT = 'determinant +1'
+DCMSR_RIGID_CHECK_MESSAGES = {
+	DCMSR_RIGID_CHECK_FINITE: 'it fails the finite values check',
+	DCMSR_RIGID_CHECK_HOMOGENEOUS: 'it fails the homogeneous row check (bottom row must be 0 0 0 1)',
+	DCMSR_RIGID_CHECK_ORTHONORMAL: 'it fails the orthonormal rotation check (scale or shear is not rigid)',
+	DCMSR_RIGID_CHECK_DETERMINANT: 'it fails the determinant +1 check (a reflection is not rigid)',
+}
+
+
+def matrix_4x4(values):
+	'''	A transform as a 4x4 float array, from any layout `mtx4x4` accepts.
+
+		@input values (array-like): the matrix values
+		@returns numpy.ndarray of shape (4, 4)
+		@raises ValueError for a shape `mtx4x4` does not accept
+	'''
+	from ..sr import mtx4x4
+	return mtx4x4(np.asarray(values, dtype=float))
+
+
+def rigid_failure(matrix):
+	'''	First rigid check a 4x4 matrix fails, within `DCMSR_TRANSFORM_TOLERANCE`: finite values, bottom row
+		`0 0 0 1`, orthonormal rotation, determinant +1.
+
+		@input matrix (array-like of shape (4, 4))
+		@returns str (`DCMSR_RIGID_CHECK_*`), or None for a rigid matrix
+	'''
+	matrix = np.asarray(matrix, dtype=float)
+	if not np.all(np.isfinite(matrix)):
+		return DCMSR_RIGID_CHECK_FINITE
+	if not np.allclose(matrix[3], (0, 0, 0, 1), atol=DCMSR_TRANSFORM_TOLERANCE):
+		return DCMSR_RIGID_CHECK_HOMOGENEOUS
+	rotation = matrix[:3, :3]
+	if not np.allclose(rotation.dot(rotation.T), np.identity(3), atol=DCMSR_TRANSFORM_TOLERANCE):
+		return DCMSR_RIGID_CHECK_ORTHONORMAL
+	if abs(np.linalg.det(rotation) - 1.0) > DCMSR_TRANSFORM_TOLERANCE:
+		return DCMSR_RIGID_CHECK_DETERMINANT
+	return None
 
 
 class ImageTransformMatrix(SRDataCollectionMember):
 	''' Helper class for representing DICOM frame of reference frame transform matrices. The matrix is
 		a 4x4 in the DICOM Frame of Reference Transformation Matrix layout (row-major, column-vector
-		convention: `p_target = M . [p_source, 1]`).
+		convention: `p_target = M . [p_source, 1]`), whatever the convention it was given in.
 
 		`convert` and `invert` move points between frames. They accept rigid transforms only and
 		refuse any other with an error naming the check that failed. The translation of the matrix
@@ -202,23 +289,33 @@ class ImageTransformMatrix(SRDataCollectionMember):
 
 		@property source_frame (str or None): label or UID of the frame the points are given in
 		@property target_frame (str or None): Frame of Reference UID the points are converted to
-		@property source_unit (str): unit of the source points, `mm` or `m`
+		@property source_unit (str): unit of the source points, a UCUM code of `DCMSR_FRAME_UNITS`
 	'''
 	def __init__(self, txmatrix, uid=None, transform_type=None, comment=None,
-			fiducials=None, ref_images=None, source_frame=None, target_frame=None, source_unit='mm', **kwargs):
+			fiducials=None, ref_images=None, source_frame=None, target_frame=None, source_unit='mm',
+			convention=DCMSR_MATRIX_CONVENTION_COLUMN, **kwargs):
 		'''	Initialize transformation matrix
 
 			@input txmatrix (array-like): transform matrix (any layout `mtx4x4` accepts)
 			@input source_frame (str, default=None): label or UID of the source frame
 			@input target_frame (str, default=None): Frame of Reference UID of the target frame
 			@input source_unit (str, default='mm'): unit of the source points, `mm` or `m`
+			@input convention (str, default='column'): `column` for the DICOM layout, `row` for the
+				row-vector layout (translation in the fourth row), transposed on import
 
-			@raises ValueError for any other source unit
+			@raises ValueError for any other source unit or convention, or for a matrix that passes the rigid
+				checks only under the other convention (`frame-convention-ambiguous`; both results named)
 		'''
 		super().__init__(object_type=transform_type, **kwargs)
 
 		if source_unit not in DCMSR_TRANSFORM_UNIT_SCALES:
-			raise ValueError('Unsupported source unit: %s (supported: mm, m)' % source_unit)
+			raise ValueError('Unsupported source unit: %s (supported: %s)' % (source_unit, ', '.join(DCMSR_TRANSFORM_UNIT_SCALES)))
+		if convention not in DCMSR_MATRIX_CONVENTIONS:
+			raise ValueError('Unsupported matrix convention: %s (supported: %s)' % (convention, ', '.join(DCMSR_MATRIX_CONVENTIONS)))
+
+		if convention == DCMSR_MATRIX_CONVENTION_ROW:
+			txmatrix = matrix_4x4(txmatrix).T
+		self._check_convention(txmatrix, convention)
 
 		self._matrix = txmatrix
 		self._uid = uid
@@ -228,6 +325,48 @@ class ImageTransformMatrix(SRDataCollectionMember):
 		self.source_frame = source_frame
 		self.target_frame = target_frame
 		self.source_unit = source_unit
+		self.convention = convention
+
+	@staticmethod
+	def _check_convention(txmatrix, convention):
+		'''	Refuse a matrix that is rigid only under the other convention: the client never guesses.
+
+			@input txmatrix (array-like): the matrix in the DICOM layout, after import
+			@input convention (str): the convention it was given in
+			@raises ValueError naming the check each convention gives (`frame-convention-ambiguous`)
+		'''
+		try:
+			stored = matrix_4x4(txmatrix)
+		except ValueError:
+			return
+		given = rigid_failure(stored)
+		other = rigid_failure(stored.T)
+		if given is not None and other is None:
+			from ..sr import SR_CONDITION_FRAME_CONVENTION_AMBIGUOUS
+			alternative = DCMSR_MATRIX_CONVENTION_ROW if convention == DCMSR_MATRIX_CONVENTION_COLUMN else DCMSR_MATRIX_CONVENTION_COLUMN
+			raise ValueError('%s: the matrix given in the %s convention fails the %s check; read in the %s convention it '
+				'passes every rigid check. Pass convention=%r if that is the layout it is in.'
+				% (SR_CONDITION_FRAME_CONVENTION_AMBIGUOUS, convention, given, alternative, alternative))
+
+	@classmethod
+	def from_translation_unit(cls, txmatrix, unit, **kwargs):
+		'''	Matrix whose translation is given in another unit, converted to millimetres once: the three
+			translation components are scaled by the unit's factor and the rotation is left as it is.
+
+			@input txmatrix (array-like): the matrix, in the layout `convention` names (default `column`)
+			@input unit (str or Unit): unit of the translation, a UCUM code of `DCMSR_FRAME_UNITS`
+			@input kwargs: further `ImageTransformMatrix` arguments
+
+			@returns ImageTransformMatrix with a millimetre translation
+			@raises ValueError for a unit outside the registry
+		'''
+		scale = frame_unit(unit).to_mm
+		matrix = matrix_4x4(txmatrix)
+		if kwargs.get('convention', DCMSR_MATRIX_CONVENTION_COLUMN) == DCMSR_MATRIX_CONVENTION_ROW:
+			matrix[3, :3] = matrix[3, :3] * scale
+		else:
+			matrix[:3, 3] = matrix[:3, 3] * scale
+		return cls(matrix, **kwargs)
 
 	def rigid_matrix(self):
 		'''	The matrix as a 4x4 array, after checking that it is rigid: bottom row `0 0 0 1`, an
@@ -237,18 +376,22 @@ class ImageTransformMatrix(SRDataCollectionMember):
 			@raises ValueError naming the failed check (`finite values`, `homogeneous row`, `orthonormal
 				rotation` for scale or shear, `determinant +1` for a reflection)
 		'''
-		from ..sr import mtx4x4
-		matrix = mtx4x4(np.asarray(self._matrix, dtype=float))
-		if not np.all(np.isfinite(matrix)):
-			raise ValueError('Transform refused: it fails the finite values check')
-		if not np.allclose(matrix[3], (0, 0, 0, 1), atol=DCMSR_TRANSFORM_TOLERANCE):
-			raise ValueError('Transform refused: it fails the homogeneous row check (bottom row must be 0 0 0 1)')
-		rotation = matrix[:3, :3]
-		if not np.allclose(rotation.dot(rotation.T), np.identity(3), atol=DCMSR_TRANSFORM_TOLERANCE):
-			raise ValueError('Transform refused: it fails the orthonormal rotation check (scale or shear is not rigid)')
-		if abs(np.linalg.det(rotation) - 1.0) > DCMSR_TRANSFORM_TOLERANCE:
-			raise ValueError('Transform refused: it fails the determinant +1 check (a reflection is not rigid)')
+		matrix = matrix_4x4(self._matrix)
+		failed = rigid_failure(matrix)
+		if failed is not None:
+			raise ValueError('Transform refused: %s' % DCMSR_RIGID_CHECK_MESSAGES[failed])
 		return matrix
+
+	@property
+	def rigid_check(self):
+		'''	First rigid check the matrix fails.
+
+			@returns str (`DCMSR_RIGID_CHECK_*`), or None for a rigid matrix
+		'''
+		try:
+			return rigid_failure(matrix_4x4(self._matrix))
+		except ValueError:
+			return DCMSR_RIGID_CHECK_FINITE
 
 	def convert(self, points):
 		'''	Convert points from the source frame to the target frame. Points in metres are scaled to
@@ -320,7 +463,8 @@ class ImageTransformMatrix(SRDataCollectionMember):
 
 
 class ImageTransformMatrixCollection(SRDataObjectCollection):
-	''' Collection of reference frame transform matrices
+	''' Collection of reference frame transform matrices: the matrices of a report's declared edges
+		(`SonadorComprehensiveSR3D.reference_frames`).
 	'''
 	model = ImageTransformMatrix
 	object_type_attr = 'transform_type'
@@ -404,12 +548,15 @@ class ImageCoord(SRDataCollectionMember):
 
 		A point of a point collection (`ImageCoordCollection`, `VolumePointCollectionGroup`) may also carry
 		a `reference_frame`, `name` and `point_type`, written by `create_sr`; they take no part in equality.
+		`reference_frame` names the frame the point is stored in: a `ReferenceFrame`, an `ImageTransformMatrix`
+		(its `uid`) or a Frame of Reference UID (`frame_uid`).
 	'''
 	def __init__(self, x, y, z, reference_frame=None, name=None, point_type=None, **kwargs):
 		'''	Initialize the coordinate.
 
 			@input x, y, z (number): the coordinates
-			@input reference_frame (ImageTransformMatrix, default=None): frame of a collection point
+			@input reference_frame (ReferenceFrame, ImageTransformMatrix or str, default=None): frame of a
+				collection point
 			@input name (Code, default=None): concept name of a collection point
 			@input point_type (str, default=None): graphic type of a collection point
 		'''
@@ -447,6 +594,14 @@ class ImageCoord(SRDataCollectionMember):
 	@property
 	def reference_frame(self):
 		return self._ref_frame
+
+	@property
+	def frame_uid(self):
+		'''	Frame of Reference UID of a collection point (`frame_reference_uid`).
+
+			@returns str or None
+		'''
+		return frame_reference_uid(self._ref_frame)
 
 	def __iter__(self):
 		yield from self._pts
@@ -487,11 +642,40 @@ class ImageCoord(SRDataCollectionMember):
 	def __str__(self):
 		return '(x=%s,y=%s,z=%s)' % self._pts
 
-	def create_sr(self, **kwargs):
+	def create_sr(self, frame_uid=None, **kwargs):
+		'''	SCOORD3D item of the point, in its own frame or, without one, in `frame_uid`.
+
+			@input frame_uid (str, default=None): frame of a point that names none (a report passes its primary)
+			@returns highdicom.sr.Scoord3DContentItem
+			@raises ValueError for a point with no frame and no `frame_uid`
+		'''
 		from ..sr import srencode_coord3d
-		return srencode_coord3d(
-			self.reference_frame.uid if self.reference_frame else generate_uid(), self, 
-			name=self.name, point_type=self.type, **kwargs)
+		return srencode_coord3d(_point_frame(self, frame_uid), self, name=self.name, point_type=self.type, **kwargs)
+
+
+def frame_reference_uid(reference_frame):
+	'''	Frame of Reference UID named by a point's `reference_frame`.
+
+		@input reference_frame (ReferenceFrame, ImageTransformMatrix, str or None)
+		@returns str or None
+	'''
+	if reference_frame is None:
+		return None
+	if isinstance(reference_frame, str):
+		return reference_frame or None
+	return getattr(reference_frame, 'uid', None) or None
+
+
+def _point_frame(points, frame_uid=None):
+	'''	Frame a point or point collection is written in: its own, else `frame_uid`.
+
+		@raises ValueError when neither exists: a point is never written in a frame minted for it alone
+	'''
+	uid = points.frame_uid or frame_uid
+	if not uid:
+		raise ValueError('Points without a frame: set `reference_frame` to a frame of the report, or write them through a '
+			'report whose primary imaging frame resolves (they are then placed in the primary)')
+	return uid
 
 
 class ImageCoordCollection(SRDataObjectCollection):
@@ -511,13 +695,15 @@ class ImageCoordCollection(SRDataObjectCollection):
 
 		return super()._init_collection_models(*args, **kwargs)
 
-	def create_sr(self, **kwargs):
-		'''	Create a DICOM-SR encoded representation of the collection
+	def create_sr(self, frame_uid=None, **kwargs):
+		'''	SCOORD3D item of the collection, in its own frame or, without one, in `frame_uid`.
+
+			@input frame_uid (str, default=None): frame of a collection that names none (a report passes its primary)
+			@returns highdicom.sr.Scoord3DContentItem
+			@raises ValueError for a collection with no frame and no `frame_uid`
 		'''
 		from ..sr import srencode_coord3d
-		return srencode_coord3d(
-			self.reference_frame.uid if self.reference_frame else generate_uid(), self, 
-			name=self.name, point_type=self.type, **kwargs)
+		return srencode_coord3d(_point_frame(self, frame_uid), self, name=self.name, point_type=self.type, **kwargs)
 
 	@property
 	def array(self):
@@ -534,8 +720,515 @@ class ImageCoordCollection(SRDataObjectCollection):
 		return self._ref_frame
 
 	@property
+	def frame_uid(self):
+		'''	Frame of Reference UID the collection's points are stored in (`frame_reference_uid`).
+
+			@returns str or None
+		'''
+		return frame_reference_uid(self._ref_frame)
+
+	@property
 	def name(self):
 		return self._name
+
+
+# Reference frames and the frame graph
+
+# Edge states: a trusted edge and an accepted legacy edge carry paths; an unverified one carries none
+DCMSR_FRAME_EDGE_TRUSTED = 'trusted'
+DCMSR_FRAME_EDGE_UNVERIFIED = 'unverified'
+DCMSR_FRAME_EDGE_LEGACY = 'legacy'
+DCMSR_FRAME_EDGE_USABLE = frozenset((DCMSR_FRAME_EDGE_TRUSTED, DCMSR_FRAME_EDGE_LEGACY))
+
+# Representability of geometry against a target frame
+DCMSR_FRAME_NATIVE = 'native'
+DCMSR_FRAME_REGISTERED = 'registered'
+DCMSR_FRAME_UNREGISTERED = 'unregistered'
+DCMSR_FRAME_NOT_APPLICABLE = 'not-applicable'
+
+# Evidence a document holds for a frame UID
+DCMSR_FRAME_EVIDENCE_REFERENCE = 'reference'
+DCMSR_FRAME_EVIDENCE_CONTAINER = 'container'
+DCMSR_FRAME_EVIDENCE_ITEM = 'item'
+DCMSR_FRAME_EVIDENCE_DECLARATION = 'declaration'
+DCMSR_FRAME_EVIDENCE_MENTION = 'mention'
+
+# Where a frame's name comes from: its own valid container, or the Transformation Comment of its item
+# (kept internally, never displayed)
+DCMSR_FRAME_NAME_CONTAINER = 'container'
+DCMSR_FRAME_NAME_COMMENT = 'comment'
+
+
+class FrameConversionError(ValueError):
+	'''	A conversion, a representability query or a write policy refused for want of a trusted path.
+
+		@property reason (str): why there is no path: `no trusted path`, `quarantined`, `no target`, `unknown-frame`, or the
+			reason of the source's unverified edge
+		@property source_uid, target_uid (str or None): the frames involved
+	'''
+	def __init__(self, message, reason=None, source_uid=None, target_uid=None):
+		super().__init__(message)
+		self.reason = reason
+		self.source_uid = source_uid
+		self.target_uid = target_uid
+
+
+class ReferenceFrame(SRDataCollectionMember):
+	'''	Coordinate frame of patient-domain geometry: a node of the frame graph.
+
+		An **imaging-backed** frame is the Frame of Reference of an imaging series the report references; its
+		UID is that series' Frame of Reference UID and its unit is millimetres. An **application** frame has a
+		UID minted once (or supplied by the caller), a name, an optional coded identity and description, and the
+		unit the caller's points are given in. Stored geometry is always in millimetres; `to_mm` ingests caller
+		points once.
+
+		@property uid (str): Frame of Reference UID
+		@property name (str or None): display name, required for an application frame
+		@property name_source (str or None): `container` or `comment` (an item's Transformation Comment, internal only)
+		@property code (Code or None): coded identity
+		@property unit (Unit): unit of the caller's points
+		@property description (str or None)
+		@property imaging_backed (bool): the Frame of Reference of a referenced imaging series
+		@property is_primary (bool): the primary imaging frame of the graph
+		@property parent_uid (str or None): declared parent; None for a root
+		@property evidence (set of str): `reference`, `container`, `item`, `declaration`, `mention`
+		@property established (bool): has a record of its own (a referenced series, or its own valid container);
+			only an established frame can be the target of an edge
+		@property quarantined (bool): an input `.Unverified` declaration or quarantine determined by this read;
+			excluded from every cross-frame path in either direction, sticky until the caller re-declares the frame
+		@property reason (str or None): reason of the frame's classification when it is not trusted
+		@property imported (bool): read from a document (its records are retained and written back as read)
+	'''
+	def __init__(self, uid=None, name=None, unit=DCMSR_UNIT_MM, code=None, description=None, imaging_backed=False,
+			parent_uid=None, **kwargs):
+		'''	@input uid (str, default=new UID for an application frame): Frame of Reference UID; required for an
+				imaging-backed frame
+			@input name (str, default=None): display name
+			@input unit (str or Unit, default='mm'): unit of the caller's points; imaging-backed frames are `mm`
+			@input code (Code, default=None): coded identity
+			@input description (str, default=None)
+			@input imaging_backed (bool, default=False)
+			@input parent_uid (str, default=None): declared parent (set by `FrameGraph.add_edge`)
+
+			@raises ValueError for an imaging-backed frame without a UID or with a unit other than `mm`, or a
+				unit outside the registry
+		'''
+		super().__init__(**kwargs)
+		unit = frame_unit(unit)
+		if imaging_backed:
+			if not uid:
+				raise ValueError('An imaging-backed frame takes the Frame of Reference UID of its series; none given')
+			if unit != DCMSR_UNIT_MM:
+				raise ValueError('An imaging-backed frame is in millimetres; got %s' % unit.ucum)
+		self.uid = str(uid) if uid else generate_uid()
+		self.name = name
+		self.name_source = DCMSR_FRAME_NAME_CONTAINER if name else None
+		self.code = code
+		self.unit = unit
+		self.description = description
+		self.imaging_backed = bool(imaging_backed)
+		self.parent_uid = parent_uid
+		self.evidence = set((DCMSR_FRAME_EVIDENCE_REFERENCE,)) if imaging_backed else set()
+		self.established = True
+		self.quarantined = False
+		self.reason = None
+		self.imported = False
+		self.graph = None
+
+	@property
+	def is_primary(self):
+		return self.graph is not None and self.graph.primary_uid == self.uid
+
+	def to_mm(self, points):
+		'''	Ingest caller points given in the frame's unit: millimetre points for geometry in this frame.
+
+			@input points (sequence of (x, y, z))
+			@returns tuple of ImageCoord, in millimetres
+		'''
+		return tuple(ImageCoord(*(float(c) * self.unit.to_mm for c in p)) for p in _point_rows(points))
+
+	def from_mm(self, points):
+		'''	Millimetre points of this frame expressed in the frame's unit.
+
+			@input points (sequence of (x, y, z)): millimetres
+			@returns tuple of ImageCoord, in `unit`
+		'''
+		return tuple(ImageCoord(*(float(c) / self.unit.to_mm for c in p)) for p in _point_rows(points))
+
+	def __repr__(self):
+		return 'ReferenceFrame(uid=%r, name=%r, imaging_backed=%r, parent_uid=%r)' % (self.uid, self.name, self.imaging_backed, self.parent_uid)
+
+	def create_sr(self, **kwargs):
+		from ..sr.frames import srencode_frame_container
+		return srencode_frame_container(self, **kwargs)
+
+
+class FrameEdge:
+	'''	Declared edge of the frame graph: a rigid matrix mapping a frame to its single parent.
+
+		@property source_uid, target_uid (str): the frame and its parent
+		@property matrix (ImageTransformMatrix): millimetres, DICOM layout, source -> target
+		@property state (str): `trusted`, `unverified` or `legacy`
+		@property reason (str or None): reason of an unverified edge (`DCMSR_FRAME_REASON_*` of `sonador.apisettings.sr.frames`)
+		@property fiducials (pydicom.Sequence or None): Used Fiducials of an edge derived from landmark points
+		@property imported (bool): read from a document; its Registration item is written back as read
+		@property usable (bool): the edge may carry a path (trusted or accepted legacy)
+	'''
+	def __init__(self, source_uid, target_uid, matrix, state=DCMSR_FRAME_EDGE_TRUSTED, reason=None, fiducials=None, imported=False):
+		self.source_uid = source_uid
+		self.target_uid = target_uid
+		self.matrix = matrix
+		self.state = state
+		self.reason = reason
+		self.fiducials = fiducials
+		self.imported = imported
+
+	@property
+	def usable(self):
+		return self.state in DCMSR_FRAME_EDGE_USABLE and self.target_uid is not None
+
+	def __repr__(self):
+		return 'FrameEdge(%r -> %r, state=%r, reason=%r)' % (self.source_uid, self.target_uid, self.state, self.reason)
+
+
+class FrameGraph:
+	'''	Forest of reference frames connected by rigid edges. Answers, for any two frames, whether a path of
+		trusted (and accepted legacy) edges exists and what the composed transform is, traversing edges
+		backwards through their inverses. **A path never passes through a quarantined frame**, in any
+		position: source, target or an intermediate node. An exact frame match needs no path.
+
+		Built by the report from its references (imaging-backed frames) and, for a document, from its
+		Registration items, frame containers and declarations (`sonador.apisettings.sr.frames`); the caller
+		adds application frames and edges.
+
+		@property primary_uid (str or None): the primary imaging frame for this session
+		@property persisted_primary_uid (str or None): the valid `.Primary` read from the document
+		@property edges (OrderedDict): `source_uid -> FrameEdge`
+	'''
+	def __init__(self):
+		self._frames = OrderedDict()
+		self.edges = OrderedDict()
+		self.primary_uid = None
+		self.persisted_primary_uid = None
+		self.imaging_series = OrderedDict()		# Frame of Reference UID -> [Series Instance UID]
+		self.document = None					# imported records (`SRFrameRecords`) of a parsed document
+
+	# ---- frames ----
+
+	def __iter__(self):
+		return iter(self._frames.values())
+
+	def __len__(self):
+		return len(self._frames)
+
+	def __contains__(self, uid):
+		return getattr(uid, 'uid', uid) in self._frames
+
+	def frame(self, uid):
+		'''	@input uid (str or ReferenceFrame)
+			@returns ReferenceFrame, or None when the graph does not know the UID
+		'''
+		return self._frames.get(getattr(uid, 'uid', uid))
+
+	@property
+	def primary(self):
+		return self.frame(self.primary_uid) if self.primary_uid else None
+
+	@property
+	def imaging_frames(self):
+		return [f for f in self._frames.values() if f.imaging_backed]
+
+	def _put(self, frame):
+		frame.graph = self
+		self._frames[frame.uid] = frame
+		return frame
+
+	def add_imaging_frame(self, uid, series_uid=None):
+		'''	Record the Frame of Reference of a referenced imaging series. Several series sharing one UID are one
+			frame.
+
+			@input uid (str): Frame of Reference UID
+			@input series_uid (str, default=None): Series Instance UID of the series
+			@returns ReferenceFrame
+		'''
+		frame = self._frames.get(uid)
+		if frame is None:
+			frame = self._put(ReferenceFrame(uid, imaging_backed=True))
+		else:
+			frame.imaging_backed = True
+			frame.established = True
+			frame.evidence.add(DCMSR_FRAME_EVIDENCE_REFERENCE)
+		series = self.imaging_series.setdefault(uid, [])
+		if series_uid and series_uid not in series:
+			series.append(series_uid)
+		return frame
+
+	def add_frame(self, frame=None, **kwargs):
+		'''	Declare an application frame (a root until an edge is added). Re-declaring a frame read from a
+			document (after `remove_frame`) is how a caller lifts its quarantine: the writer then generates its
+			records afresh, with no status declaration.
+
+			@input frame (ReferenceFrame, default=a new frame from `kwargs`)
+			@input kwargs: `ReferenceFrame` arguments (`uid`, `name`, `unit`, `code`, `description`)
+
+			@returns ReferenceFrame
+			@raises SRDiagnosticError `frame-uid-collision` for a UID equal to an imaging-backed frame's, and
+				`frame-edge-invalid` for a UID the graph already holds, or an application frame without a name
+		'''
+		from ..sr import SRDiagnostic, SRDiagnosticError, SR_DIAGNOSTIC_ERROR, SR_CONDITION_FRAME_UID_COLLISION, SR_CONDITION_FRAME_EDGE_INVALID
+		frame = frame if frame is not None else ReferenceFrame(**kwargs)
+		existing = self._frames.get(frame.uid)
+		if existing is not None and existing.imaging_backed:
+			raise SRDiagnosticError(SRDiagnostic(SR_DIAGNOSTIC_ERROR, SR_CONDITION_FRAME_UID_COLLISION, None, frame.uid,
+				'Application frame %s has the UID of an imaging-backed frame; an application UID must be its own' % frame.uid))
+		if existing is not None and (existing.imported or existing.established):
+			raise SRDiagnosticError(SRDiagnostic(SR_DIAGNOSTIC_ERROR, SR_CONDITION_FRAME_EDGE_INVALID, None, frame.uid,
+				'Frame %s is already declared; remove it with `remove_frame` before declaring it again' % frame.uid))
+		if not frame.imaging_backed and not frame.name:
+			raise SRDiagnosticError(SRDiagnostic(SR_DIAGNOSTIC_ERROR, SR_CONDITION_FRAME_EDGE_INVALID, None, frame.uid,
+				'Application frame %s needs a name' % frame.uid))
+		frame.evidence = set((DCMSR_FRAME_EVIDENCE_CONTAINER,)) | ((existing.evidence & set((DCMSR_FRAME_EVIDENCE_MENTION,))) if existing else set())
+		frame.established = True
+		frame.quarantined = False
+		frame.reason = None
+		frame.imported = False
+		return self._put(frame)
+
+	def remove_frame(self, uid):
+		'''	Remove a frame and its outgoing edge from the graph, with the records read for it: its container, its
+			Registration item and its status declarations. Geometry and other frames that name it keep their
+			reference; declare the frame again (`add_frame`, `add_edge`) to replace it. An imaging-backed frame
+			keeps its node and loses its outgoing edge only.
+
+			@input uid (str or ReferenceFrame)
+			@returns ReferenceFrame or None: the frame removed
+		'''
+		uid = getattr(uid, 'uid', uid)
+		frame = self._frames.get(uid)
+		self.edges.pop(uid, None)
+		if self.document is not None:
+			self.document.drop(uid)
+		if frame is None:
+			return None
+		if frame.imaging_backed:
+			frame.parent_uid = None
+			frame.quarantined = False
+			frame.reason = None
+			frame.imported = False
+			frame.evidence = set((DCMSR_FRAME_EVIDENCE_REFERENCE,))
+			return frame
+		del self._frames[uid]
+		return frame
+
+	# ---- edges ----
+
+	def add_edge(self, matrix, source, target, convention=DCMSR_MATRIX_CONVENTION_COLUMN, fiducials=None):
+		'''	Declare the edge of a frame to its parent: a rigid matrix mapping the source frame to the target.
+
+			@input matrix (ImageTransformMatrix or array-like): millimetres, source -> target
+			@input source, target (str or ReferenceFrame): the frame and its parent, both in the graph
+			@input convention (str, default='column'): convention of an array-like `matrix` (see `ImageTransformMatrix`)
+			@input fiducials (pydicom.Sequence, default=the matrix's): Used Fiducials, for an edge derived from landmarks.
+				The matrix's image references and method codes are written with the edge as well.
+
+			@returns FrameEdge
+			An imported frame that is clean (a parentless root) is written afresh once it has an edge: its retained
+			container is replaced by the generated one. A quarantined frame must be re-declared first.
+
+			@raises SRDiagnosticError `frame-edge-invalid` before anything is encoded or the graph changes, for a source
+				or parent the graph does not hold (or a parent that is not established), a quarantined source, a second
+				parent, a cycle or a non-rigid matrix
+		'''
+		from ..sr import SRDiagnostic, SRDiagnosticError, SR_DIAGNOSTIC_ERROR, SR_CONDITION_FRAME_EDGE_INVALID
+		source_uid, target_uid = getattr(source, 'uid', source), getattr(target, 'uid', target)
+
+		def refuse(reason, message):
+			raise SRDiagnosticError(SRDiagnostic(SR_DIAGNOSTIC_ERROR, SR_CONDITION_FRAME_EDGE_INVALID, None, source_uid,
+				'Edge %s -> %s refused (%s): %s' % (source_uid, target_uid, reason, message)))
+
+		if not isinstance(matrix, ImageTransformMatrix):
+			matrix = ImageTransformMatrix(matrix, uid=source_uid, convention=convention)
+		source_frame, target_frame = self._frames.get(source_uid), self._frames.get(target_uid)
+		if source_frame is None:
+			refuse('no-parent', 'the source frame is not in the graph; add it first')
+		if source_frame.quarantined:
+			refuse('quarantined', 'the frame is quarantined; re-declare it first (`remove_frame`, then `add_frame`), which drops '
+				'its retained records and its quarantine')
+		if target_frame is None or not target_frame.established:
+			refuse('no-parent', 'the parent frame is not an established frame of the graph')
+		if source_uid == target_uid:
+			refuse('cycle', 'a frame cannot be its own parent')
+		if source_uid in self.edges:
+			refuse('second-parent', 'the frame already has a parent (%s); remove the frame and declare it again' % self.edges[source_uid].target_uid)
+		ancestor, seen = target_uid, set()
+		while ancestor is not None and ancestor not in seen:
+			if ancestor == source_uid:
+				refuse('cycle', 'the parent is a descendant of the frame')
+			seen.add(ancestor)
+			ancestor = self.edges[ancestor].target_uid if ancestor in self.edges else None
+		check = matrix.rigid_check
+		if check is not None:
+			refuse('non-rigid:%s' % check, DCMSR_RIGID_CHECK_MESSAGES[check])
+
+		fiducials = fiducials if fiducials is not None else matrix.fiducials
+		edge = FrameEdge(source_uid, target_uid, ImageTransformMatrix(matrix_4x4(matrix.matrix), uid=source_uid,
+			comment=matrix.comment or source_frame.name, fiducials=fiducials, ref_images=matrix.ref_images,
+			codes=matrix.codes, source_frame=source_uid, target_frame=target_uid), fiducials=fiducials)
+		self.edges[source_uid] = edge
+		source_frame.parent_uid = target_uid
+		if source_frame.imported:
+			# A clean imported frame given an edge is written afresh: its retained records are replaced by the
+			# generated container and item, so the document never holds two records for it
+			if self.document is not None:
+				self.document.drop(source_uid)
+			source_frame.imported = False
+			source_frame.reason = None
+			source_frame.evidence = (source_frame.evidence - set((DCMSR_FRAME_EVIDENCE_ITEM, DCMSR_FRAME_EVIDENCE_DECLARATION))) \
+				| set((DCMSR_FRAME_EVIDENCE_CONTAINER,))
+		return edge
+
+	def edge(self, source):
+		return self.edges.get(getattr(source, 'uid', source))
+
+	# ---- paths ----
+
+	def is_quarantined(self, uid):
+		frame = self._frames.get(uid)
+		return frame is not None and frame.quarantined
+
+	def path(self, source, target):
+		'''	Path of usable edges (trusted and accepted legacy) from `source` to `target`, each traversed forwards
+			(source -> parent) or backwards (through the inverse), through no quarantined frame and no frame the graph
+			no longer holds (a removed parent disconnects its children).
+
+			@input source, target (str or ReferenceFrame)
+			@returns
+				- list of (FrameEdge, bool forwards): the path; empty for the same frame
+				- None when no such path exists
+		'''
+		source_uid, target_uid = getattr(source, 'uid', source), getattr(target, 'uid', target)
+		if source_uid == target_uid:
+			return []
+		if source_uid not in self._frames or target_uid not in self._frames:
+			return None
+		if self.is_quarantined(source_uid) or self.is_quarantined(target_uid):
+			return None
+		adjacency = OrderedDict()
+		for edge in self.edges.values():
+			if not edge.usable or edge.source_uid not in self._frames or edge.target_uid not in self._frames:
+				continue
+			if self.is_quarantined(edge.source_uid) or self.is_quarantined(edge.target_uid):
+				continue
+			adjacency.setdefault(edge.source_uid, []).append((edge, True, edge.target_uid))
+			adjacency.setdefault(edge.target_uid, []).append((edge, False, edge.source_uid))
+		previous, queue = {source_uid: None}, [source_uid]
+		while queue:
+			node = queue.pop(0)
+			if node == target_uid:
+				steps = []
+				while previous[node] is not None:
+					edge, forwards, before = previous[node]
+					steps.append((edge, forwards))
+					node = before
+				return list(reversed(steps))
+			for edge, forwards, nxt in adjacency.get(node, ()):
+				if nxt not in previous:
+					previous[nxt] = (edge, forwards, node)
+					queue.append(nxt)
+		return None
+
+	def reachable(self, source):
+		'''	Frames reachable from `source` through usable edges and no quarantined frame, `source` excluded.
+
+			@returns list of str, in graph order
+		'''
+		source_uid = getattr(source, 'uid', source)
+		return [uid for uid in self._frames if uid != source_uid and self.path(source_uid, uid) is not None]
+
+	def _refusal(self, source_uid, target_uid):
+		'''	Reason a path is missing, for the refusal message: the source's own quarantine or unverified edge, a
+			quarantined target, else no trusted path.
+		'''
+		for uid in (source_uid, target_uid):
+			frame = self._frames.get(uid)
+			if frame is None:
+				return 'unknown-frame'
+		source = self._frames[source_uid]
+		if source.quarantined:
+			return 'quarantined'
+		edge = self.edges.get(source_uid)
+		if edge is not None and not edge.usable:
+			return edge.reason or 'unverified'
+		if self._frames[target_uid].quarantined:
+			return 'quarantined'
+		return 'no trusted path'
+
+	def transform(self, source, target):
+		'''	Composed rigid transform from `source` to `target` along `path`.
+
+			@returns ImageTransformMatrix: millimetres, source -> target
+			@raises FrameConversionError when no path exists (with the reason)
+		'''
+		source_uid, target_uid = getattr(source, 'uid', source), getattr(target, 'uid', target)
+		steps = self.path(source_uid, target_uid)
+		if steps is None:
+			reason = self._refusal(source_uid, target_uid)
+			raise FrameConversionError('No conversion from frame %s to frame %s: %s' % (source_uid, target_uid, reason),
+				reason=reason, source_uid=source_uid, target_uid=target_uid)
+		composed = np.identity(4)
+		for edge, forwards in steps:
+			matrix = edge.matrix.rigid_matrix()
+			composed = (matrix if forwards else np.linalg.inv(matrix)).dot(composed)
+		failed = rigid_failure(composed)
+		if failed is not None:
+			raise FrameConversionError('The composed transform from %s to %s %s' % (source_uid, target_uid, DCMSR_RIGID_CHECK_MESSAGES[failed]),
+				reason='non-rigid:%s' % failed, source_uid=source_uid, target_uid=target_uid)
+		return ImageTransformMatrix(composed, source_frame=source_uid, target_frame=target_uid)
+
+	def convert(self, points, source, target):
+		'''	Points of `source` expressed in `target`, both in millimetres.
+
+			@input points (sequence of (x, y, z)): millimetres, in `source`
+			@returns tuple of ImageCoord
+			@raises FrameConversionError when no path exists
+		'''
+		return self.transform(source, target).convert(points)
+
+	def rotate(self, directions, source, target):
+		'''	Directions of `source` expressed in `target` (rotation only, never scaled).
+
+			@returns tuple of ImageCoord
+			@raises FrameConversionError when no path exists
+		'''
+		return self.transform(source, target).rotate_directions(directions)
+
+	def resolve_target(self, target=None):
+		'''	Target of a target-dependent call: the one given, else the primary.
+
+			@returns str
+			@raises FrameConversionError (`no target`) when neither exists
+		'''
+		target_uid = getattr(target, 'uid', target)
+		if target_uid:
+			return target_uid
+		if self.primary_uid:
+			return self.primary_uid
+		raise FrameConversionError('frame-primary-unresolved: the report has no primary imaging frame; pass `target`',
+			reason='no target')
+
+	def representability(self, frame_uid, target=None):
+		'''	State of geometry stored in `frame_uid` against a target frame.
+
+			@input frame_uid (str or ReferenceFrame)
+			@input target (str or ReferenceFrame, default=the primary)
+			@returns str: `native`, `registered` (a usable path through no quarantined frame) or `unregistered`
+			@raises FrameConversionError (`no target`) without a target or a primary
+		'''
+		target_uid = self.resolve_target(target)
+		frame_uid = getattr(frame_uid, 'uid', frame_uid)
+		if frame_uid == target_uid:
+			return DCMSR_FRAME_NATIVE
+		return DCMSR_FRAME_REGISTERED if self.path(frame_uid, target_uid) is not None else DCMSR_FRAME_UNREGISTERED
 
 
 # Image referenced by a finding: one SOP instance (frame number only for multiframe classes) and the
@@ -826,7 +1519,7 @@ def drawing_plane_vectors(plane):
 	return ImageCoord(*values[:3]), ImageCoord(*values[3:])
 
 
-class Geometry(namedtuple('Geometry', ('domain', 'graphic_type', 'points', 'reference'))):
+class Geometry(namedtuple('Geometry', ('domain', 'graphic_type', 'points', 'reference', 'frame_uid'))):
 	'''	Coordinates a measurement was made from. The domain read from a document is the domain written
 		back: image coordinates are never promoted to patient coordinates.
 
@@ -837,11 +1530,14 @@ class Geometry(namedtuple('Geometry', ('domain', 'graphic_type', 'points', 'refe
 			pixel positions (`PixelCoord`) or `(x, y, z)` patient positions in millimetres (`ImageCoord`)
 		@property reference (ImageReference or None): referenced SOP instance and frame of the image
 			domain; None in the patient domain
+		@property frame_uid (str or None): Frame of Reference UID the patient-domain points are stored in (the
+			SCOORD3D `ReferencedFrameOfReferenceUID`): an imaging-backed or an application frame; None in the
+			image domain. A measurement or arrow stamps its `frame_of_reference_uid` on the geometry it returns.
 		@property array (numpy.ndarray): the points as a new float array of shape `(N, 2)` or `(N, 3)`
 	'''
 	__slots__ = ()
 
-	def __new__(cls, domain, graphic_type, points, reference=None):
+	def __new__(cls, domain, graphic_type, points, reference=None, frame_uid=None):
 		'''	Validate and normalise the coordinates.
 
 			@input domain (str): `DCMSR_GEOMETRY_DOMAIN_IMAGE` or `DCMSR_GEOMETRY_DOMAIN_PATIENT`
@@ -850,6 +1546,7 @@ class Geometry(namedtuple('Geometry', ('domain', 'graphic_type', 'points', 'refe
 				ordered points. They are stored as `PixelCoord` (image domain) or `ImageCoord` (patient domain);
 				the SR attributes of an input `ImageCoord` (frame, name, point type) are not kept.
 			@input reference (ImageReference, default=None): image the points were drawn on
+			@input frame_uid (str, default=None): frame of patient-domain points; ignored in the image domain
 
 			@returns Geometry
 			@raises ValueError for an unknown domain, points of the wrong dimension for the domain, or a
@@ -864,12 +1561,13 @@ class Geometry(namedtuple('Geometry', ('domain', 'graphic_type', 'points', 'refe
 		if not all(math.isfinite(c) for point in values for c in point):
 			raise ValueError('Measurement coordinates must be finite: %s' % (values,))
 		point_class = PixelCoord if dimension == 2 else ImageCoord
-		return super().__new__(cls, domain, str(graphic_type), tuple(point_class(*point) for point in values), reference)
+		frame_uid = str(frame_uid) if (frame_uid and dimension == 3) else None
+		return super().__new__(cls, domain, str(graphic_type), tuple(point_class(*point) for point in values), reference, frame_uid)
 
 	def _replace(self, **kwargs):
 		'''	Same geometry with some fields replaced, validated and normalised like a new one.
 
-			@input kwargs: `domain`, `graphic_type`, `points` or `reference`
+			@input kwargs: `domain`, `graphic_type`, `points`, `reference` or `frame_uid`
 			@returns Geometry
 		'''
 		fields = self._asdict()
@@ -899,7 +1597,19 @@ class Geometry(namedtuple('Geometry', ('domain', 'graphic_type', 'points', 'refe
 			@input points (iterable of sequences of numbers): the new points
 			@returns Geometry
 		'''
-		return type(self)(self.domain, self.graphic_type, points, self.reference)
+		return type(self)(self.domain, self.graphic_type, points, self.reference, self.frame_uid)
+
+
+def _stamp_frame(geometry, frame_uid):
+	'''	Geometry whose patient-domain points name `frame_uid`.
+
+		@input geometry (Geometry or None)
+		@input frame_uid (str or None): the owner's Frame of Reference UID
+		@returns Geometry or None: `geometry` itself when it already names that frame
+	'''
+	if geometry is None or not geometry.is_patient or geometry.frame_uid == (str(frame_uid) if frame_uid else None):
+		return geometry
+	return geometry._replace(frame_uid=frame_uid)
 
 
 class ImageFrameGeometry(namedtuple('ImageFrameGeometry', ('position', 'orientation', 'pixel_spacing', 'pixel_aspect'))):
@@ -1089,7 +1799,7 @@ class Measurement(_DisplayAttributesMixin, SRDataCollectionMember):
 		self._reference = None
 		if reference is not None:
 			self.reference = reference
-		self.frame_of_reference_uid = frame_of_reference_uid
+		self.frame_of_reference_uid = frame_of_reference_uid or (geometry.frame_uid if geometry is not None else None)
 		self._series_uid = series_uid
 		self.description = description
 		self.text = text
@@ -1206,6 +1916,11 @@ class Measurement(_DisplayAttributesMixin, SRDataCollectionMember):
 
 	@property
 	def geometry(self):
+		'''	Coordinates of the measurement, with `frame_of_reference_uid` as the frame of patient-domain points.
+
+			@returns Geometry or None
+		'''
+		self._geometry = _stamp_frame(self._geometry, self.frame_of_reference_uid)
 		return self._geometry
 
 	@geometry.setter
@@ -1213,6 +1928,8 @@ class Measurement(_DisplayAttributesMixin, SRDataCollectionMember):
 		self._check_geometry(val)
 		if self._drawing_plane is not None and (val is None or not val.is_patient):
 			raise ValueError('A measurement with a drawing plane needs patient-domain geometry; clear `drawing_plane` first')
+		if val is not None and val.frame_uid:
+			self.frame_of_reference_uid = val.frame_uid
 		self._geometry = val
 
 	@property
@@ -1440,9 +2157,10 @@ class GeometricMeasurement(Measurement):
 		were edited since it was read recomputes at write; degenerate geometry is refused at write.
 		Subclasses state the tool (`default_type`), the concept and the number of encoded points.
 
-		Patient-domain points are in millimetres in the imaging series' Frame of Reference. Points
-		supplied in another frame are converted once, at construction, with `transform`: the document
-		never carries geometry in any other frame.
+		Patient-domain points are in millimetres in the frame `frame_of_reference_uid` names: the imaging
+		series' Frame of Reference or an application frame of the report (`FrameGraph`). Points supplied in
+		another frame can be converted once, at construction, with `transform`; the report then records the
+		transform as an edge from its source frame to the target the caller gave.
 
 		@property points (tuple of PixelCoord or tuple of ImageCoord): the ordered encoded points, `(column, row)`
 			pixels or `(x, y, z)` millimetres; settable with any sequence of points (tuples, lists, numpy arrays
@@ -1502,6 +2220,7 @@ class GeometricMeasurement(Measurement):
 			domain = DCMSR_GEOMETRY_DOMAIN_IMAGE if len(points[0]) == 2 else DCMSR_GEOMETRY_DOMAIN_PATIENT
 			geometry = Geometry(domain, self.graphic_type, points, reference if domain == DCMSR_GEOMETRY_DOMAIN_IMAGE else None)
 
+		source_transform = kwargs.pop('source_transform', None)
 		if tracking_id is None:
 			from ..sr.seriestag import tracking_id_for_measurement_type
 			tracking_id = tracking_id_for_measurement_type(self.default_type)
@@ -1509,6 +2228,7 @@ class GeometricMeasurement(Measurement):
 			tracking_id=tracking_id, geometry=geometry, reference=None if geometry.is_image else reference,
 			frame_of_reference_uid=frame_of_reference_uid, **kwargs)
 		self.calibration = calibration
+		self.source_transform = transform if transform is not None else source_transform
 
 	@property
 	def points(self):
@@ -2185,7 +2905,7 @@ class CircleMeasurement(GeometricMeasurement):
 			raise ValueError('A patient-domain circle needs a normal or a drawing plane')
 		points = circle_ellipse_points(center, radius, normal, circle_first_axis(normal))
 		return cls(geometry=Geometry(DCMSR_GEOMETRY_DOMAIN_PATIENT, DCMSR_GRAPHIC_ELLIPSE, points),
-			frame_of_reference_uid=frame_of_reference_uid, drawing_plane=drawing_plane, reference=reference, **kwargs)
+			frame_of_reference_uid=frame_of_reference_uid, drawing_plane=drawing_plane, reference=reference, source_transform=transform, **kwargs)
 
 	@classmethod
 	def from_center_point(cls, center, point, normal=None, drawing_plane=None, transform=None, reference=None,
@@ -2222,7 +2942,7 @@ class CircleMeasurement(GeometricMeasurement):
 			raise ValueError('A circle radius must be at least %s; the point lies on the normal through the center' % DCMSR_CIRCLE_LENGTH_TOLERANCE)
 		points = circle_ellipse_points(center, radius, normal, in_plane / radius)
 		return cls(geometry=Geometry(DCMSR_GEOMETRY_DOMAIN_PATIENT, DCMSR_GRAPHIC_ELLIPSE, points),
-			frame_of_reference_uid=frame_of_reference_uid, drawing_plane=drawing_plane, reference=reference, **kwargs)
+			frame_of_reference_uid=frame_of_reference_uid, drawing_plane=drawing_plane, reference=reference, source_transform=transform, **kwargs)
 
 	@classmethod
 	def from_points(cls, p1, p2, p3, drawing_plane=None, transform=None, reference=None, frame_of_reference_uid=None, **kwargs):
@@ -2260,7 +2980,7 @@ class CircleMeasurement(GeometricMeasurement):
 		geometry = Geometry(DCMSR_GEOMETRY_DOMAIN_PATIENT, DCMSR_GRAPHIC_ELLIPSE,
 			circle_ellipse_points(circle['center'], circle['radius'], circle['normal'], u))
 		return cls(geometry=geometry, construction_points=points, frame_of_reference_uid=frame_of_reference_uid,
-			drawing_plane=drawing_plane, reference=reference, **kwargs)
+			drawing_plane=drawing_plane, reference=reference, source_transform=transform, **kwargs)
 
 	# ---- geometry ----
 
@@ -3331,9 +4051,10 @@ class ArrowAnnotation(Finding):
 		self._geometry = geometry
 		self._drawing_plane = None
 		self._drawing_plane_text = None
-		self.frame_of_reference_uid = frame_of_reference_uid
+		self.frame_of_reference_uid = frame_of_reference_uid or (geometry.frame_uid if geometry is not None else None)
 		self.calibration = calibration
 		self.views = tuple(views or ())
+		self.source_transform = None
 
 		# Parsed state: what the document held
 		self._parsed_points = None
@@ -3398,9 +4119,11 @@ class ArrowAnnotation(Finding):
 		graphic_type = DCMSR_GRAPHIC_POLYLINE if len(points) == 2 else DCMSR_GRAPHIC_POINT
 		geometry = Geometry(domain, graphic_type, points, reference if domain == DCMSR_GEOMETRY_DOMAIN_IMAGE else None)
 		finding = label if isinstance(label, (Code, CodedConcept)) else free_text_finding('' if label is None else label)
-		return cls(DCMSR_FINDING, finding, geometry=geometry, frame_of_reference_uid=frame_of_reference_uid, calibration=calibration,
+		arrow = cls(DCMSR_FINDING, finding, geometry=geometry, frame_of_reference_uid=frame_of_reference_uid, calibration=calibration,
 			drawing_plane=drawing_plane, series_uid=series_uid, description=description, text=text, location=location, display=display,
 			reference=None if domain == DCMSR_GEOMETRY_DOMAIN_IMAGE else reference, **kwargs)
+		arrow.source_transform = transform
+		return arrow
 
 	@classmethod
 	def from_sr(cls, item, group=None, strict=False, diagnostics=None, calibrations=None, **kwargs):
@@ -3499,6 +4222,11 @@ class ArrowAnnotation(Finding):
 
 	@property
 	def geometry(self):
+		'''	Coordinates of the arrow, with `frame_of_reference_uid` as the frame of patient-domain points.
+
+			@returns Geometry
+		'''
+		self._geometry = _stamp_frame(self._geometry, self.frame_of_reference_uid)
 		return self._geometry
 
 	@geometry.setter
@@ -3506,6 +4234,8 @@ class ArrowAnnotation(Finding):
 		self._check_geometry(val)
 		if self._drawing_plane is not None and not val.is_patient:
 			raise ValueError('An arrow with a drawing plane needs patient-domain geometry; clear `drawing_plane` first')
+		if val.frame_uid:
+			self.frame_of_reference_uid = val.frame_uid
 		self._geometry = val
 
 	@property
@@ -3973,8 +4703,25 @@ class VolumePointCollectionGroup(ReportGroup):
 	def sr_template(self, val):
 		self._sr_template = val		
 
-	def create_sr(self, **kwargs):
-		return super().create_sr(points=[p.sr for p in self.points], **kwargs)
+	@property
+	def frame_uids(self):
+		'''	Frames named by the group's points, in order, without repetition; None for points that name none.
+
+			@returns list of str or None
+		'''
+		found = []
+		for p in (self.points or []):
+			if p.frame_uid not in found:
+				found.append(p.frame_uid)
+		return found
+
+	def create_sr(self, frame_uid=None, **kwargs):
+		'''	Point collection group, each point or collection in its own frame or, without one, in `frame_uid`.
+
+			@input frame_uid (str, default=None): frame of points that name none (a report passes its primary)
+			@raises ValueError for points with no frame and no `frame_uid`
+		'''
+		return super().create_sr(points=[p.create_sr(frame_uid=frame_uid) for p in self.points], **kwargs)
 
 
 class ReportGroupCollection(SRDataObjectCollection):
