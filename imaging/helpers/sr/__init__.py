@@ -44,7 +44,7 @@ from client.errors import ConfigurationError
 from client.utils.object import pick, omit
 
 from ....apisettings.base import ImageTransformMatrix, ImageTransformMatrixCollection, \
-	ImageCoord, ImageCoordCollection, Finding, FindingCollection, Measurement, MeasurementCollection, \
+	ImageCoord, ImageCoordCollection, Finding, FindingCollection, Measurement, MeasurementCollection, ArrowAnnotation, \
 	ReportGroup, VolumePointCollectionGroup, ReportMetaGroup, ReportGroupCollection, ImageReference, \
 	SONADOR_SR, SONADOR_MANUFACTURER, SONADOR_IO, sonador_software_version, DCMTS_SERIES, \
 	DCMHEADER_SERIES_DESCRIPTION, DCMHEADER_SERIES_NUMBER, DCMHEADER_REGISTRATION_SEQUENCE, \
@@ -53,7 +53,7 @@ from ....apisettings.base import ImageTransformMatrix, ImageTransformMatrixColle
 from ....apisettings.sr import dcm_encode_reference_frame_transform_matrix, srencode_observation_context, \
 	DCMSR_SONADOR_DATA_REPORT, sr_diagnostic, SRDiagnostic, SRDiagnosticError, srcontent_extra_items, \
 	srcontent_is_by_reference, srcontent_holds_by_reference, SR_DIAGNOSTIC_INFO, SR_DIAGNOSTIC_WARNING, SR_DIAGNOSTIC_ERROR, \
-	SR_CONDITION_DOCUMENT_CLASS_UPGRADED, SR_CONDITION_BY_REFERENCE_ITEM, SR_CONDITION_EMPTY_REPORT_CONTENT
+	SR_CONDITION_DOCUMENT_CLASS_UPGRADED, SR_CONDITION_BY_REFERENCE_ITEM, SR_CONDITION_EMPTY_REPORT_CONTENT, _placeholder_num_values
 from ....apisettings.sr.seriestag import DCMSR_SUPPORTED_TEMPLATE_IDS, SONADOR_SR_TEMPLATE_ID, DCMR_TEMPLATE_ID, \
 	mapping_resource_for_template, DCMSR_LAYOUT_NESTED, DCMSR_SOP_CLASS_ENHANCED, srcontent_strip_unnamed, srencode_image_reference
 from ....serialization import ISO8601_DATETIME_FORMAT, DATETIME_FORMAT3, sonador_encode2str
@@ -128,6 +128,44 @@ def dcm_header_text(ds, name, default=None):
 	from ..headers import dcm_header_value
 	value = dcm_header_value(ds, name)
 	return default if value is None else str(value)
+
+
+# Character set written when a document holds text that is not ASCII (UTF-8), and the value
+# representations whose text it governs
+DCM_CHARACTER_SET_UTF8 = 'ISO_IR 192'
+DCM_CHARACTER_SET_TEXT_VRS = frozenset(('SH', 'LO', 'ST', 'LT', 'UC', 'UT', 'PN'))
+
+
+def srdoc_has_non_ascii_text(ds):
+	'''	Whether any text value of a dataset, at any depth of its sequences, holds a character outside ASCII.
+		Only the value representations the Specific Character Set governs are examined.
+
+		@input ds (pydicom.Dataset): the document
+		@returns bool
+	'''
+	for element in ds:
+		if element.VR == 'SQ':
+			if any(srdoc_has_non_ascii_text(item) for item in (element.value or [])):
+				return True
+			continue
+		if element.VR not in DCM_CHARACTER_SET_TEXT_VRS or element.value is None or isinstance(element.value, bytes):
+			continue
+		values = [element.value] if isinstance(element.value, str) or element.VM <= 1 else list(element.value)
+		if any(not str(value).isascii() for value in values):
+			return True
+	return False
+
+
+def srdoc_apply_character_set(ds):
+	'''	Set Specific Character Set `ISO_IR 192` (UTF-8) on a document whose text is not all ASCII
+		(`srdoc_has_non_ascii_text`); a document whose text is all ASCII is left as it is.
+
+		@input ds (pydicom.Dataset): the document, modified in place
+		@returns `ds`
+	'''
+	if srdoc_has_non_ascii_text(ds):
+		ds.SpecificCharacterSet = DCM_CHARACTER_SET_UTF8
+	return ds
 
 
 class SonadorBaseSR(metaclass=abc.ABCMeta):
@@ -714,6 +752,17 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 		return found
 
 	@property
+	def arrow_findings(self):
+		'''	Arrows of the model (`ArrowAnnotation`): those of `findings` first, then those of every group, in order.
+
+			@returns list of ArrowAnnotation
+		'''
+		found = [f for f in (self.findings or []) if isinstance(f, ArrowAnnotation)]
+		for group in (self.groups or []):
+			found.extend(f for f in (getattr(group, 'findings', None) or []) if isinstance(f, ArrowAnnotation))
+		return found
+
+	@property
 	def typed_measurements(self):
 		'''	Measurements of the model with a group identity (`Measurement.has_group_identity`): those of
 			`measurements` first, then those of every group, in order.
@@ -727,26 +776,28 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 	@property
 	def _image_referencing_items(self):
-		'''	Series Tag findings and image-domain measurements: the items whose image references are
-			recorded in the Image Library and the evidence.
+		'''	Series Tag findings, image-domain measurements and image-domain arrows: the items whose image
+			references are recorded in the Image Library and the evidence.
 
 			@returns list of Finding and Measurement
 		'''
 		measurements = [m for m in self.typed_measurements if m.geometry is not None and m.geometry.is_image]
-		return list(self.series_tag_findings) + measurements
+		arrows = [a for a in self.arrow_findings if a.geometry.is_image]
+		return list(self.series_tag_findings) + measurements + arrows
 
 	@property
 	def _source_series_measurements(self):
-		'''	Patient-domain measurements that name their imaging series, among every measurement the
-			report writes: those of `measurements` (typed, or generic ones written to the primary group)
-			and those of every report group. These are the measurements written with
-			`Sonador-Measurement.Source-Series`.
+		'''	Patient-domain measurements and arrows that name their imaging series, among every item the
+			report writes: the measurements of `measurements` (typed, or generic ones written to the primary
+			group) and of every report group, and the arrows (`arrow_findings`). These are the items written
+			with `Sonador-Measurement.Source-Series`.
 
-			@returns list of Measurement
+			@returns list of Measurement and ArrowAnnotation
 		'''
 		found = list(self.measurements or [])
 		for group in (self.groups or []):
 			found.extend(getattr(group, 'measurements', None) or [])
+		found.extend(self.arrow_findings)
 		return [m for m in found if m.geometry is not None and m.geometry.is_patient and m.series_uid]
 
 	def _known_series(self):
@@ -832,10 +883,10 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 	def _imaging_measurement_groups(self, **kwargs):
 		'''	Measurement groups of the report, in writing order. The measurements without a group identity
-			and the findings of `findings` that are not Series Tags form the "primary" group, placed
-			first. Each Series Tag finding of `findings` and each measurement with a group identity
-			becomes one TID 1501 group with its tracking identifier and tracking UID (generated when
-			absent). The report groups of `groups` follow as they are; the meta groups and the volume
+			and the findings of `findings` without a group identity form the "primary" group, placed
+			first. Each Series Tag finding and arrow of `findings` and each measurement with a group
+			identity becomes one TID 1501 group with its tracking identifier and tracking UID (generated
+			when absent). The report groups of `groups` follow as they are; the meta groups and the volume
 			point groups among them are written separately (`_meta_groups`,
 			`_volume_measurement_groups`). A report subclass contributes its own measurement groups by
 			extending this hook.
@@ -846,8 +897,8 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 		'''
 		groups = kwargs.get('groups', [])
 		findings = list(self.findings or [])
-		primary_findings = [f for f in findings if not f.is_series_tag]
-		tag_findings = [f for f in findings if f.is_series_tag]
+		primary_findings = [f for f in findings if not f.has_group_identity]
+		tag_findings = [f for f in findings if f.has_group_identity]
 		scalar_measurements = [m for m in (self.measurements or []) if not m.has_group_identity]
 		group_measurements = [m for m in (self.measurements or []) if m.has_group_identity]
 
@@ -1044,13 +1095,13 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 	def _assign_references(self):
 		'''	Set the image reference of every Series Tag finding that has none to the reference of its
-			series (`series_reference`), and the series of every image-domain measurement reference
-			that names none. Modifies the findings and measurements in place.
+			series (`series_reference`), and the series of every image-domain measurement and arrow
+			reference that names none. Modifies the findings and measurements in place.
 		'''
 		for finding in self.series_tag_findings:
 			if finding.reference is None or not finding.reference.sop_instance_uid:
 				finding.reference = self.series_reference(self._series_for_finding(finding))
-		for measurement in self.typed_measurements:
+		for measurement in self.typed_measurements + self.arrow_findings:
 			reference = measurement.reference
 			if measurement.geometry is not None and measurement.geometry.is_image and reference is not None and not reference.series_uid:
 				measurement.reference = reference._replace(series_uid=self._series_for_finding(measurement).series_uid)
@@ -1167,7 +1218,9 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			document_template=None, strict=False, **kwargs):
 		'''	Create the DICOM-SR document from the model data: the report content (`create_report_sr`),
 			the evidence, the document flags, the predecessor links, the root template and the series
-			headers. A re-save (a model built from a document) keeps the parsed document's study,
+			headers. Specific Character Set `ISO_IR 192` is set whenever a text value of the document is
+			not ASCII (`srdoc_apply_character_set`); an all-ASCII document keeps the one highdicom gives it.
+			A re-save (a model built from a document) keeps the parsed document's study,
 			series, flags, template and headers, and names the parsed document as a predecessor.
 
 			@input dcmsr_series_uid (str, default=the parsed document's series, else a new UID): Series
@@ -1285,6 +1338,13 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 		if dcmsr_series_number is None:
 			dcmsr_series_number = int(dcm_header_text(parsed, DCMHEADER_SERIES_NUMBER, 1) or 1) if parsed is not None else 1
 
+		# A preserved NUM item without a value (an empty Measured Value Sequence, legal in DICOM) cannot be read
+		# back by highdicom while it builds the document; it carries a placeholder value meanwhile and is
+		# written with its empty sequence, the document sharing the content items
+		without_value = []
+		for root in content:
+			_placeholder_num_values(root, without_value)
+
 		# Initialize SR document instance
 		_srdoc = document_class(
 			evidence=self.evidence, content=content,
@@ -1293,6 +1353,9 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 			manufacturer=self.dcmsr_document_manufacturer, is_complete=is_complete, is_final=is_final, is_verified=is_verified,
 			record_instances=record_instances or bool(self._image_referencing_items) or bool(source_references), **verifying,
 			**omit(kwargs, tuple(k for k in kwargs.keys() if 'report' in k or 'observation_context' in k or 'primary_group' in k)))
+
+		for num in without_value:
+			num.MeasuredValueSequence = DcmSequence()
 
 		# The image references are written without a concept name, as the Viewer does (the placeholder
 		# name is needed while highdicom collects the evidence; the document shares the item objects)
@@ -1315,6 +1378,10 @@ class SonadorComprehensiveSR3D(SonadorBaseSR):
 
 		# Apply series headers to report instance
 		self.dcmsr_series_headers(_srdoc, ts, **(series_headers_kwargs or {}))
+
+		# UTF-8 for a document with text that is not ASCII; an all-ASCII document keeps the character set
+		# highdicom gives it
+		srdoc_apply_character_set(_srdoc)
 		self._sr = _srdoc
 		return _srdoc
 

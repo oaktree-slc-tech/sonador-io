@@ -1422,7 +1422,7 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 			superseded revisions.
 
 			@input series_uid (str, default=None): imaging series to narrow to
-			@input measurement_type (str, default=None): measurement type to narrow to (`series-tag`)
+			@input measurement_type (str, default=None): measurement type to narrow to (`series-tag`, `arrow`)
 			@input kwargs: passed to `DcmSRInstanceCollection.findings` (`all_revisions`, `diagnostics`,
 				`strict`)
 			@returns
@@ -2397,7 +2397,7 @@ class ImagingSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 			one `file` GET per SR series of the study and later accesses none; without the child
 			instances, the instance collection of each SR series is fetched first.
 
-			@input measurement_type (str, default=None): measurement type to narrow to (`series-tag`)
+			@input measurement_type (str, default=None): measurement type to narrow to (`series-tag`, `arrow`)
 			@input kwargs: passed to `DcmSRInstanceCollection.findings` (`all_revisions`, `diagnostics`,
 				`strict`)
 			@returns

@@ -25,8 +25,9 @@
 	concept whose scheme version is present and is not 0.3 (an undefined scheme version) is read as
 	the registered concept, with the `undefined-scheme-version` warning, and rewritten at version 0.3.
 
-	The quantitative tools (Length, Angle, Cobb angle) are in `sonador.apisettings.sr.measurements`;
-	their tracking identifiers are registered here so that a group routes by one table.
+	The quantitative tools (Length, Angle, Cobb angle, Circle, Bidirectional) are in
+	`sonador.apisettings.sr.measurements` and the arrow annotations in `sonador.apisettings.sr.arrow`; their
+	tracking identifiers are registered here so that a group routes by one table.
 
 	Contents: the concept registry (`DCMSR_MEASUREMENT_META`, `DCMSR_DISPLAY_ATTRIBUTES`,
 	`DCMSR_DISPLAY_COLOR_ROLES`), the tracking identifier map (`SONADOR_MEASUREMENT_TYPES`), the root
@@ -140,6 +141,7 @@ SONADOR_MEASUREMENT_TYPES = OrderedDict((
 	('%s:%s' % (CORNERSTONE3D_TOOLS_SR_TAG, CORNERSTONE_TOOL_COBB_ANGLE), SONADOR_MEASUREMENT_TYPE_COBB_ANGLE),
 	('%s:%s' % (CORNERSTONE3D_TOOLS_SR_TAG, CORNERSTONE_TOOL_CIRCLE), SONADOR_MEASUREMENT_TYPE_CIRCLE),
 	('%s:%s' % (CORNERSTONE3D_TOOLS_SR_TAG, CORNERSTONE_TOOL_BIDIRECTIONAL), SONADOR_MEASUREMENT_TYPE_BIDIRECTIONAL),
+	('%s:%s' % (CORNERSTONE3D_TOOLS_SR_TAG, CORNERSTONE_TOOL_ARROW), SONADOR_MEASUREMENT_TYPE_ARROW),
 ))
 SONADOR_FINDING_TYPES = (SONADOR_MEASUREMENT_TYPE_SERIES_TAG,)		# qualitative (findings)
 # Quantitative tools a measurement group is parsed to a typed measurement for
@@ -660,6 +662,41 @@ def srparse_item_properties(children, group_items, consumed, group_consumed, dia
 	return values, display
 
 
+def srparse_finding_code(item, diagnostics, strict, path):
+	'''	Concept name and value of a Finding content item (CODE), the value carried verbatim. A Coding Scheme
+		Version equal to the designator is a legacy defect: dropped with a warning, not substituted. An empty
+		version counts as absent.
+
+		Diagnostics raised here: `coding-scheme-version-equals-designator` (warning), `overlength-code-value`
+		and `overlength-code-meaning` (info, carried verbatim).
+
+		@input item (pydicom.Dataset): the Finding content item
+		@input diagnostics (list), strict (bool), path (str): diagnostics list, strict mode, content tree location
+
+		@returns tuple (CodedConcept, CodedConcept): the concept name and the value
+	'''
+	code = item.ConceptCodeSequence[0]
+	designator = str(code.get(DCMHEADER_CODING_SCHEME_DESIGNATOR, '') or '')
+	version = _scheme_version(code)
+	if version and version == designator:
+		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_VERSION_EQUALS_DESIGNATOR,
+			'Coding Scheme Version equal to the scheme designator "%s" dropped' % designator, path=path, value=version, strict=strict)
+		version = None
+	value = dcm_code_value(code)
+	meaning = str(code.get(DCMHEADER_CODE_MEANING, '') or '')
+	if DCMHEADER_CODE_VALUE in code and len(value or '') > DCM_CODE_VALUE_MAX_LENGTH:
+		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_OVERLENGTH_CODE_VALUE,
+			'CodeValue of %d characters exceeds the SH limit of %d; carried verbatim' % (len(value), DCM_CODE_VALUE_MAX_LENGTH),
+			path=path, value=value)
+	if len(meaning) > DCM_CODE_MEANING_MAX_LENGTH:
+		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_OVERLENGTH_CODE_MEANING,
+			'CodeMeaning of %d characters exceeds the LO limit of %d; carried verbatim' % (len(meaning), DCM_CODE_MEANING_MAX_LENGTH),
+			path=path, value=meaning)
+	concept = CodedConcept(value, designator, meaning, scheme_version=version or None)
+	name = CodedConcept.from_dataset(item.ConceptNameCodeSequence[0], copy=True)
+	return name, concept
+
+
 def srparse_finding(item, group=None, strict=False, diagnostics=None, finding_class=Finding,
 		tracking_id=None, tracking_uid=None, group_consumed=None, allow_group_level=True, repaired=False, **kwargs):
 	'''	Build a finding from a Finding content item (CODE) of a measurement group. The finding code
@@ -698,27 +735,7 @@ def srparse_finding(item, group=None, strict=False, diagnostics=None, finding_cl
 	group_consumed = group_consumed if group_consumed is not None else set()
 	group_items = _children(group) if (group is not None and allow_group_level) else []
 
-	# Finding code, verbatim. A version equal to the designator is a legacy defect: dropped with a
-	# warning, not substituted. An empty version counts as absent.
-	code = item.ConceptCodeSequence[0]
-	designator = str(code.get(DCMHEADER_CODING_SCHEME_DESIGNATOR, '') or '')
-	version = _scheme_version(code)
-	if version and version == designator:
-		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_VERSION_EQUALS_DESIGNATOR,
-			'Coding Scheme Version equal to the scheme designator "%s" dropped' % designator, path=path, value=version, strict=strict)
-		version = None
-	value = dcm_code_value(code)
-	meaning = str(code.get(DCMHEADER_CODE_MEANING, '') or '')
-	if DCMHEADER_CODE_VALUE in code and len(value or '') > DCM_CODE_VALUE_MAX_LENGTH:
-		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_OVERLENGTH_CODE_VALUE,
-			'CodeValue of %d characters exceeds the SH limit of %d; carried verbatim' % (len(value), DCM_CODE_VALUE_MAX_LENGTH),
-			path=path, value=value)
-	if len(meaning) > DCM_CODE_MEANING_MAX_LENGTH:
-		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_OVERLENGTH_CODE_MEANING,
-			'CodeMeaning of %d characters exceeds the LO limit of %d; carried verbatim' % (len(meaning), DCM_CODE_MEANING_MAX_LENGTH),
-			path=path, value=meaning)
-	concept = CodedConcept(value, designator, meaning, scheme_version=version or None)
-	name = CodedConcept.from_dataset(item.ConceptNameCodeSequence[0], copy=True)
+	name, concept = srparse_finding_code(item, diagnostics, strict, path)
 
 	# Children of the finding
 	if not repaired:
@@ -766,6 +783,9 @@ def srparse_report_group(group, strict=False, diagnostics=None, group_class=Repo
 		as `extra_items`. A group with exactly one finding and no tool reads the legacy group-level
 		properties as that finding's; a group with several keeps them at group level as preserved
 		items; a quantitative tool's group reads them as the measurement's.
+
+		An `ArrowAnnotate` group is read by `sonador.apisettings.sr.arrow.srparse_arrow`: its Finding becomes an
+		`ArrowAnnotation` (or a plain Finding of type `arrow`), listed with the findings; it has no measurement.
 
 		Diagnostics raised here: `unknown-tracking-identifier` (info, the group stays generic),
 		`series-tag-group-without-finding` (error, a Series Tag group without a Finding code stays
@@ -827,8 +847,18 @@ def srparse_report_group(group, strict=False, diagnostics=None, group_class=Repo
 		if measurement is not None:
 			measurements.append(measurement)
 
+	# An arrow group: one Finding with its geometry, read as an ArrowAnnotation (or a plain Finding)
 	findings = []
+	if measurement_type == SONADOR_MEASUREMENT_TYPE_ARROW:
+		from .arrow import srparse_arrow
+		arrow = srparse_arrow(group, tracking_id, tracking_uid, consumed, strict=strict, diagnostics=diagnostics,
+			calibrations=calibrations, allow_group_level=True)
+		if arrow is not None:
+			findings.append(arrow)
+
 	for idx in finding_indices:
+		if idx in consumed:
+			continue
 		consumed.add(idx)
 		findings.append(srparse_finding(children[idx], group=group, strict=strict, diagnostics=diagnostics,
 			finding_class=finding_class, tracking_id=tracking_id, tracking_uid=tracking_uid,

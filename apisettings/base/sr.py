@@ -19,13 +19,17 @@
 		radius and plane (an image-domain `CIRCLE`, a patient-domain `ELLIPSE` of two equal perpendicular
 		diameters), with optional construction points. A bidirectional measurement is held by its long and
 		short axis as drawn, each with its own length.
+	* Arrow annotations: `ArrowAnnotation`, a `Finding` with geometry (the Cornerstone `ArrowAnnotate` tool):
+		a label (the meaning of a `CORNERSTONEFREETEXT` finding) or a coded finding, a tip and an optional tail
+		in the image or the patient domain, and the per-finding properties; listed with the findings, never
+		with the measurements.
 	* Report groups: `ReportGroup` (TID 1501, also read with `from_sr`), `ReportMetaGroup`,
 		`VolumePointCollectionGroup` and `ReportGroupCollection`.
 
 	The constants these classes depend on are in `sonador.apisettings.base.constants`; the package
 	`sonador.apisettings.base` re-exports both modules.
 '''
-import abc, functools, logging, math, numbers
+import abc, copy, functools, logging, math, numbers
 from collections import namedtuple, OrderedDict
 from typing import Sequence, Union
 
@@ -42,7 +46,7 @@ from client.utils.object import pick, omit
 from client.utils.microservices import JsonObjectCollection
 
 from .constants import DCMSR_UNITS_MM, DCMSR_UNITS_MM2, DCMSR_UNITS_ANGLE_DEGREE, SONADOR_MEASUREMENT_TYPE_LENGTH, SONADOR_MEASUREMENT_TYPE_ANGLE, \
-	SONADOR_MEASUREMENT_TYPE_COBB_ANGLE, SONADOR_MEASUREMENT_TYPE_CIRCLE, SONADOR_MEASUREMENT_TYPE_BIDIRECTIONAL
+	SONADOR_MEASUREMENT_TYPE_COBB_ANGLE, SONADOR_MEASUREMENT_TYPE_CIRCLE, SONADOR_MEASUREMENT_TYPE_BIDIRECTIONAL, SONADOR_MEASUREMENT_TYPE_ARROW
 
 logger = logging.getLogger(__name__)
 
@@ -583,6 +587,9 @@ class Finding(_DisplayAttributesMixin, SRDataCollectionMember):
 		@property display (sonador.apisettings.display_attrs.DisplayAttributes): display attributes
 		@property extra_items (tuple of pydicom.Dataset): unmodelled content items read from under the
 			finding, re-emitted after the modelled children on write
+		@property is_group_placeholder (bool): True only for the value-less finding the arrow reader lists for a
+			group read without a Finding; it is not written (the group's preserved items carry its content).
+			Any other finding needs a value to be written.
 		@property series, instance, sr_instance: model objects the finding was aligned with when it was
 			retrieved from an imaging server (`ImagingSeries`, `DcmInstance`, `DcmSRInstance`); None for
 			findings created locally. Not part of the JSON form or of equality.
@@ -628,6 +635,9 @@ class Finding(_DisplayAttributesMixin, SRDataCollectionMember):
 		self.series = None
 		self.instance = None
 		self.sr_instance = None
+
+		# Set by the arrow reader on the value-less finding that stands for a group read without a Finding
+		self.is_group_placeholder = False
 
 	@property
 	def name(self):
@@ -692,6 +702,14 @@ class Finding(_DisplayAttributesMixin, SRDataCollectionMember):
 		'''
 		from ..sr.seriestag import SONADOR_MEASUREMENT_TYPE_SERIES_TAG
 		return self.type == SONADOR_MEASUREMENT_TYPE_SERIES_TAG
+
+	@property
+	def has_group_identity(self):
+		'''	Whether the finding is written as its own TID 1501 group: a Series Tag or an arrow.
+
+			@returns bool
+		'''
+		return self.is_series_tag
 
 	@classmethod
 	def series_tag(cls, tag, reference=None, **kwargs):
@@ -3212,6 +3230,466 @@ class BidirectionalMeasurement(GeometricMeasurement):
 		group = group if group is not None else item
 		tracking_id, tracking_uid = _group_tracking(group)
 		return srparse_bidirectional(group, tracking_id, tracking_uid, set(), strict=strict, diagnostics=diagnostics, calibrations=calibrations)
+
+
+# Arrow annotations
+
+DCMSR_GRAPHIC_POINT = 'POINT'
+
+# Free-text finding code of a Cornerstone label: the user's text is the Code Meaning
+DCMSR_FREE_TEXT_VALUE = 'CORNERSTONEFREETEXT'
+DCMSR_FREE_TEXT_SCHEME = 'CST4'
+
+# Smallest distance between the tip and the tail written (mm, or pixels on an uncalibrated frame)
+DCMSR_ARROW_LENGTH_TOLERANCE = 0.01
+
+
+def is_free_text_finding(code):
+	'''	Whether a finding value is a free-text label: code value `CORNERSTONEFREETEXT` in the `CST4` scheme.
+		A value of that name in any other scheme is a coded finding.
+
+		@input code (Code, CodedConcept or None): the finding value
+		@returns bool
+	'''
+	return getattr(code, 'value', None) == DCMSR_FREE_TEXT_VALUE and getattr(code, 'scheme_designator', None) == DCMSR_FREE_TEXT_SCHEME
+
+
+def free_text_finding(label):
+	'''	Finding value of a free-text label: `(CORNERSTONEFREETEXT, CST4, <label>)`, the label verbatim at any
+		length as the Code Meaning.
+
+		@input label (str): the text
+		@returns highdicom Code
+	'''
+	return Code(DCMSR_FREE_TEXT_VALUE, DCMSR_FREE_TEXT_SCHEME, str(label))
+
+
+class ArrowAnnotation(Finding):
+	'''	Text annotation anchored on an image by an arrow (Cornerstone `ArrowAnnotate` tool): a Finding whose
+		value is the label, carrying the arrow's geometry and the per-annotation properties. An arrow has no
+		numeric value and is never a measurement.
+
+		In a document it is one TID 1501 group holding one Finding CODE item `(121071, DCM, "Finding")`: the
+		geometry is its `INFERRED FROM` child, a `POLYLINE` of the tip then the tail (a `POINT` of the tip for
+		an arrow without a tail), and the properties are its `HAS PROPERTIES` children.
+
+		The label is the Code Meaning of a `(CORNERSTONEFREETEXT, CST4)` finding. A finding of any other code is
+		a coded finding: carried verbatim, its meaning is not user text and `label` is None. `text` is a
+		property of its own, never a copy of the label.
+
+		Patient-domain points are in millimetres in the imaging series' Frame of Reference; points given in
+		another frame are converted once, at construction, with a rigid `transform`.
+
+		@property finding (Code or CodedConcept): the Finding value, verbatim; settable
+		@property label (str or None): the meaning of a free-text finding, None for a coded finding; setting it
+			makes the finding `(CORNERSTONEFREETEXT, CST4, <label>)`
+		@property tip (PixelCoord or ImageCoord): the arrowhead; settable with any point
+		@property tail (PixelCoord, ImageCoord or None): the other end, None when absent; settable, None writes
+			the arrow as a `POINT`
+		@property geometry (Geometry): `POLYLINE` of tip and tail, or `POINT` of the tip; image domain
+			(`(column, row)` pixels on `reference`) or patient domain (`(x, y, z)` millimetres)
+		@property reference (ImageReference or None): image the arrow was drawn on (that of the geometry in the
+			image domain; not written in the patient domain)
+		@property series_uid (str or None): imaging series of the arrow: that of the image reference, else the
+			`series_uid` given, written as the Source-Series of a patient-domain arrow
+		@property frame_of_reference_uid (str or None): Frame of Reference of a patient-domain arrow
+		@property drawing_plane (tuple of two ImageCoord, or None): orientation of the view a patient-domain
+			arrow was drawn in, width then height; it must hold both points within 1 mm. A value read from a
+			document keeps its text (`drawing_plane_text`) and is written back verbatim until replaced.
+		@property views (tuple of str): views the arrow was created in
+		@property calibration (ImageFrameGeometry or None): spatial calibration of the referenced frame, used for
+			the tip-to-tail distance of an image-domain arrow
+		@property description, text, location (str or None), display (DisplayAttributes or None),
+			extra_items (tuple of pydicom.Dataset): the Finding's properties and preserved children
+		@property legacy_geometry (bool): read from the geometry of a NUM carrier (a stock form), which is
+			not written back
+	'''
+	default_type = SONADOR_MEASUREMENT_TYPE_ARROW
+
+	def __init__(self, name=DCMSR_FINDING, finding=None, geometry=None, frame_of_reference_uid=None, calibration=None, views=None,
+			drawing_plane=None, tracking_id=None, reference=None, **kwargs):
+		'''	Initialize the arrow from its Finding value and `Geometry`. Callers building a new arrow use
+			`from_points`.
+
+			@input name (Code or CodedConcept, default=`DCMSR_FINDING`): concept name of the Finding item
+			@input finding (Code or CodedConcept): the Finding value
+			@input geometry (Geometry): `POLYLINE` of two points or `POINT` of one
+			@input frame_of_reference_uid (str, default=None): Frame of Reference of a patient-domain arrow
+			@input calibration (ImageFrameGeometry, default=None): calibration of the referenced frame
+			@input views (iterable of str, default=None): views the arrow was created in
+			@input drawing_plane (pair of 3-vectors, default=None): orientation of the drawing view
+			@input tracking_id (str, default=`cornerstoneTools@^4.0.0:ArrowAnnotate`): tracking identifier
+			@input reference (ImageReference, default=None): image of a patient-domain arrow, not written
+			@input kwargs: further `Finding` arguments (`tracking_uid`, `description`, `text`, `location`,
+				`display`, `extra_items`, `series_uid`)
+
+			@raises ValueError for a missing finding, another geometry, or a drawing plane on image-domain geometry
+		'''
+		if finding is None:
+			raise ValueError('An arrow needs a Finding value; build one with `from_points` or `free_text_finding`')
+		self._check_geometry(geometry)
+		self._geometry = geometry
+		self._drawing_plane = None
+		self._drawing_plane_text = None
+		self.frame_of_reference_uid = frame_of_reference_uid
+		self.calibration = calibration
+		self.views = tuple(views or ())
+
+		# Parsed state: what the document held
+		self._parsed_points = None
+		self._parsed_reference = None
+		self._parsed_finding = None
+		self._parsed_views = None
+		self._parsed_series_uid = None
+		self._source_coordinates = None
+		self.legacy_geometry = False
+
+		if tracking_id is None:
+			from ..sr.seriestag import tracking_id_for_measurement_type
+			tracking_id = tracking_id_for_measurement_type(SONADOR_MEASUREMENT_TYPE_ARROW)
+		kwargs.pop('finding_type', None)
+		super().__init__(name, finding, finding_type=SONADOR_MEASUREMENT_TYPE_ARROW, tracking_id=tracking_id,
+			reference=geometry.reference if geometry.is_image else reference, **kwargs)
+		if drawing_plane is not None:
+			self.drawing_plane = drawing_plane
+
+	@classmethod
+	def from_points(cls, tip, tail, label, reference=None, frame_of_reference_uid=None, calibration=None, series_uid=None,
+			drawing_plane=None, transform=None, description=None, text=None, location=None, display=None, **kwargs):
+		'''	Arrow from its tip and tail, as drawn: `(column, row)` pixels on `reference` (image domain) or
+			`(x, y, z)` millimetre triples (patient domain), and its label.
+
+			@input tip (point): the arrowhead
+			@input tail (point or None): the other end; None for an arrow of its tip only, written as a `POINT`
+			@input label (str, Code or CodedConcept): the user's text, written as the meaning of a
+				`(CORNERSTONEFREETEXT, CST4)` finding; a Code or CodedConcept is a coded finding, carried verbatim
+			@input reference (ImageReference, default=None): image the arrow was drawn on
+			@input frame_of_reference_uid (str, default=the transform's target frame): Frame of Reference
+			@input calibration (ImageFrameGeometry, default=None): calibration of the image frame
+			@input series_uid (str, default=None): imaging series, written as the Source-Series of a patient-domain
+				arrow
+			@input drawing_plane (pair of 3-vectors, default=None): orientation of the drawing view; both points
+				must lie within 1 mm of it
+			@input transform (ImageTransformMatrix, default=None): rigid conversion of patient-domain points from
+				another frame, applied to both points and to the drawing plane (rotation only)
+			@input description, text, location (str, default=None): extended meta attributes
+			@input display (DisplayAttributes or colour-role dict, default=None): display colours (`Line`, `Text`)
+			@input kwargs: further arguments (`tracking_uid`, `views`, `extra_items`)
+
+			@returns ArrowAnnotation
+			@raises ValueError for points of different dimensions, a transform applied to image coordinates, a
+				transform that is not rigid, unnamed or aimed at another frame
+		'''
+		points = (tuple(tip),) + (() if tail is None else (tuple(tail),))
+		if len({len(p) for p in points}) != 1:
+			raise ValueError('The tip and the tail must both be 2D (image) or both be 3D (patient)')
+		if transform is not None:
+			if len(points[0]) != 3:
+				raise ValueError('A frame conversion applies to patient-domain points only')
+			if not (transform.source_frame or transform.uid):
+				raise ValueError('A frame conversion must name its source frame')
+			if frame_of_reference_uid and transform.target_frame and frame_of_reference_uid != transform.target_frame:
+				raise ValueError('The transform targets frame %s, not the arrow frame %s' % (transform.target_frame, frame_of_reference_uid))
+			points = tuple(tuple(float(c) for c in p) for p in transform.convert(points))
+			frame_of_reference_uid = frame_of_reference_uid or transform.target_frame
+			if drawing_plane is not None:
+				drawing_plane = tuple(transform.rotate_directions(drawing_plane_vectors(drawing_plane)))
+		domain = DCMSR_GEOMETRY_DOMAIN_IMAGE if len(points[0]) == 2 else DCMSR_GEOMETRY_DOMAIN_PATIENT
+		graphic_type = DCMSR_GRAPHIC_POLYLINE if len(points) == 2 else DCMSR_GRAPHIC_POINT
+		geometry = Geometry(domain, graphic_type, points, reference if domain == DCMSR_GEOMETRY_DOMAIN_IMAGE else None)
+		finding = label if isinstance(label, (Code, CodedConcept)) else free_text_finding('' if label is None else label)
+		return cls(DCMSR_FINDING, finding, geometry=geometry, frame_of_reference_uid=frame_of_reference_uid, calibration=calibration,
+			drawing_plane=drawing_plane, series_uid=series_uid, description=description, text=text, location=location, display=display,
+			reference=None if domain == DCMSR_GEOMETRY_DOMAIN_IMAGE else reference, **kwargs)
+
+	@classmethod
+	def from_sr(cls, item, group=None, strict=False, diagnostics=None, calibrations=None, **kwargs):
+		'''	Build an arrow from its measurement group. Pass the group itself as `item`, or its Finding item
+			together with the enclosing `group`. See `sonador.apisettings.sr.arrow.srparse_arrow`.
+
+			@input item (pydicom.Dataset): the measurement group, or its Finding item with `group`
+			@input group (pydicom.Dataset, default=None): the enclosing measurement group of a Finding `item`
+			@input strict (bool, default=False): raise SRDiagnosticError on `warning` and `error` diagnostics
+			@input diagnostics (list, default=None): list the diagnostics are appended to
+			@input calibrations (mapping, default=None): `ImageFrameGeometry` by SOP Instance UID or
+				`(SOP Instance UID, frame number)`
+
+			@returns
+				- ArrowAnnotation
+				- Finding (plain, of type `arrow`) for a group the arrow model cannot hold: its Finding with the
+					geometry preserved, or a Finding without a value for a group without a Finding, free-text Finding
+					Site or Comment
+				- None for a Finding item given without its group
+		'''
+		from ..sr.arrow import srparse_arrow
+		from ..sr.measurements import _group_tracking
+		if group is None and item.get('ValueType') != 'CONTAINER':
+			return None
+		group = group if group is not None else item
+		tracking_id, tracking_uid = _group_tracking(group)
+		return srparse_arrow(group, tracking_id, tracking_uid, set(), strict=strict, diagnostics=diagnostics, calibrations=calibrations)
+
+	def create_sr(self, **kwargs):
+		from ..sr.arrow import srencode_arrow
+		return srencode_arrow(self, **kwargs)
+
+	# ---- finding and label ----
+
+	@property
+	def finding(self):
+		return self._finding
+
+	@finding.setter
+	def finding(self, val):
+		if val is None:
+			raise ValueError('An arrow needs a Finding value')
+		self._finding = val
+
+	@property
+	def label(self):
+		'''	The user's text: the meaning of a free-text finding.
+
+			@returns str ('' for an empty meaning), or None for a coded finding (any value other than
+			`CORNERSTONEFREETEXT` in the `CST4` scheme)
+		'''
+		if not is_free_text_finding(self._finding):
+			return None
+		return str(getattr(self._finding, 'meaning', None) or '')
+
+	@label.setter
+	def label(self, val):
+		'''	Set the user's text: the finding becomes `(CORNERSTONEFREETEXT, CST4, <val>)`.
+
+			@raises ValueError for None (a coded finding is set through `finding`)
+		'''
+		if val is None:
+			raise ValueError('An arrow label is text; set `finding` for a coded finding')
+		self._finding = free_text_finding(val)
+
+	@property
+	def is_coded(self):
+		'''	Whether the finding is coded, not free text.
+
+			@returns bool
+		'''
+		return self.label is None
+
+	@property
+	def finding_changed(self):
+		'''	Whether the finding differs from the one read from the document.
+
+			@returns bool: True for an arrow created in Python
+		'''
+		return self._parsed_finding is None or _code_key(self._finding) != self._parsed_finding
+
+	@property
+	def has_group_identity(self):
+		return True
+
+	# ---- geometry ----
+
+	def _check_geometry(self, geometry):
+		'''	Refuse a geometry the arrow cannot hold.
+
+			@input geometry (Geometry or None): the geometry being assigned
+			@raises ValueError for no geometry, or anything but a two-point `POLYLINE` or a one-point `POINT`
+		'''
+		if geometry is None or (geometry.graphic_type, len(geometry.points)) not in ((DCMSR_GRAPHIC_POLYLINE, 2), (DCMSR_GRAPHIC_POINT, 1)):
+			raise ValueError('An arrow holds a POLYLINE of its tip and tail, or a POINT of its tip')
+
+	@property
+	def geometry(self):
+		return self._geometry
+
+	@geometry.setter
+	def geometry(self, val):
+		self._check_geometry(val)
+		if self._drawing_plane is not None and not val.is_patient:
+			raise ValueError('An arrow with a drawing plane needs patient-domain geometry; clear `drawing_plane` first')
+		self._geometry = val
+
+	@property
+	def points(self):
+		return self._geometry.points
+
+	@property
+	def array(self):
+		'''	The points as a new float array (`Geometry.array`).
+
+			@returns numpy.ndarray of shape `(N, 2)` or `(N, 3)`, N being 1 or 2
+		'''
+		return self._geometry.array
+
+	def _set_points(self, tip, tail):
+		points = (tip,) + (() if tail is None else (tail,))
+		graphic_type = DCMSR_GRAPHIC_POLYLINE if tail is not None else DCMSR_GRAPHIC_POINT
+		self._geometry = self._geometry._replace(graphic_type=graphic_type, points=points)
+
+	@property
+	def tip(self):
+		return self._geometry.points[0]
+
+	@tip.setter
+	def tip(self, point):
+		self._set_points(point, self.tail)
+
+	@property
+	def tail(self):
+		points = self._geometry.points
+		return points[1] if len(points) > 1 else None
+
+	@tail.setter
+	def tail(self, point):
+		self._set_points(self.tip, point)
+
+	@property
+	def reference(self):
+		'''	Referenced image: that of the geometry in the image domain, else the one given.
+
+			@returns ImageReference, or None
+		'''
+		geometry = getattr(self, '_geometry', None)
+		if geometry is not None and geometry.is_image:
+			return geometry.reference
+		return getattr(self, '_reference', None)
+
+	@reference.setter
+	def reference(self, val):
+		if val is not None and not isinstance(val, ImageReference):
+			from ..sr.seriestag import image_reference_from_dataset
+			val = image_reference_from_dataset(val)
+		if self._geometry.is_image:
+			self._geometry = self._geometry._replace(reference=val)
+		else:
+			self._reference = val
+
+	@property
+	def drawing_plane(self):
+		'''	Orientation of the view the arrow was drawn in.
+
+			@returns tuple (width, height) of two `ImageCoord`, or None when absent or read malformed
+		'''
+		return self._drawing_plane
+
+	@drawing_plane.setter
+	def drawing_plane(self, val):
+		'''	Set the drawing plane of a patient-domain arrow; the text read from a document is dropped.
+
+			@raises ValueError for a value of another shape, or for an arrow that is not in the patient domain
+		'''
+		if val is not None:
+			if not self._geometry.is_patient:
+				raise ValueError('A drawing plane applies to patient-domain geometry only')
+			val = drawing_plane_vectors(val)
+		self._drawing_plane = val
+		self._drawing_plane_text = None
+
+	@property
+	def drawing_plane_text(self):
+		return self._drawing_plane_text
+
+	def _set_parsed_drawing_plane(self, plane, text):
+		self._drawing_plane = plane
+		self._drawing_plane_text = text
+
+	def _calculation_points(self, points):
+		if self._geometry.is_image and self.calibration is not None and self.calibration.is_calibrated:
+			return [self.calibration.patient_point(*p) for p in points]
+		return points
+
+	@property
+	def length(self):
+		'''	Distance from the tip to the tail: millimetres in the patient domain and on a calibrated image
+			frame, pixels otherwise.
+
+			@returns tuple (float, unit), or None for an arrow without a tail
+		'''
+		if self.tail is None:
+			return None
+		unit = DCMSR_UNITS_MM if (self._geometry.is_patient or (self.calibration is not None and self.calibration.is_calibrated)) else DCMSR_UNITS_PIXEL
+		return _distance(*self._calculation_points((self.tip, self.tail))), unit
+
+	@property
+	def is_degenerate(self):
+		'''	Whether the tip and the tail are closer than 0.01 mm (0.01 px on an uncalibrated frame).
+
+			@returns bool: False for an arrow without a tail
+		'''
+		length = self.length
+		return length is not None and length[0] < DCMSR_ARROW_LENGTH_TOLERANCE
+
+	# ---- parsed state ----
+
+	def _mark_parsed(self, source_coordinates=None, legacy=False):
+		'''	Record the state read from a document, against which later edits are detected.
+
+			@input source_coordinates (pydicom.Dataset, default=None): the SCOORD or SCOORD3D item read
+			@input legacy (bool, default=False): the geometry was read from a NUM carrier
+		'''
+		self._parsed_points = self._geometry.points
+		self._parsed_reference = self._reference_key()
+		self._parsed_finding = _code_key(self._finding)
+		self._parsed_views = tuple(self.views)
+		self._parsed_series_uid = self._series_uid
+		self._source_coordinates = source_coordinates
+		self.legacy_geometry = legacy
+
+	def _reference_key(self):
+		reference = self.reference
+		return None if reference is None else (reference.sop_instance_uid, reference.frame_number)
+
+	@property
+	def is_parsed(self):
+		return self._parsed_points is not None
+
+	@property
+	def points_changed(self):
+		'''	Whether the points differ from those read from the document.
+
+			@returns bool: True for an arrow created in Python
+		'''
+		return self._parsed_points is None or self._geometry.points != self._parsed_points
+
+	@property
+	def reference_changed(self):
+		return self._parsed_points is not None and self._reference_key() != self._parsed_reference
+
+	@property
+	def parsed_views(self):
+		return self._parsed_views or ()
+
+	@property
+	def parsed_series_uid(self):
+		return self._parsed_series_uid
+
+	@property
+	def source_coordinates(self):
+		'''	Coordinate item the arrow was read from, while it is in the domain of the geometry (same value
+			type). When an edit of the tail changed the graphic type (`POLYLINE` and `POINT`), a copy carrying
+			the current graphic type is returned, so that the item's other attributes (Fiducial UID, the image
+			child and its frame) survive the write.
+
+			@returns pydicom.Dataset, or None
+		'''
+		source = self._source_coordinates
+		if source is None or source.get('ValueType') != ('SCOORD3D' if self._geometry.is_patient else 'SCOORD'):
+			return None
+		if source.get('GraphicType') != self._geometry.graphic_type:
+			source = copy.deepcopy(source)
+			source.GraphicType = self._geometry.graphic_type
+		return source
+
+	def __repr__(self):
+		return '%s(%r, tracking_uid=%s)' % (type(self).__name__, self.label if self.label is not None else self.finding, self.tracking_uid)
+
+
+def _code_key(code):
+	'''	(value, designator, meaning) of a code, compared to detect an edited finding.
+
+		@input code (Code or CodedConcept)
+		@returns tuple
+	'''
+	return (getattr(code, 'value', None), getattr(code, 'scheme_designator', None), getattr(code, 'meaning', None))
 
 
 # Measurement class by measurement type: the factory behind `Measurement.from_sr`
