@@ -421,6 +421,25 @@ writes the standard Imaging Measurement Report root. Stock OHIF fails to load a 
 the standard root, and the Sonador Viewer does not draw sets yet. The full reference is
 [Landmark Sets in DICOM-SR Documents](https://code.oak-tree.tech/oak-tree/medical-imaging/imaging-development-env/-/wikis/integrations/sonador-io/landmark-sets).
 
+### DICOM Dates and Times
+`sonador.serialization` parses DICOM date and time values: `dcm_str2date` (DA), `dcm_str2time` (TM, with
+the trailing components optional and a fraction of up to six digits), `dcm_str2datetime` (DT) and
+`dcm_str2utcoffset` (Timezone Offset From UTC, `&ZZXX` from `-1200` to `+1400`). `DicomDatetimePair`
+(`sonador.apisettings`) combines a date and a time value into a timestamp: `ts` is the naive local
+timestamp of the dataset, and `ts_utc` applies the dataset's offset so that documents written in
+different time zones can be ordered.
+
+```python
+from sonador.apisettings import DicomDatetimePair
+
+pair = DicomDatetimePair(ds.ContentDate, ds.ContentTime, offset_value=ds.get('TimezoneOffsetFromUTC'))
+pair.ts        # datetime.datetime(2026, 1, 2, 12, 0)   (as written)
+pair.ts_utc    # datetime.datetime(2026, 1, 2, 11, 0)   (TimezoneOffsetFromUTC '+0100' applied; UTC when absent)
+```
+
+A malformed value raises `ValueError`; an offset applied at the limits of the datetime range raises
+`OverflowError`.
+
 ### Coordinate System and Units of M3D Models
 Encapsulated STL instances (M3D modality) carry a Frame of Reference UID (the origin and axes implicit
 in the model data) and a Measurement Units Code Sequence (units of distance of the model coordinates,
