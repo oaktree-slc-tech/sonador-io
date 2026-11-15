@@ -25,7 +25,7 @@ from collections import OrderedDict
 
 from pydicom import Dataset as DcmDataset
 
-from ....apisettings.base import Measurement, ArrowAnnotation, ImageCoord, ImageCoordCollection, ImageTransformMatrix, \
+from ....apisettings.base import LandmarkSet, Measurement, ArrowAnnotation, ImageCoord, ImageCoordCollection, ImageTransformMatrix, \
 	ReferenceFrame, VolumePointCollectionGroup, FrameConversionError, frame_reference_uid, drawing_plane_vectors, \
 	DCMSR_FRAME_NATIVE, DCMSR_FRAME_REGISTERED, DCMSR_FRAME_UNREGISTERED, DCMSR_FRAME_NOT_APPLICABLE
 from ....apisettings.sr import sr_diagnostic, SRDiagnostic, SRDiagnosticError, srcontent_extra_items, \
@@ -222,13 +222,22 @@ class SRFrameMixin:
 		for group in (self.groups or []):
 			found.extend(getattr(group, 'measurements', None) or [])
 		found.extend(self.arrow_findings)
+		found.extend(getattr(self, 'landmarks', None) or [])
 		return [m for m in found if getattr(m, 'source_transform', None) is not None]
 
 	# ---- geometry ----
 
 	@property
 	def point_collections(self):
-		found = list(getattr(self.parsed, 'point_collections', None) or ()) if self.parsed is not None else []
+		'''	Point collections of the report: the SCOORD3D items of the document's legacy point groups (a group migrated by
+			an edit of its legacy landmark set is no longer listed), then those of the report's point collection groups.
+
+			@returns list of SRPointCollection and ImageCoordCollection
+		'''
+		replaced = getattr(self, '_legacy_groups_replaced', None)
+		migrating = set(lset.tracking_uid for lset, _, _ in (replaced(strict=False) if replaced is not None else []))
+		found = [p for p in (list(getattr(self.parsed, 'point_collections', None) or ()) if self.parsed is not None else [])
+			if not (p.tracking_uid and p.tracking_uid in migrating)]
 		for group in (self.groups or []):
 			if isinstance(group, VolumePointCollectionGroup):
 				for points in (group.points or []):
@@ -255,6 +264,12 @@ class SRFrameMixin:
 			new = getattr(item, '_parsed_points', None) is None or bool(getattr(item, 'points_changed', True)) \
 				or read_frame != item.frame_of_reference_uid
 			found.append((item, item.frame_of_reference_uid, 'group %s' % item.tracking_uid, new))
+		for lset in (getattr(self, '_landmark_sets', None) or []):
+			if lset.is_patient and (not lset.legacy or lset.edited):
+				# New geometry is a set created here, or one whose points, membership, order or frame changed; a migrated
+				# legacy group is written in a new form and checked once. An edit of names or descriptions is not
+				new = lset.geometry_edited or lset.legacy
+				found.append((lset, lset.frame_of_reference_uid, 'group %s' % lset.tracking_uid, new))
 		for points in self.point_collections:
 			if isinstance(points, SRPointCollection):
 				found.append((points, points.frame_uid, 'group %s' % points.tracking_uid, False))
@@ -310,6 +325,8 @@ class SRFrameMixin:
 		frame_uid, patient = self._frame_of(obj)
 		if not patient:
 			raise FrameConversionError('Image-domain geometry has no frame to convert from', reason=DCMSR_FRAME_NOT_APPLICABLE)
+		if isinstance(obj, LandmarkSet):
+			return _converted_set(obj, frame_uid, to_uid, self.frames)
 		transform = self.frames.transform(frame_uid, to_uid)
 		if isinstance(obj, ImageCoord):
 			converted = transform.convert([tuple(obj)])[0]
@@ -373,7 +390,7 @@ class SRFrameMixin:
 
 			@returns list of highdicom content items
 		'''
-		extras = srcontent_extra_items(self.extra_items)
+		extras = srcontent_extra_items(self._extra_items_for_write() if hasattr(self, '_extra_items_for_write') else self.extra_items)
 		containers = sorted(enumerate(plan['containers']), key=lambda entry: (entry[1][0], entry[0]))
 		tail = list(plan['declarations'])
 		position = 0
@@ -424,6 +441,33 @@ def _content_item(item):
 	if isinstance(item, Dataset) and not hasattr(item, 'relationship_type'):
 		return srcontent_extra_items([item])[0]
 	return item
+
+
+def _converted_set(lset, frame_uid, to_uid, graph):
+	'''	Copy of a landmark set in another frame: every point converted, with order, identities, types, names,
+		descriptions, display attributes, tracking UID and opaque items kept. The source set is unchanged.
+
+		@raises FrameConversionError (`landmark-conversion-opaque-geometry`) for a set holding an opaque slot with a
+			coordinate, which could not be converted; and as `FrameGraph.transform` across frames
+	'''
+	from ....apisettings.sr import SR_CONDITION_LANDMARK_CONVERSION_OPAQUE_GEOMETRY, SR_CONDITION_LANDMARK_LEGACY_NOT_MIGRATABLE
+	if lset._frozen is not None:
+		raise FrameConversionError('Landmark set %s is a legacy point group that cannot be migrated (%s); it cannot be converted'
+			% (lset.tracking_uid, lset._frozen), reason=SR_CONDITION_LANDMARK_LEGACY_NOT_MIGRATABLE, source_uid=frame_uid, target_uid=to_uid)
+	if frame_uid == to_uid:
+		# The identity path: a copy that keeps what the set was read as, so an unchanged set stays unchanged
+		return copy.deepcopy(lset)
+	if lset.has_opaque_geometry:
+		raise FrameConversionError('Landmark set %s holds geometry the client could not read; it cannot be converted, since that '
+			'geometry would stay in the old frame' % lset.tracking_uid, reason=SR_CONDITION_LANDMARK_CONVERSION_OPAQUE_GEOMETRY,
+			source_uid=frame_uid, target_uid=to_uid)
+	transform = graph.transform(frame_uid, to_uid)
+	converted = copy.deepcopy(lset)
+	for landmark in converted.landmarks:
+		landmark.point = transform.convert([tuple(landmark.point)])[0]
+	converted.frame_of_reference_uid = to_uid
+	converted.source_transform = None
+	return converted
 
 
 def _converted_annotation(obj, transform, to_uid):

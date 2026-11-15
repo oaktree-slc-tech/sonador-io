@@ -77,6 +77,9 @@ class VolumetricPointCollection(DcmMeasurementAndQualitativeEvaluationsBase):
 		but where the  measurements and findings are specific to the enclosed points.
 
 		Inherits from highdicom.sr.templates._MeasurementsAndQualitativeEvaluations.
+
+		Superseded by landmark sets (`sonador.apisettings.sr.landmarks`) for named points; existing groups of this
+		template are read as legacy landmark sets.
 	'''
 	template_id = '%s.1002' % DCMSR_SONADOR_SR.value
 

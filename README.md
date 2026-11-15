@@ -387,6 +387,40 @@ The full reference is [Reference Frames in DICOM-SR Documents](https://code.oak-
 units, the primary frame, the rules for trusting a transform, what the document stores, and how documents
 written by earlier versions are read.
 
+### Landmark Sets
+A landmark is a named point on the anatomy, such as the tip of a bone or the centre of a joint, picked on the
+images or on a 3D model. A landmark set keeps a group of them together in order: the points a planning
+application needs to place an implant, or the pairs it matches to line up two scans. Sonador IO stores a set in
+the report as one group. Each landmark keeps its own name and an identifier that does not change when the
+document is saved again, so other programs can refer to a landmark by its identifier and match it across
+versions of the report.
+
+```python
+from sonador.apisettings.base import LandmarkSet
+from sonador.imaging.helpers.sr import SonadorComprehensiveSR3D
+
+model = SonadorComprehensiveSR3D(sonador_ref_series=series, report_procedure=code)
+pelvis = LandmarkSet.from_points(
+	[(10.0, 20.0, 30.0), (12.0, 24.0, 31.0), (15.0, 22.0, 29.0)],
+	name='Pelvic landmarks', names=['ASIS (left)', 'Tear drop', 'Pubic symphysis'],
+	frame_of_reference_uid=model.frames.primary_uid)
+model.landmarks = [pelvis]
+dataset = model.create_sr()
+
+# Read the document back, then look a landmark up by name or by identifier
+reread = SonadorComprehensiveSR3D.from_sr(dataset)
+tear_drop = reread.landmarks[0].landmarks.find(name='Tear drop')[0]
+same = reread.landmarks[0].landmarks.by_fiducial_uid(tear_drop.fiducial_uid)
+```
+
+For documents stored on the server, `study.landmarks()` and `series.landmarks()` return the sets by series.
+
+A set lies either in a reference frame (points in mm) or on one image (pixel positions). The class picks the
+root of the document: `SonadorComprehensiveSR3D` writes the Sonador root, and `SonadorImagingMeasurementReport`
+writes the standard Imaging Measurement Report root. Stock OHIF fails to load a landmark set in a document with
+the standard root, and the Sonador Viewer does not draw sets yet. The full reference is
+[Landmark Sets in DICOM-SR Documents](https://code.oak-tree.tech/oak-tree/medical-imaging/imaging-development-env/-/wikis/integrations/sonador-io/landmark-sets).
+
 ### Coordinate System and Units of M3D Models
 Encapsulated STL instances (M3D modality) carry a Frame of Reference UID (the origin and axes implicit
 in the model data) and a Measurement Units Code Sequence (units of distance of the model coordinates,

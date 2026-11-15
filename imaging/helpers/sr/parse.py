@@ -327,7 +327,7 @@ def _fill_relationship(child, parent_value_type):
 
 def _repair_sequence(parent, parent_value_type, diagnostics, strict, path):
 	'''	Repair the content sequence of `parent` in place, recursively: fill missing Relationship
-		Types, remove by-reference items, NUM items without a value (which highdicom cannot read) and
+		Types, remove by-reference items, NUM and CODE items without a value (which highdicom cannot read) and
 		items that cannot be modelled. `parent` is the copy
 		`srdoc_repair` made. Every filled Relationship Type is recorded here as a `warning`
 		(`missing-relationship-type`, one per item at any depth, so `strict=True` rejects it); the
@@ -352,6 +352,9 @@ def _repair_sequence(parent, parent_value_type, diagnostics, strict, path):
 			continue
 		if dcm_header_value(child, DCMHEADER_SR_VALUE_TYPE) == 'NUM' and not dcm_header_value(child, 'MeasuredValueSequence'):
 			continue
+		if dcm_header_value(child, DCMHEADER_SR_VALUE_TYPE) == 'CODE' and not dcm_header_value(child, 'ConceptCodeSequence'):
+			# A CODE item without a value, which highdicom cannot read; the model parsers keep it from the original
+			continue
 		if dcm_header_value(child, 'RelationshipType') is None:
 			filled = _fill_relationship(child, parent_value_type)
 			sr_diagnostic(diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_MISSING_RELATIONSHIP,
@@ -365,7 +368,7 @@ def _repair_sequence(parent, parent_value_type, diagnostics, strict, path):
 
 def srdoc_repair(ds, diagnostics=None, strict=False):
 	'''	Deep copy of a document that highdicom can represent: Relationship Types filled, by-reference,
-		valueless NUM and unmodellable items removed, a missing root Value Type set to CONTAINER (`info`
+		valueless NUM and CODE items and unmodellable items removed, a missing root Value Type set to CONTAINER (`info`
 		diagnostic), Continuity of Content defaulted to SEPARATE, and root template `Sonador-SR.1500`
 		written as `1500` so that highdicom reads the content as a `MeasurementReport`. The original
 		dataset is not modified.
@@ -525,11 +528,16 @@ def srdoc_parse(dcmsr, report_class, strict=False, diagnostics=None, calibration
 	evidence = srdoc_evidence(ds)
 	groups = []
 	for group_item in srdoc_measurement_groups(ds):
-		group = ReportGroup.from_sr(group_item, strict=strict, diagnostics=diagnostics, repaired=True, calibrations=calibrations)
+		group = ReportGroup.from_sr(group_item, strict=strict, diagnostics=diagnostics, repaired=True, calibrations=calibrations,
+			**({'images': kwargs['images']} if kwargs.get('images') else {}))
 		for finding in (group.findings or []):
 			_resolve_reference(finding, evidence, diagnostics, strict)
 		for measurement in (group.measurements or []):
 			_resolve_reference(measurement, evidence, diagnostics, strict)
+		landmark_set = getattr(group, 'landmark_set', None)
+		if landmark_set is not None and landmark_set.reference is not None:
+			_resolve_reference(landmark_set, evidence, diagnostics, strict)
+			landmark_set._parsed['state'] = landmark_set._state()
 		groups.append(group)
 
 	frame_records, _ = srdoc_frame_records(ds, frame_items, extra_items)

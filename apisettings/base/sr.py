@@ -30,8 +30,15 @@
 		a label (the meaning of a `CORNERSTONEFREETEXT` finding) or a coded finding, a tip and an optional tail
 		in the image or the patient domain, and the per-finding properties; listed with the findings, never
 		with the measurements.
+	* Landmark sets: `Landmark` (a named point with a type, a description, display attributes and a Fiducial UID as
+		its identity), `LandmarkCollection` (the ordered landmarks of a set) and `LandmarkSet` (a named, ordered set of
+		landmarks in one frame or on one image), written as one TID 1501 group with the Cornerstone tool name
+		`SonadorLandmarkSet`. `code_key` compares codes on their scheme and value. A set read from a document is
+		written back as read until it is edited. The wire format, the reader outcomes and legacy point groups are in
+		`sonador.apisettings.sr.landmarks`.
 	* Report groups: `ReportGroup` (TID 1501, also read with `from_sr`), `ReportMetaGroup`,
-		`VolumePointCollectionGroup` and `ReportGroupCollection`.
+		`VolumePointCollectionGroup` (superseded by landmark sets for named points), `LandmarkSetGroup`,
+		`RawReportGroup` (a group written back as read) and `ReportGroupCollection`.
 
 	The constants these classes depend on are in `sonador.apisettings.base.constants`; the package
 	`sonador.apisettings.base` re-exports both modules.
@@ -42,7 +49,7 @@ from typing import Sequence, Union
 
 import numpy as np
 
-from pydicom import Sequence as DcmSequence
+from pydicom import Sequence as DcmSequence, Dataset as DcmDataset
 from pydicom.sr.codedict import codes as dcmcodes
 from pydicom.uid import generate_uid
 
@@ -54,6 +61,7 @@ from client.utils.microservices import JsonObjectCollection
 
 from .constants import DCMSR_UNITS_MM, DCMSR_UNITS_MM2, DCMSR_UNITS_ANGLE_DEGREE, SONADOR_MEASUREMENT_TYPE_LENGTH, SONADOR_MEASUREMENT_TYPE_ANGLE, \
 	SONADOR_MEASUREMENT_TYPE_COBB_ANGLE, SONADOR_MEASUREMENT_TYPE_CIRCLE, SONADOR_MEASUREMENT_TYPE_BIDIRECTIONAL, SONADOR_MEASUREMENT_TYPE_ARROW
+from .constants import SONADOR_SR, SONADOR_SCHEME_VERSION_03, SONADOR_MEASUREMENT_TYPE_LANDMARK_SET
 
 logger = logging.getLogger(__name__)
 
@@ -696,7 +704,8 @@ class ImageCoordCollection(SRDataObjectCollection):
 		return super()._init_collection_models(*args, **kwargs)
 
 	def create_sr(self, frame_uid=None, **kwargs):
-		'''	SCOORD3D item of the collection, in its own frame or, without one, in `frame_uid`.
+		'''	SCOORD3D item of the collection, in its own frame or, without one, in `frame_uid`. Superseded by
+			`LandmarkSet` for named points, which writes one item per landmark with its own identity.
 
 			@input frame_uid (str, default=None): frame of a collection that names none (a report passes its primary)
 			@returns highdicom.sr.Scoord3DContentItem
@@ -4673,6 +4682,9 @@ class ReportGroup(ReportBaseGroup):
 class VolumePointCollectionGroup(ReportGroup):
 	'''	Specialized report group (container) which is able to encode spatial points and associated measurements/findings.
 		Extension of DICOM-SR TID:1501. (Uses TID:Sonador-1001 DICOM-SR template by default.)
+
+		Superseded by `LandmarkSet` for named points: new documents should hold landmark sets. Groups of this kind
+		that a document already holds are read as legacy landmark sets and migrated when edited.
 	'''
 	def __init__(self, *args, points:Sequence[Union[ImageCoord,ImageCoordCollection]]=None, **kwargs):
 		'''	Initialize report group.
@@ -4750,3 +4762,794 @@ class ReportGroupCollection(SRDataObjectCollection):
 
 
 EUCLID_COORD_ORIGIN = ImageCoord(0, 0, 0)
+
+
+# Landmark sets
+
+# Concepts of a landmark set (Sonador-SR 0.3). `Sonador-SR` carries no `99` prefix (a convention of this client
+# since 0.2), so these are not private codes in the sense of PS3.16 chapter 8.
+SONADOR_LANDMARK = 'Sonador-Landmark'
+DCMSR_LANDMARK = Code(SONADOR_LANDMARK, SONADOR_SR, 'Landmark', scheme_version=SONADOR_SCHEME_VERSION_03)
+DCMSR_LANDMARK_POINT = Code('%s.Point' % SONADOR_LANDMARK, SONADOR_SR, 'Point', scheme_version=SONADOR_SCHEME_VERSION_03)
+DCMSR_LANDMARK_ANATOMIC = Code('%s.Anatomic' % SONADOR_LANDMARK, SONADOR_SR, 'Anatomic', scheme_version=SONADOR_SCHEME_VERSION_03)
+DCMSR_LANDMARK_REGISTRATION = Code('%s.Registration' % SONADOR_LANDMARK, SONADOR_SR, 'Registration',
+	scheme_version=SONADOR_SCHEME_VERSION_03)
+DCMSR_LANDMARK_TYPES = (DCMSR_LANDMARK_POINT, DCMSR_LANDMARK_ANATOMIC, DCMSR_LANDMARK_REGISTRATION)
+
+
+def code_key(code):
+	'''	Identity of a code for matching: scheme designator and code value, whatever attribute holds the value and
+		regardless of meaning and scheme version.
+
+		@input code (Code, CodedConcept, pydicom.Dataset or None)
+		@returns tuple (str, str), or None for no code
+	'''
+	if code is None:
+		return None
+	if isinstance(code, DcmDataset) and not hasattr(code, 'scheme_designator'):
+		from ..sr import dcm_code_value
+		return (str(code.get('CodingSchemeDesignator') or ''), dcm_code_value(code) or '')
+	return (str(getattr(code, 'scheme_designator', '') or ''), str(getattr(code, 'value', '') or ''))
+
+
+def _code_state(code):
+	'''	Everything a code declares, for detecting a change: scheme, value, meaning and version.
+	'''
+	if code is None:
+		return None
+	return code_key(code) + (str(getattr(code, 'meaning', '') or ''), str(getattr(code, 'scheme_version', '') or ''))
+
+
+def _display_state(display):
+	if display is None:
+		return None
+	return (tuple(display.hex.items()), _items_state(display.extra_items), _items_state(display.color_extra_items))
+
+
+DCMSR_LANDMARK_POINT_KEY = code_key(DCMSR_LANDMARK_POINT)
+DCMSR_FREE_TEXT_KEY = (DCMSR_FREE_TEXT_SCHEME, DCMSR_FREE_TEXT_VALUE)
+
+# Where a label is written: a TEXT value beside a concept, or the CodeMeaning of the free-text code
+LANDMARK_LABEL_TEXT = 'text'
+LANDMARK_LABEL_CODE_MEANING = 'code-meaning'
+
+
+def landmark_label_problem(label, place):
+	'''	Why a label cannot be stored exactly where it is written, or None when it can.
+
+		Beside a concept the label is a TEXT value (UT): leading whitespace, backslashes and line breaks (CR, LF) are
+		kept; trailing whitespace is lost on serialization and other control characters are not allowed in a Text
+		Value. Without a concept the label is the CodeMeaning (LO) of the free-text code: leading and trailing
+		whitespace are padding, a backslash splits the value and no control character is allowed.
+
+		@input label (str): a non-blank label
+		@input place (str): `LANDMARK_LABEL_TEXT` or `LANDMARK_LABEL_CODE_MEANING`
+		@returns str or None: the reason
+	'''
+	if label != label.rstrip():
+		return 'trailing whitespace is lost on serialization'
+	if place == LANDMARK_LABEL_CODE_MEANING:
+		if label != label.lstrip():
+			return 'leading whitespace is padding in a CodeMeaning (LO)'
+		if '\\' in label:
+			return 'a backslash splits a CodeMeaning value'
+		if '\r' in label or '\n' in label:
+			return 'a line break is not allowed in a CodeMeaning'
+	controls = [c for c in label if (ord(c) < 32 or ord(c) == 127) and c not in '\r\n']
+	if controls:
+		return 'control character %r is not allowed in %s' % (controls[0],
+			'an SR Text Value' if place == LANDMARK_LABEL_TEXT else 'a CodeMeaning')
+	return None
+
+
+def _blank(label):
+	return label is None or not str(label).strip()
+
+
+def _refuse(condition, message, value=None):
+	from ..sr import SRDiagnostic, SRDiagnosticError, SR_DIAGNOSTIC_ERROR
+	raise SRDiagnosticError(SRDiagnostic(SR_DIAGNOSTIC_ERROR, condition, None, value, message))
+
+
+def _items_state(items):
+	'''	Content of preserved items, for edit detection: the encoded bytes of each dataset, so that replacing an item or
+		changing one in place counts as an edit.
+
+		@input items (iterable of pydicom.Dataset or content items)
+		@returns tuple of bytes
+	'''
+	from pydicom.filebase import DicomBytesIO
+	from pydicom.filewriter import write_dataset
+	found = []
+	for item in items:
+		buffer = DicomBytesIO()
+		buffer.is_little_endian, buffer.is_implicit_VR = True, False
+		write_dataset(buffer, item)
+		found.append(buffer.getvalue())
+	return tuple(found)
+
+
+def _holds_coordinate(items):
+	'''	Whether any of the items, or any item below them, is a SCOORD or SCOORD3D.
+
+		@input items (iterable of pydicom.Dataset)
+		@returns bool
+	'''
+	for item in items or ():
+		if str(item.get('ValueType') or '') in ('SCOORD', 'SCOORD3D'):
+			return True
+		if _holds_coordinate(item.get('ContentSequence') or ()):
+			return True
+	return False
+
+
+class _FrozenMixin:
+	'''	Refuses assignment of the modelled attributes of an object that belongs to a legacy set that cannot be migrated
+		(`landmark-legacy-not-migratable`): the edit is refused when it is attempted, and the object stays as read.
+	'''
+	_frozen = None
+	_modelled = ()
+
+	def __setattr__(self, name, value):
+		if self._frozen is not None and name in self._modelled:
+			from ..sr import SR_CONDITION_LANDMARK_LEGACY_NOT_MIGRATABLE
+			_refuse(SR_CONDITION_LANDMARK_LEGACY_NOT_MIGRATABLE, 'the legacy point group cannot be migrated without loss (%s); it is '
+				'readable and not editable. Build a new set with LandmarkSet.from_points and state its frame' % self._frozen,
+				value=name)
+		super().__setattr__(name, value)
+
+
+class _NamedMixin:
+	'''	Concept and label of a set or a landmark: separate attributes, stored as given, validated where the label is
+		written. Changing one so that the label could not be stored is refused and leaves both as they were.
+	'''
+	reserved_concepts = (DCMSR_FREE_TEXT_KEY,)
+
+	def _check_concept(self, concept):
+		from ..sr import SR_CONDITION_LANDMARK_RESERVED_CONCEPT
+		if concept is not None and code_key(concept) in self.reserved_concepts:
+			_refuse(SR_CONDITION_LANDMARK_RESERVED_CONCEPT, '%s is reserved in the value of a %s and cannot be given as its concept'
+				% ('/'.join(reversed(code_key(concept))), self._noun), value=getattr(concept, 'value', None))
+
+	def _check_label(self, label, concept):
+		from ..sr import SR_CONDITION_LANDMARK_LABEL_UNREPRESENTABLE
+		if label is None:
+			return
+		place = LANDMARK_LABEL_TEXT if concept is not None else LANDMARK_LABEL_CODE_MEANING
+		problem = landmark_label_problem(label, place)
+		if problem:
+			_refuse(SR_CONDITION_LANDMARK_LABEL_UNREPRESENTABLE, 'label %r cannot be stored %s: %s' % (label,
+				'as a TEXT value beside the concept' if concept is not None else 'as the CodeMeaning of a free-text value', problem),
+				value=label)
+
+	def _init_name(self, concept, label):
+		label = None if _blank(label) else str(label)
+		self._check_concept(concept)
+		self._check_label(label, concept)
+		self._concept, self._label = concept, label
+
+	@property
+	def concept(self):
+		return self._concept
+
+	@concept.setter
+	def concept(self, val):
+		self._check_concept(val)
+		self._check_label(self._label, val)
+		self._concept = val
+
+	@property
+	def label(self):
+		return self._label
+
+	@label.setter
+	def label(self, val):
+		val = None if _blank(val) else str(val)
+		self._check_label(val, self._concept)
+		self._label = val
+
+	@property
+	def name(self):
+		'''	Name shown: the concept's meaning when a concept is present, else the label.
+
+			@returns str or None
+		'''
+		if self._concept is not None:
+			return str(getattr(self._concept, 'meaning', '') or '')
+		return self._label
+
+	@property
+	def label_problem(self):
+		'''	Why the current label cannot be stored where it would be written, or None.
+		'''
+		if self._label is None:
+			return None
+		return landmark_label_problem(self._label, LANDMARK_LABEL_TEXT if self._concept is not None else LANDMARK_LABEL_CODE_MEANING)
+
+
+def _landmark_point(point):
+	'''	A landmark position as `ImageCoord` (patient millimetres) or `PixelCoord` (column, row).
+
+		@raises ValueError for anything that is not two or three finite numbers
+	'''
+	if isinstance(point, (ImageCoord, PixelCoord)):
+		values = tuple(float(c) for c in point)
+	else:
+		values = tuple(float(c) for c in np.asarray(point, dtype=float).reshape(-1))
+	if len(values) not in (2, 3) or not all(math.isfinite(c) for c in values):
+		raise ValueError('A landmark is one point of two (column, row) or three (x, y, z) finite values; got %r' % (point,))
+	return PixelCoord(*values) if len(values) == 2 else ImageCoord(*values)
+
+
+class Landmark(_FrozenMixin, _NamedMixin, _DisplayAttributesMixin):
+	'''	One point of a landmark set: a position, an identity (a Fiducial UID) and optional concept, label,
+		description and display attributes, each independent of the others.
+
+		@property point (ImageCoord or PixelCoord): patient millimetres, or (column, row) on the set's image
+		@property concept (Code or CodedConcept or None): coded name; `Sonador-Landmark.Point` and the free-text
+			code are reserved and refused (`landmark-reserved-concept`)
+		@property label (str or None): free-text name, stored exactly as given; a blank string is None
+		@property name (str or None): the concept's meaning, else the label (read only)
+		@property landmark_type (Code or CodedConcept): `DCMSR_LANDMARK_POINT` (default), `_ANATOMIC`, `_REGISTRATION`,
+			or a code read from a document and kept as given
+		@property description (str or None)
+		@property display (DisplayAttributes or None): the landmark's own display attributes; the set's fill the
+			roles it does not give (`LandmarkSet.effective_display`)
+		@property fiducial_uid (str): the landmark's identity, allocated at construction when not given
+		@property extra_items (tuple of pydicom.Dataset): opaque children of the landmark item, written back under it
+	'''
+	_noun = 'landmark'
+	reserved_concepts = (DCMSR_FREE_TEXT_KEY, DCMSR_LANDMARK_POINT_KEY)
+	_modelled = ('point', 'concept', 'label', 'landmark_type', 'description', 'display', 'fiducial_uid', 'extra_items')
+
+	def __init__(self, point, concept=None, label=None, landmark_type=None, description=None, display=None, fiducial_uid=None,
+			extra_items=None):
+		'''	@input point (sequence of 2 or 3 numbers, ImageCoord or PixelCoord)
+			@input concept (Code or CodedConcept, default=None)
+			@input label (str, default=None)
+			@input landmark_type (Code, default=`DCMSR_LANDMARK_POINT`)
+			@input description (str, default=None)
+			@input display (DisplayAttributes or colour-role dict, default=None)
+			@input fiducial_uid (str, default=a new UID)
+			@input extra_items (iterable of pydicom.Dataset, default=None)
+
+			@raises ValueError for a point that is not two or three finite numbers
+			@raises SRDiagnosticError for a reserved concept (`landmark-reserved-concept`) or a label that cannot be stored
+				where it is written (`landmark-label-unrepresentable`)
+		'''
+		self.point = point
+		self._init_name(concept, label)
+		self.landmark_type = landmark_type if landmark_type is not None else DCMSR_LANDMARK_POINT
+		self.description = description
+		self.display = display
+		self.fiducial_uid = str(fiducial_uid) if fiducial_uid else generate_uid()
+		self.extra_items = tuple(extra_items or ())
+		# What the document held, for a landmark read from one (set by the reader)
+		self._parsed = None
+
+	@property
+	def point(self):
+		return self._point
+
+	@point.setter
+	def point(self, val):
+		self._point = _landmark_point(val)
+
+	@property
+	def is_image(self):
+		return isinstance(self._point, PixelCoord)
+
+	def _state(self):
+		return (self.fiducial_uid, tuple(self._point), _code_state(self._concept), self._label, _code_state(self.landmark_type),
+			self.description, _display_state(self.display), _items_state(self.extra_items))
+
+	@property
+	def edited(self):
+		'''	Whether the landmark differs from what was read; True for a landmark created in Python.
+		'''
+		return self._parsed is None or self._parsed['state'] != self._state()
+
+	@property
+	def name_edited(self):
+		return self._parsed is None or self._parsed['state'][2:4] != self._state()[2:4]
+
+	@property
+	def provisional(self):
+		'''	Whether the Fiducial UID was allocated on read (the coordinate item had none).
+		'''
+		return bool(self._parsed is not None and self._parsed.get('provisional'))
+
+	def __repr__(self):
+		return 'Landmark(%r, name=%r, fiducial_uid=%r)' % (tuple(self._point), self.name, self.fiducial_uid)
+
+
+class LandmarkCollection:
+	'''	The ordered landmarks of a set. Indexing, iteration, `len`, `find` and `by_fiducial_uid` read; `append`,
+		`insert`, `remove` and `move` change the set.
+	'''
+	_frozen = None
+
+	def __init__(self, landmarks=()):
+		self._items = list(landmarks)
+
+	def _check_editable(self):
+		if self._frozen is not None:
+			from ..sr import SR_CONDITION_LANDMARK_LEGACY_NOT_MIGRATABLE
+			_refuse(SR_CONDITION_LANDMARK_LEGACY_NOT_MIGRATABLE, 'the legacy point group cannot be migrated without loss (%s); its '
+				'landmarks cannot be added, removed or moved' % self._frozen)
+
+	def __len__(self):
+		return len(self._items)
+
+	def __iter__(self):
+		return iter(list(self._items))
+
+	def __getitem__(self, index):
+		return self._items[index]
+
+	def index(self, landmark):
+		return next(i for i, item in enumerate(self._items) if item is landmark)
+
+	def append(self, landmark):
+		self._check_editable()
+		self._items.append(self._check(landmark))
+
+	def insert(self, index, landmark):
+		self._check_editable()
+		self._items.insert(index, self._check(landmark))
+
+	def remove(self, landmark):
+		self._check_editable()
+		del self._items[self.index(landmark)]
+
+	def move(self, landmark, index):
+		'''	Move a landmark of the set to `index` (as `list.insert` places it after removal).
+		'''
+		self._check_editable()
+		position = self.index(landmark)
+		del self._items[position]
+		self._items.insert(index, landmark)
+
+	@staticmethod
+	def _check(landmark):
+		if not isinstance(landmark, Landmark):
+			raise TypeError('A landmark set holds Landmark instances; got %r' % type(landmark))
+		return landmark
+
+	def find(self, name=None, fiducial_uid=None, landmark_type=None):
+		'''	Landmarks matching every criterion given: `name` against the concept's meaning or the label (a landmark
+			with both is found by either), `fiducial_uid`, and `landmark_type` by scheme and code value.
+
+			@returns list of Landmark, in set order
+		'''
+		found = []
+		for item in self._items:
+			if name is not None and name not in (getattr(item.concept, 'meaning', None), item.label):
+				continue
+			if fiducial_uid is not None and item.fiducial_uid != fiducial_uid:
+				continue
+			if landmark_type is not None and code_key(item.landmark_type) != code_key(landmark_type):
+				continue
+			found.append(item)
+		return found
+
+	def by_fiducial_uid(self, uid):
+		'''	The one landmark with a Fiducial UID.
+
+			@returns Landmark
+			@raises KeyError when none has it, LookupError when the set holds it twice
+		'''
+		found = [item for item in self._items if item.fiducial_uid == uid]
+		if not found:
+			raise KeyError(uid)
+		if len(found) > 1:
+			raise LookupError('Fiducial UID %s is held by %d landmarks of the set' % (uid, len(found)))
+		return found[0]
+
+
+class LandmarkSet(_FrozenMixin, _NamedMixin, _DisplayAttributesMixin, SRDataCollectionMember):
+	'''	A named group of points with attributes of its own: one TID 1501 measurement group of a document, with a
+		Finding for the set and one coded item per landmark, each carrying its point. A set is neither a finding nor a
+		measurement: `report.landmarks` and the `landmarks` accessors list it.
+
+		All points of a set are in one domain: the patient domain (millimetres, in the frame
+		`frame_of_reference_uid` names) or the image domain (column, row on one frame of the image `reference` names).
+		A landmark's own display attributes replace the set's role by role (`effective_display`); the document stores
+		each level as given.
+
+		A set read from a document and not changed is written back exactly as read. A change (an edit of the
+		collection, or a different value of an attribute of the set, of one of its landmarks or of a display role) makes
+		it edited, and an edited set is written in the 0.3 form, with the content the client does not model kept in
+		place. Reading never edits.
+
+		@property concept (Code or None), label (str or None), name (str): as for a landmark; a set needs a concept or a
+			label; only the free-text code is reserved
+		@property description (str or None)
+		@property display (DisplayAttributes or None)
+		@property landmarks (LandmarkCollection)
+		@property tracking_id (str), tracking_uid (str or None): the group's tracking identifier and UID
+		@property series_uid (str or None): Source-Series of a patient-domain set
+		@property frame_of_reference_uid (str or None): frame of a patient-domain set
+		@property reference (ImageReference or None): image of an image-domain set: one instance, one frame
+		@property array (numpy.ndarray): the points, `(N, 3)` or `(N, 2)`, computed on every access
+		@property legacy (bool): read from a `Sonador-SR.1002` point group
+		@property extra_items (tuple of pydicom.Dataset): opaque children of the set's Finding
+	'''
+	_noun = 'landmark set'
+	_modelled = ('concept', 'label', 'description', 'display', 'landmarks', 'tracking_id', 'tracking_uid', 'series_uid',
+		'frame_of_reference_uid', 'reference', 'extra_items', 'source_transform')
+	default_type = SONADOR_MEASUREMENT_TYPE_LANDMARK_SET
+	# Model objects a set read from an imaging server is linked to (`DcmSRInstance.landmark_sets`)
+	series = instance = sr_instance = None
+
+	def __init__(self, landmarks=(), concept=None, label=None, description=None, display=None, tracking_id=None, tracking_uid=None,
+			series_uid=None, frame_of_reference_uid=None, reference=None, extra_items=None, legacy=False, **kwargs):
+		'''	@input landmarks (iterable of Landmark)
+			@input concept, label: the set's name, at least one of them for a set that is written
+			@input description (str, default=None), display (DisplayAttributes or colour-role dict, default=None)
+			@input tracking_id (str, default=the landmark-set tracking identifier), tracking_uid (str, default=None, generated
+				on write)
+			@input series_uid (str, default=None): Source-Series of a patient-domain set
+			@input frame_of_reference_uid (str, default=None): frame of a patient-domain set
+			@input reference (ImageReference, default=None): image of an image-domain set
+			@input extra_items (iterable of pydicom.Dataset, default=None): opaque children of the set's Finding
+			@input legacy (bool, default=False): read from a legacy point group
+
+			@raises SRDiagnosticError for the reserved free-text code as the concept, or a label that cannot be stored
+		'''
+		super().__init__(object_type=self.default_type, **kwargs)
+		from ..sr.seriestag import tracking_id_for_measurement_type
+		self._init_name(concept, label)
+		self.description = description
+		self.display = display
+		self.landmarks = LandmarkCollection(landmarks)
+		self.tracking_id = tracking_id or tracking_id_for_measurement_type(self.default_type)
+		self.tracking_uid = tracking_uid
+		self.series_uid = series_uid
+		if reference is not None and frame_of_reference_uid:
+			raise ValueError('A landmark set lies in one domain: a Frame of Reference (patient) or an image reference (image), not both')
+		self.frame_of_reference_uid = frame_of_reference_uid
+		self.reference = reference
+		self.extra_items = tuple(extra_items or ())
+		self.legacy = bool(legacy)
+		self.source_transform = None
+		# What the document held, for a set read from one (set by the reader)
+		self._parsed = None
+
+	@property
+	def name(self):
+		'''	Name shown: the concept's meaning when a concept is present, else the label; `''` for a set read without
+			either (such a set is refused on write once edited).
+
+			@returns str
+		'''
+		return _NamedMixin.name.fget(self) or ''
+
+	@property
+	def tracking_id(self):
+		return self._tracking_id
+
+	@tracking_id.setter
+	def tracking_id(self, val):
+		'''	The group's tracking identifier: one that routes to a landmark set, so that the group is read back as one.
+
+			@raises ValueError for an identifier that routes elsewhere
+		'''
+		from ..sr.seriestag import measurement_type_for_tracking_id
+		if measurement_type_for_tracking_id(val) != SONADOR_MEASUREMENT_TYPE_LANDMARK_SET:
+			raise ValueError('Tracking identifier %r does not route to a landmark set; a landmark-set group is read back only '
+				'with a landmark-set identifier' % (val,))
+		self._tracking_id = val
+
+	# ---- domain and points ----
+
+	@property
+	def is_image(self):
+		if self.reference is not None:
+			return True
+		return bool(len(self.landmarks)) and self.landmarks[0].is_image and self.frame_of_reference_uid is None
+
+	@property
+	def is_patient(self):
+		return not self.is_image
+
+	@property
+	def points(self):
+		return tuple(item.point for item in self.landmarks)
+
+	@property
+	def array(self):
+		'''	The points as a new float array on every access.
+
+			@returns numpy.ndarray of shape `(N, 2)` (image domain) or `(N, 3)` (patient domain)
+		'''
+		return np.array([tuple(p) for p in self.points], dtype=float).reshape(-1, 2 if self.is_image else 3)
+
+	@property
+	def geometry(self):
+		'''	The set's points as a `Geometry` (`MULTIPOINT`), in its domain, for the report's frame and evidence logic.
+
+			@returns Geometry, or None when the set holds no points or points of both domains (refused on write)
+		'''
+		dimension = 2 if self.is_image else 3
+		if not len(self.landmarks) or any(len(p) != dimension for p in self.points):
+			return None
+		if self.is_image:
+			return Geometry(DCMSR_GEOMETRY_DOMAIN_IMAGE, 'MULTIPOINT', [tuple(p) for p in self.points], self.reference)
+		return Geometry(DCMSR_GEOMETRY_DOMAIN_PATIENT, 'MULTIPOINT', [tuple(p) for p in self.points], None, self.frame_of_reference_uid)
+
+	def effective_display(self, landmark):
+		'''	Display attributes a reader draws a landmark with: the set's roles, replaced role by role by the landmark's own.
+			Neither object is changed.
+
+			@input landmark (Landmark)
+			@returns DisplayAttributes (possibly without any role)
+		'''
+		from ..display_attrs import DisplayAttributes
+		color = OrderedDict()
+		for display in (self.display, landmark.display):
+			if display is not None:
+				color.update(display.color)
+		return DisplayAttributes(color=color)
+
+	# ---- state ----
+
+	def _state(self):
+		# Landmarks are tracked by identity (Fiducial UID), never by object address, so that a copy keeps the baseline
+		return (_code_state(self._concept), self._label, self.description, _display_state(self.display), self.tracking_uid,
+			self.series_uid, self.frame_of_reference_uid, tuple(self.reference) if self.reference is not None else None,
+			_items_state(self.extra_items), tuple(item._state() for item in self.landmarks),
+			tuple(item.fiducial_uid for item in self.landmarks), self._tracking_id)
+
+	@property
+	def edited(self):
+		'''	Whether the set differs from what was read, at any level; True for a set created in Python.
+		'''
+		return self._parsed is None or self._parsed['state'] != self._state()
+
+	@property
+	def name_edited(self):
+		return self._parsed is None or self._parsed['state'][:2] != self._state()[:2]
+
+	@property
+	def structure_edited(self):
+		'''	Whether a point was added, removed, moved or changed, or the frame or source image changed, since the set was
+			read.
+		'''
+		if self._parsed is None:
+			return True
+		before, after = self._parsed['state'], self._state()
+		return before[6] != after[6] or before[7] != after[7] or before[10] != after[10] or tuple(s[1] for s in before[9]) != tuple(s[1] for s in after[9])
+
+	@property
+	def geometry_edited(self):
+		'''	Whether the set's geometry is new or changed: a set created in Python, or one whose points, membership, order,
+			frame or image changed since it was read. An edit of names, descriptions or display attributes alone is not
+			a geometry edit.
+		'''
+		return self.structure_edited
+
+	@property
+	def has_opaque_geometry(self):
+		'''	Whether content the client keeps without reading it holds a coordinate: an unreadable landmark item or another
+			opaque child of the group, an extra item of the set or of a landmark, or a coordinate below a retained
+			coordinate item. Such geometry cannot be converted with the set.
+		'''
+		parsed = self._parsed or {}
+		if parsed.get('opaque_geometry'):
+			return True
+		if _holds_coordinate(item for _, item in parsed.get('opaque', ())):
+			return True
+		def display_items(display):
+			return tuple(display.extra_items) + tuple(display.color_extra_items) if display is not None else ()
+		if _holds_coordinate(self.extra_items) or _holds_coordinate(display_items(self.display)):
+			return True
+		for landmark in self.landmarks:
+			if _holds_coordinate(landmark.extra_items) or _holds_coordinate(display_items(landmark.display)):
+				return True
+			coordinate = (landmark._parsed or {}).get('coordinate')
+			if coordinate is not None and _holds_coordinate(coordinate.get('ContentSequence') or ()):
+				return True
+		return False
+
+	def _freeze(self, reason):
+		'''	Make the set read-only: an edit of the set, of one of its landmarks or of its membership raises
+			`landmark-legacy-not-migratable` with `reason`, and leaves the set as read.
+		'''
+		object.__setattr__(self, '_frozen', reason)
+		object.__setattr__(self.landmarks, '_frozen', reason)
+		for landmark in self.landmarks:
+			object.__setattr__(landmark, '_frozen', reason)
+
+	# ---- construction ----
+
+	@classmethod
+	def from_points(cls, points, name=None, names=None, labels=None, descriptions=None, landmark_type=None, landmark_types=None,
+			displays=None, fiducial_uids=None, reference=None, frame_of_reference_uid=None, series_uid=None, transform=None,
+			label=None, description=None, display=None, **kwargs):
+		'''	A new set from its points and per-point attributes.
+
+			@input points (sequence): `ImageCoord`, `PixelCoord`, tuples, a numpy array, or `Landmark` instances (which keep
+				their own identity, type, attributes and display)
+			@input name (Code or str, default=None): the set's concept (a Code) or label (a str)
+			@input label (str, default=None): a label beside a concept; refused when it differs from a `str` name
+			@input names (list of Code, str or None), labels, descriptions, landmark_types, displays, fiducial_uids (list,
+				default=None): per-point entries, exactly one per point, None for "not given"
+			@input landmark_type (Code, default=`DCMSR_LANDMARK_POINT`): type of a point with no entry of its own
+			@input reference (ImageReference, default=None): image of an image-domain set
+			@input frame_of_reference_uid (str, default=the transform's target): frame of a patient-domain set
+			@input series_uid (str, default=None): Source-Series of a patient-domain set
+			@input transform (ImageTransformMatrix, default=None): rigid conversion applied once to every point: the points
+				are given in the transform's source frame and unit, and stored in millimetres in its target frame, which
+				becomes the set's frame
+			@input description (str), display (DisplayAttributes or dict): the set's own
+
+			@returns LandmarkSet
+			@raises ValueError for a per-point list of another length, a contradictory entry for a supplied `Landmark`, a
+				`str` name with a different label, a transform on image points or a non-rigid transform
+			@raises SRDiagnosticError for a reserved concept or an unrepresentable label
+		'''
+		points = list(points if not isinstance(points, np.ndarray) else [tuple(p) for p in points])
+		count = len(points)
+		lists = OrderedDict((('names', names), ('labels', labels), ('descriptions', descriptions), ('landmark_types', landmark_types),
+			('displays', displays), ('fiducial_uids', fiducial_uids)))
+		for key, entries in lists.items():
+			if entries is not None and len(entries) != count:
+				raise ValueError('%s has %d entries for %d points; give one per point, None for "not given"' % (key, len(entries), count))
+		concept, set_label = cls._split_name(name, label)
+
+		if transform is not None:
+			transform.rigid_matrix()
+			if not (transform.source_frame or transform.uid):
+				raise ValueError('A frame conversion must name its source frame')
+			if frame_of_reference_uid and transform.target_frame and frame_of_reference_uid != transform.target_frame:
+				raise ValueError('The transform targets frame %s, not the set frame %s' % (transform.target_frame, frame_of_reference_uid))
+			frame_of_reference_uid = frame_of_reference_uid or transform.target_frame
+
+		def entry(key, index):
+			entries = lists[key]
+			return entries[index] if entries is not None else None
+
+		if transform is not None and reference is not None:
+			raise ValueError('A frame conversion applies to patient-domain points; an image-domain set takes no transform')
+
+		# Everything is checked before a supplied Landmark is changed: the fills, the transform and the set itself
+		landmarks, fills, moves = [], [], []
+		for index, point in enumerate(points):
+			given = {'names': entry('names', index), 'labels': entry('labels', index), 'descriptions': entry('descriptions', index),
+				'landmark_types': entry('landmark_types', index), 'displays': entry('displays', index),
+				'fiducial_uids': entry('fiducial_uids', index)}
+			if isinstance(point, Landmark):
+				landmark = point
+				fills.append((landmark, cls._fills(landmark, given, index)))
+			else:
+				item_concept, item_label = cls._split_name(given['names'], given['labels'])
+				landmark = Landmark(point, concept=item_concept, label=item_label,
+					landmark_type=given['landmark_types'] if given['landmark_types'] is not None else landmark_type,
+					description=given['descriptions'], display=given['displays'], fiducial_uid=given['fiducial_uids'])
+			if transform is not None:
+				if landmark.is_image:
+					raise ValueError('A frame conversion applies to patient-domain points only')
+				moves.append((landmark, transform.convert([tuple(landmark.point)])[0]))
+			landmarks.append(landmark)
+		def build(members):
+			# Apply the fills and the conversion to `members` (the landmarks, or copies of them) and build the set
+			for landmark, changes in fills:
+				for attr, value in changes:
+					setattr(members[id(landmark)], attr, value)
+			for landmark, point in moves:
+				members[id(landmark)].point = point
+			result = cls([members[id(landmark)] for landmark in landmarks], concept=concept, label=set_label,
+				description=description, display=display, series_uid=series_uid, frame_of_reference_uid=frame_of_reference_uid,
+				reference=reference, **kwargs)
+			result.source_transform = transform
+			return result
+
+		# A trial on copies first: anything that refuses (a frozen landmark, the set's display, name, domain or tracking
+		# identifier) refuses here, before a supplied Landmark is changed. A one-shot iterable is read once, before both
+		if kwargs.get('extra_items') is not None:
+			kwargs['extra_items'] = tuple(kwargs['extra_items'])
+		build(dict((id(landmark), copy.deepcopy(landmark)) for landmark in landmarks))
+		return build(dict((id(landmark), landmark) for landmark in landmarks))
+
+	@staticmethod
+	def _split_name(name, label):
+		'''	Concept and label of a `name` (a Code or a str) and an explicit `label`.
+		'''
+		if name is None:
+			return None, label
+		if isinstance(name, str):
+			if not _blank(label) and label != name:
+				raise ValueError('A str name is the label; a different label %r was also given' % label)
+			return None, name
+		return name, label
+
+	@classmethod
+	def _fills(cls, landmark, given, index):
+		'''	The per-point entries a supplied `Landmark` takes: what it lacks is filled, what contradicts it is refused. The
+			landmark is not changed here; the caller applies the fills once every point has been checked. A landmark always
+			has a type (Point unless stated), so a type entry that differs from it is a contradiction.
+
+			@returns list of (attribute, value)
+			@raises ValueError for a contradictory entry, SRDiagnosticError for a name that cannot be stored
+		'''
+		concept, label = cls._split_name(given['names'], given['labels']) if (given['names'] is not None or given['labels'] is not None) \
+			else (None, None)
+		display = given['displays']
+		if display is not None and not hasattr(display, 'color'):
+			from ..display_attrs import DisplayAttributes
+			display = DisplayAttributes(color=display)
+		checks = (('concept', concept, landmark.concept, lambda a, b: code_key(a) == code_key(b)),
+			('label', label, landmark.label, lambda a, b: a == b),
+			('description', given['descriptions'], landmark.description, lambda a, b: a == b),
+			('fiducial_uid', given['fiducial_uids'], landmark.fiducial_uid, lambda a, b: str(a) == str(b)),
+			('landmark_type', given['landmark_types'], landmark.landmark_type, lambda a, b: code_key(a) == code_key(b)),
+			('display', display, landmark.display, lambda a, b: _display_state(a) == _display_state(b)))
+		fills = []
+		for attr, value, current, same in checks:
+			if value is None:
+				continue
+			if current is not None and not same(value, current):
+				raise ValueError('Point %d is a Landmark whose %s is %r; the entry %r contradicts it' % (index, attr, current, value))
+			if current is None:
+				fills.append((attr, value))
+		if any(attr in ('concept', 'label') for attr, _ in fills):
+			# Validate the name the landmark would have before changing it
+			probe = Landmark.__new__(Landmark)
+			probe._init_name(concept if concept is not None else landmark.concept, label if label is not None else landmark.label)
+		return fills
+
+	@classmethod
+	def from_sr(cls, group, strict=False, diagnostics=None, **kwargs):
+		'''	A set read from its measurement group (`sonador.apisettings.sr.landmarks.srparse_landmark_set`).
+
+			@input group (pydicom.Dataset): the measurement group
+			@returns LandmarkSet, or None for a group that reads as a plain group
+		'''
+		from ..sr.landmarks import srparse_landmark_set_group
+		return srparse_landmark_set_group(group, strict=strict, diagnostics=diagnostics, **kwargs)
+
+	def create_sr(self, **kwargs):
+		from ..sr.landmarks import srencode_landmark_set
+		return srencode_landmark_set(self, **kwargs)
+
+	def __repr__(self):
+		return 'LandmarkSet(name=%r, landmarks=%d, tracking_uid=%r)' % (self.name, len(self.landmarks), self.tracking_uid)
+
+
+class LandmarkSetCollection(SRDataObjectCollection):
+	'''	Collection of landmark sets, as the accessors return them.
+	'''
+	model = LandmarkSet
+
+	def create_sr(self, **kwargs):
+		return tuple(item.create_sr(**kwargs) for item in self)
+
+
+class LandmarkSetGroup(ReportGroup):
+	'''	Report group of a document that holds a landmark set: written from the set (exactly as read while it is
+		unchanged), or not at all once the set is removed from the report.
+
+		@property landmark_set (LandmarkSet)
+	'''
+	def __init__(self, landmark_set, **kwargs):
+		super().__init__(tracking_id=landmark_set.tracking_id, tracking_uid=landmark_set.tracking_uid, **kwargs)
+		self.landmark_set = landmark_set
+
+	def create_sr(self, **kwargs):
+		return self.landmark_set.create_sr(**kwargs)
+
+
+class RawReportGroup(ReportGroup):
+	'''	Report group written back exactly as it was read: a landmark-set group that does not read as a set.
+
+		@property dataset (pydicom.Dataset): the group item
+	'''
+	def __init__(self, dataset, **kwargs):
+		super().__init__(**kwargs)
+		self.dataset = dataset
+		self.extra_items = (dataset,)
+
+	def create_sr(self, **kwargs):
+		from ..sr.landmarks import raw_group_template
+		return raw_group_template(self.dataset, self.tracking_id, self.tracking_uid)

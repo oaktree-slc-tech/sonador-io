@@ -774,6 +774,7 @@ SONADOR_MEASUREMENT_TYPE_COBB_ANGLE = 'cobb-angle'
 SONADOR_MEASUREMENT_TYPE_CIRCLE = 'circle'
 SONADOR_MEASUREMENT_TYPE_BIDIRECTIONAL = 'bidirectional'
 SONADOR_MEASUREMENT_TYPE_ARROW = 'arrow'			# a text annotation anchored by an arrow: a finding, not a measurement
+SONADOR_MEASUREMENT_TYPE_LANDMARK_SET = 'landmark-set'	# a named set of points: neither a finding nor a measurement
 SONADOR_MEASUREMENT_TYPE_GENERIC = 'generic'		# a NUM group with an unknown tracking identifier
 
 DCMHEADER_SR_CONTENT_SEQUENCE = 'ContentSequence'

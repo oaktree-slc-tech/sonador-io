@@ -48,7 +48,8 @@ from highdicom.sr.enum import RelationshipTypeValues, ValueTypeValues
 
 from ..base import SONADOR_MANUFACTURER, SONADOR_SR, SONADOR_SCHEME_VERSION_03, Finding, FindingCollection, \
 	MeasurementCollection, SONADOR_MEASUREMENT_TYPE_SERIES_TAG, SONADOR_MEASUREMENT_TYPE_LENGTH, SONADOR_MEASUREMENT_TYPE_ANGLE, \
-	SONADOR_MEASUREMENT_TYPE_COBB_ANGLE, SONADOR_MEASUREMENT_TYPE_CIRCLE, SONADOR_MEASUREMENT_TYPE_BIDIRECTIONAL, SONADOR_MEASUREMENT_TYPE_ARROW, SONADOR_MEASUREMENT_TYPE_GENERIC, ReportGroup, ImageReference, DCMSR_FINDING, RGBColor, \
+	SONADOR_MEASUREMENT_TYPE_COBB_ANGLE, SONADOR_MEASUREMENT_TYPE_CIRCLE, SONADOR_MEASUREMENT_TYPE_BIDIRECTIONAL, SONADOR_MEASUREMENT_TYPE_ARROW, \
+	SONADOR_MEASUREMENT_TYPE_LANDMARK_SET, SONADOR_MEASUREMENT_TYPE_GENERIC, ReportGroup, ImageReference, DCMSR_FINDING, RGBColor, \
 	DCMHEADER_SR_VALUE_TYPE, DCMHEADER_CONCEPT_CODE_SEQUENCE, DCMHEADER_CODING_SCHEME_VERSION, \
 	DCMHEADER_CODING_SCHEME_DESIGNATOR, DCMHEADER_CODE_MEANING, DCMHEADER_CODE_VALUE, \
 	DCMHEADER_SR_REF_SOP_SEQ, DCMHEADER_SR_SOP_CLASS_UID, DCMHEADER_SR_REF_INSTANCE_UID, DCMHEADER_SERIES_INSTANCE_UID
@@ -113,6 +114,7 @@ CORNERSTONE_TOOL_COBB_ANGLE = 'CobbAngle'
 CORNERSTONE_TOOL_CIRCLE = 'CircleROI'
 CORNERSTONE_TOOL_BIDIRECTIONAL = 'Bidirectional'
 CORNERSTONE_TOOL_ARROW = 'ArrowAnnotate'
+CORNERSTONE_TOOL_LANDMARK_SET = 'SonadorLandmarkSet'			# a Sonador tool name: no stock Cornerstone tool reads it
 
 
 def cornerstone_tracking_id(tool):
@@ -136,6 +138,7 @@ SONADOR_MEASUREMENT_TYPES = OrderedDict((
 	(cornerstone_tracking_id(CORNERSTONE_TOOL_CIRCLE), SONADOR_MEASUREMENT_TYPE_CIRCLE),
 	(cornerstone_tracking_id(CORNERSTONE_TOOL_BIDIRECTIONAL), SONADOR_MEASUREMENT_TYPE_BIDIRECTIONAL),
 	(cornerstone_tracking_id(CORNERSTONE_TOOL_ARROW), SONADOR_MEASUREMENT_TYPE_ARROW),
+	(cornerstone_tracking_id(CORNERSTONE_TOOL_LANDMARK_SET), SONADOR_MEASUREMENT_TYPE_LANDMARK_SET),
 	('%s:%s' % (CORNERSTONE3D_TOOLS_SR_TAG, CORNERSTONE_TOOL_LENGTH), SONADOR_MEASUREMENT_TYPE_LENGTH),
 	('%s:%s' % (CORNERSTONE3D_TOOLS_SR_TAG, CORNERSTONE_TOOL_ANGLE), SONADOR_MEASUREMENT_TYPE_ANGLE),
 	('%s:%s' % (CORNERSTONE3D_TOOLS_SR_TAG, CORNERSTONE_TOOL_COBB_ANGLE), SONADOR_MEASUREMENT_TYPE_COBB_ANGLE),
@@ -786,6 +789,8 @@ def srparse_report_group(group, strict=False, diagnostics=None, group_class=Repo
 
 		An `ArrowAnnotate` group is read by `sonador.apisettings.sr.arrow.srparse_arrow`: its Finding becomes an
 		`ArrowAnnotation` (or a plain Finding of type `arrow`), listed with the findings; it has no measurement.
+		A `SonadorLandmarkSet` group is read by `sonador.apisettings.sr.landmarks.srparse_landmark_set` and returned as a
+		`LandmarkSetGroup`, or, when it does not read as a set, as a `RawReportGroup` written back exactly as read.
 
 		Diagnostics raised here: `unknown-tracking-identifier` (info, the group stays generic),
 		`series-tag-group-without-finding` (error, a Series Tag group without a Finding code stays
@@ -828,6 +833,17 @@ def srparse_report_group(group, strict=False, diagnostics=None, group_class=Repo
 		sr_diagnostic(diagnostics, SR_DIAGNOSTIC_INFO, SR_CONDITION_UNKNOWN_TRACKING_ID,
 			'measurement group with an unknown tracking identifier kept as a generic report group',
 			path=path, value=tracking_id)
+
+	# A landmark-set group: read as a LandmarkSet, or kept exactly as read when it does not read as one
+	if measurement_type == SONADOR_MEASUREMENT_TYPE_LANDMARK_SET:
+		from ..base import LandmarkSetGroup, RawReportGroup
+		from .landmarks import srparse_landmark_set
+		landmark_set = srparse_landmark_set(group, tracking_id, tracking_uid, consumed, strict=strict, diagnostics=diagnostics,
+			images=kwargs.pop('images', None))
+		kwargs.pop('calibrations', None)
+		if landmark_set is not None:
+			return LandmarkSetGroup(landmark_set)
+		return RawReportGroup(copy.deepcopy(group), tracking_id=tracking_id, tracking_uid=tracking_uid)
 
 	finding_indices = [idx for idx, child in enumerate(children)
 		if idx not in consumed and _value_type(child) == 'CODE' and srcontent_is_named(child, DCMSR_FINDING)

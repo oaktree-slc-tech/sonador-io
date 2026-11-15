@@ -66,7 +66,7 @@ from ...apisettings import IMAGING_SERVER_RESOURCE_REPORT, DCMHEADER_SERIES_INST
 	DCMHEADER_SERIES_DESCRIPTION, DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME, DCMHEADER_STUDY_INSTANCE_UID, \
 	IMAGING_SERVER_PARENT_SERIES, IMAGING_SERVER_SERIES_INDEX, IMAGING_SERVER_MAINDICOM, \
 	DicomDatetimePair, DCMTS_CONTENT, FindingCollection, MeasurementCollection, DCMHEADER_FRAME_OF_REFERENCE_UID, \
-	SONADOR_MEASUREMENT_TYPE_GENERIC
+	SONADOR_MEASUREMENT_TYPE_GENERIC, SONADOR_MEASUREMENT_TYPE_LANDMARK_SET, LandmarkSetCollection
 from ...apisettings.sr import sr_diagnostic, SR_DIAGNOSTIC_INFO, SR_DIAGNOSTIC_WARNING, \
 	SR_CONDITION_PREDECESSOR_CHAIN_UNVERIFIED, SR_CONDITION_UID_ORDER_TIE_BREAK, SR_CONDITION_SHARED_TRACKING_UID, \
 	SR_CONDITION_UNKNOWN_SOURCE_SERIES
@@ -101,6 +101,44 @@ def dcmsr_series_frame_uid(series):
 		if uid:
 			return uid
 	return None
+
+
+def dcmsr_image_metadata(series_list):
+	'''	What is cached about the images of some series, for checking image-domain annotations: the size of a frame,
+		the number of frames and whether the image is tiled, by SOP Instance UID. Read from the main tags of each cached
+		instance, then from its full tags or file when those are already cached. Makes no request.
+
+		@input series_list (iterable of ImagingSeries)
+		@returns dict: SOP Instance UID -> ImageMetadata (fields None where nothing cached says)
+	'''
+	from ...apisettings.sr.landmarks import ImageMetadata
+
+	def number(sources, name):
+		for source in sources:
+			value = dcm_header_value(source, name)
+			if value is not None:
+				try:
+					return int(value)
+				except (TypeError, ValueError):
+					continue
+		return None
+
+	found = {}
+	for series in series_list or []:
+		for instance in series.__dict__.get('_slices') or []:
+			sources = [instance.dicomdata, instance.__dict__.get('_tags'), instance.__dict__.get('_dcmfile')]
+			sources = [source for source in sources if source is not None]
+			uid = next((dcm_header_uid(source, DCMHEADER_SOP_INSTANCE_UID) for source in sources
+				if dcm_header_uid(source, DCMHEADER_SOP_INSTANCE_UID)), None)
+			if not uid:
+				continue
+			organization = next((str(dcm_header_value(source, 'DimensionOrganizationType')) for source in sources
+				if dcm_header_value(source, 'DimensionOrganizationType') is not None), None)
+			matrix = number(sources, 'TotalPixelMatrixColumns')
+			tiled = True if (organization in ('TILED_FULL', 'TILED_SPARSE') or matrix is not None) else None
+			found[uid] = ImageMetadata(columns=number(sources, 'Columns'), rows=number(sources, 'Rows'),
+				frames=number(sources, 'NumberOfFrames'), tiled=tiled)
+	return found
 
 
 def _measurement_frame_uid(measurement):
@@ -188,6 +226,21 @@ def _merge_results(target, source, collection_class=FindingCollection):
 			else:
 				bucket[mtype] = collection_class(list(collection))
 	return target
+
+
+def _landmarks_by_series(nested, series_uid=None):
+	'''	`{series_uid: [LandmarkSet, ...]}` of a `{series_uid: {'landmark-set': collection}}` mapping, narrowed to one series.
+
+		@returns OrderedDict
+	'''
+	found = OrderedDict()
+	for uid, by_type in nested.items():
+		if series_uid is not None and uid != series_uid:
+			continue
+		items = list(by_type.get(SONADOR_MEASUREMENT_TYPE_LANDMARK_SET) or [])
+		if items:
+			found[uid] = items
+	return found
 
 
 def dcmsr_local_series(datasets, server=None):
@@ -324,6 +377,20 @@ class DcmSRSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 			for instance in self._instances:
 				instance.invalidate()
 
+	def landmark_sets(self, collection_class=LandmarkSetCollection, **kwargs):
+		'''	Landmark sets of the current document of the series, as `DcmSRInstance.landmark_sets` keys them.
+
+			@returns dict: `{series_uid: {'landmark-set': LandmarkSetCollection}}`
+		'''
+		return self.instances_collection._aggregate('landmark_sets', collection_class=collection_class, **kwargs)
+
+	def landmarks(self, series_uid=None, frame_of_reference_uid=None, **kwargs):
+		'''	Landmark sets of the current document of the series. Arguments as `DcmSRInstanceCollection.landmarks`.
+
+			@returns dict: `{series_uid: [LandmarkSet, ...]}`
+		'''
+		return self.instances_collection.landmarks(series_uid=series_uid, frame_of_reference_uid=frame_of_reference_uid, **kwargs)
+
 	def findings(self, series_uid=None, measurement_type=None, **kwargs):
 		'''	Qualitative findings of the current document of the series, keyed by imaging-series UID and
 			measurement type. Arguments as `DcmSRInstanceCollection.findings`.
@@ -418,6 +485,15 @@ class DcmSRSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingServerChildCo
 			_merge_results(results, per_series, collection_class=collection_class)
 		return _shape_results(results, series_uid=series_uid, measurement_type=measurement_type, collection_class=collection_class,
 			frame_of_reference_uid=frame_of_reference_uid)
+
+	def landmarks(self, series_uid=None, frame_of_reference_uid=None, **kwargs):
+		'''	Landmark sets of the current document of every SR series of the study, combined as `findings` combines.
+
+			@input kwargs: `all_revisions`, `diagnostics`, `strict`
+			@returns dict: `{series_uid: [LandmarkSet, ...]}`
+		'''
+		nested = self._aggregate('landmark_sets', collection_class=LandmarkSetCollection, frame_of_reference_uid=frame_of_reference_uid, **kwargs)
+		return _landmarks_by_series(nested, series_uid)
 
 	def findings(self, series_uid=None, measurement_type=None, **kwargs):
 		'''	Qualitative findings of the current document of every SR series of the study, keyed by
@@ -560,6 +636,8 @@ class DcmSRInstance(DcmStructuredInstance):
 		if study_series is not None and 'study_frames' not in kwargs:
 			kwargs['study_frames'] = OrderedDict((sx.series_uid, dcmsr_series_frame_uid(sx)) for sx in study_series
 				if sx.series_uid and dcmsr_series_frame_uid(sx))
+		if study_series is not None and 'images' not in kwargs:
+			kwargs['images'] = dcmsr_image_metadata(study_series)
 		report = report_class.from_sr(self.dcmfile(cache=True), strict=strict, **kwargs)
 		if self.__dict__.get('_parent') is not None and self.__dict__.get('pacs') is not None:
 			report.series = self._parent
@@ -743,6 +821,43 @@ class DcmSRInstance(DcmStructuredInstance):
 			for uid, by_type in results.items())
 
 	@property
+	def landmark_sets(self):
+		'''	Landmark sets of the document, parsed with `report` (one `file` request on first access, shared with `findings`),
+			each linked to this SR instance and keyed by the series it is listed under: a patient-domain set by its
+			Source-Series when the document references that series, else by the series of its frame when exactly one
+			referenced series has that frame, else by the document's series; an image-domain set by the series its image
+			is recorded under in the evidence, else by the document's series.
+
+			@returns dict: `{series_uid: {'landmark-set': LandmarkSetCollection}}`
+		'''
+		report = self.report
+		referenced = set(r.series_uid for r in ((report.parsed.evidence or {}).values() if getattr(report, 'parsed', None) is not None else [])
+			if r.series_uid)
+		results = OrderedDict()
+		for lset in (getattr(report, 'landmarks', None) or []):
+			lset.sr_instance = self
+			if lset.is_image:
+				series_uid = (lset.reference.series_uid if lset.reference is not None else None) or self.series
+			elif lset.series_uid and lset.series_uid in referenced:
+				series_uid = lset.series_uid
+			elif lset.series_uid:
+				series_uid = self.series
+			else:
+				series_uid = _frame_bucket(report, lset.frame_of_reference_uid) or self.series
+			results.setdefault(series_uid, OrderedDict()).setdefault(SONADOR_MEASUREMENT_TYPE_LANDMARK_SET, []).append(lset)
+		return OrderedDict((uid, OrderedDict((mtype, LandmarkSetCollection(items)) for mtype, items in by_type.items()))
+			for uid, by_type in results.items())
+
+	def landmarks(self, series_uid=None, frame_of_reference_uid=None):
+		'''	Landmark sets of the document (`landmark_sets`), narrowed by series and by stored frame. No request after the
+			document is parsed.
+
+			@returns dict: `{series_uid: [LandmarkSet, ...]}`
+		'''
+		nested = _shape_results(self.landmark_sets, collection_class=LandmarkSetCollection, frame_of_reference_uid=frame_of_reference_uid)
+		return _landmarks_by_series(nested, series_uid)
+
+	@property
 	def measurements(self):
 		'''	Quantitative measurements of the document, parsed with `report` (one `file` request on first
 			access, shared with `findings`, and none after that): the measurements of every group of the
@@ -871,6 +986,16 @@ class DcmSRInstanceCollection(DcmStructuredInstanceCollection):
 			_merge_results(results, getattr(instance, attr), collection_class=collection_class)
 		return _shape_results(results, series_uid=series_uid, measurement_type=measurement_type, collection_class=collection_class,
 			frame_of_reference_uid=frame_of_reference_uid)
+
+	def landmarks(self, series_uid=None, frame_of_reference_uid=None, all_revisions=False, diagnostics=None, strict=False):
+		'''	Landmark sets of the current document of the series (every document with `all_revisions=True`), with the
+			arguments and the revision rule of `findings`.
+
+			@returns dict: `{series_uid: [LandmarkSet, ...]}`
+		'''
+		nested = self._aggregate('landmark_sets', all_revisions=all_revisions, diagnostics=diagnostics, collection_class=LandmarkSetCollection,
+			strict=strict, frame_of_reference_uid=frame_of_reference_uid)
+		return _landmarks_by_series(nested, series_uid)
 
 	def findings(self, series_uid=None, measurement_type=None, all_revisions=False, diagnostics=None, strict=False,
 			collection_class=FindingCollection):

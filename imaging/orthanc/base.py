@@ -1413,6 +1413,16 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		if self.__dict__.get('_sr') is not None:
 			self._sr.invalidate()
 
+	def landmarks(self, series_uid=None, frame_of_reference_uid=None, **kwargs):
+		'''	Landmark sets of the study: the current document of every SR series, with the request budget of `findings`
+			(the parsed reports are shared).
+
+			@input series_uid (str, default=None), frame_of_reference_uid (str, default=None): narrowing
+			@input kwargs: `all_revisions`, `diagnostics`, `strict`
+			@returns dict: `{series_uid: [LandmarkSet, ...]}`
+		'''
+		return self.sr_collection.landmarks(series_uid=series_uid, frame_of_reference_uid=frame_of_reference_uid, **kwargs)
+
 	def findings(self, series_uid=None, measurement_type=None, **kwargs):
 		'''	Qualitative findings of the study: the current document of every SR series, keyed by
 			imaging-series UID and measurement type. After `bulkpopulate_related(child_instances=True)` on the study
@@ -2389,6 +2399,14 @@ class ImagingSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 			[dcmsr for dcmsr in self.parent.sr_collection if self.series_uid in dcmsr.series_reference_uids],
 			key=lambda dcm: dcm.ts if dcm.ts else datetime.datetime(year=1900, month=1, day=1),
 			reverse=True)
+
+	def landmarks(self, frame_of_reference_uid=None, **kwargs):
+		'''	Landmark sets listed under this series, from the current document of every SR series of the parent study
+			(`ImagingStudy.landmarks` narrowed to this series).
+
+			@returns dict: `{series_uid: [LandmarkSet, ...]}`
+		'''
+		return self.parent.landmarks(series_uid=self.series_uid, frame_of_reference_uid=frame_of_reference_uid, **kwargs)
 
 	def findings(self, measurement_type=None, **kwargs):
 		'''	Qualitative findings that apply to this series, from the current document of every SR series
