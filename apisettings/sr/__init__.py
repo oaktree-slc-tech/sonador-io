@@ -245,6 +245,31 @@ SR_CONDITION_LEGACY_TARGET_CHANGE = 'legacy-target-change'
 SR_CONDITION_UNKNOWN_FRAME = 'unknown-frame'
 SR_CONDITION_FRAME_CONVENTION_AMBIGUOUS = 'frame-convention-ambiguous'
 SR_CONDITION_FRAME_POLICY_REFUSED = 'frame-policy-refused'
+SR_CONDITION_LANDMARK_RESERVED_CONCEPT = 'landmark-reserved-concept'
+SR_CONDITION_LANDMARK_LABEL_UNREPRESENTABLE = 'landmark-label-unrepresentable'
+SR_CONDITION_LANDMARK_LABEL_DUPLICATE = 'landmark-label-duplicate'
+SR_CONDITION_LANDMARK_LABEL_DUPLICATE_DROPPED = 'landmark-label-duplicate-dropped'
+SR_CONDITION_LANDMARK_TYPE_ABSENT = 'landmark-type-absent'
+SR_CONDITION_LANDMARK_TYPE_UNKNOWN = 'landmark-type-unknown'
+SR_CONDITION_LANDMARK_PIXEL_ORIGIN_UNSUPPORTED = 'landmark-pixel-origin-unsupported'
+SR_CONDITION_LANDMARK_SET_EMPTY = 'landmark-set-empty'
+SR_CONDITION_LANDMARK_SET_READ_AS_GROUP = 'landmark-set-read-as-group'
+SR_CONDITION_LANDMARK_SET_WITHOUT_NAME = 'landmark-set-without-name'
+SR_CONDITION_LANDMARK_WITHOUT_POINT = 'landmark-without-point'
+SR_CONDITION_LANDMARK_POINT_AMBIGUOUS = 'landmark-point-ambiguous'
+SR_CONDITION_LANDMARK_POINT_INVALID = 'landmark-point-invalid'
+SR_CONDITION_LANDMARK_IMAGE_REFERENCE_MISSING = 'landmark-image-reference-missing'
+SR_CONDITION_LANDMARK_IMAGE_REFERENCE_AMBIGUOUS = 'landmark-image-reference-ambiguous'
+SR_CONDITION_LANDMARK_POINT_OUT_OF_BOUNDS = 'landmark-point-out-of-bounds'
+SR_CONDITION_LANDMARK_SET_MIXED_FRAMES = 'landmark-set-mixed-frames'
+SR_CONDITION_DUPLICATE_FIDUCIAL_UID = 'duplicate-fiducial-uid'
+SR_CONDITION_LANDMARK_IDENTITY_PROVISIONAL = 'landmark-identity-provisional'
+SR_CONDITION_LANDMARK_SOURCE_SERIES_UNKNOWN = 'landmark-source-series-unknown'
+SR_CONDITION_LANDMARK_CONVERSION_OPAQUE_GEOMETRY = 'landmark-conversion-opaque-geometry'
+SR_CONDITION_LANDMARK_LEGACY_COLLECTION = 'landmark-legacy-collection'
+SR_CONDITION_LANDMARK_LEGACY_MIGRATED = 'landmark-legacy-migrated'
+SR_CONDITION_LANDMARK_LEGACY_NOT_MIGRATABLE = 'landmark-legacy-not-migratable'
+SR_CONDITION_LANDMARK_SET_INVALID = 'landmark-set-invalid'
 
 
 class SRDiagnostic(namedtuple('SRDiagnostic', ('severity', 'condition', 'path', 'value', 'message'))):
@@ -399,6 +424,22 @@ def _placeholder_num_values(item, found):
 		_placeholder_num_values(child, found)
 
 
+def _placeholder_code_values(item, found):
+	'''	Give every CODE item of a subtree without a value a placeholder one, which highdicom requires to read the item.
+		Modifies the subtree in place; the caller removes the placeholders once the item is converted.
+
+		@input item (pydicom.Dataset): root of the subtree
+		@input found (list): list the items changed are appended to
+	'''
+	if item.get('ValueType') == 'CODE' and not item.get('ConceptCodeSequence'):
+		code = DcmDataset()
+		code.CodeValue, code.CodingSchemeDesignator, code.CodeMeaning = 'placeholder', '99SONADOR', 'placeholder'
+		item.ConceptCodeSequence = DcmSequence([code])
+		found.append(item)
+	for child in item.get('ContentSequence') or []:
+		_placeholder_code_values(child, found)
+
+
 def _mark_unnamed_items(item):
 	'''	Mark the items of a subtree that carry no concept name where DICOM makes it optional (IMAGE,
 		SCOORD, SCOORD3D and the like). highdicom gives such an item a placeholder name when it reads it;
@@ -420,7 +461,8 @@ def srcontent_from_dataset(item):
 	'''	highdicom content item of a raw content item dataset, as a deep copy. Used to re-emit
 		preserved (unmodelled) items; a by-reference item cannot be represented and is refused,
 		wherever it sits in the item's subtree. A NUM item without a value is re-emitted with an empty
-		Measured Value Sequence, and an item read without a concept name is written back without one.
+		Measured Value Sequence, a CODE item without a value is re-emitted without one, and an item read
+		without a concept name is written back without one.
 
 		@input item (pydicom.Dataset or highdicom ContentItem): the content item
 
@@ -435,11 +477,14 @@ def srcontent_from_dataset(item):
 		return copy.deepcopy(item)
 	copied = copy.deepcopy(item)
 	_mark_unnamed_items(copied)
-	without_value = []
+	without_value, without_code = [], []
 	_placeholder_num_values(copied, without_value)
+	_placeholder_code_values(copied, without_code)
 	converted = ContentItem._from_dataset_derived(copied)
 	for num in without_value:
 		num.MeasuredValueSequence = DcmSequence()
+	for code in without_code:
+		del code.ConceptCodeSequence
 	return converted
 
 

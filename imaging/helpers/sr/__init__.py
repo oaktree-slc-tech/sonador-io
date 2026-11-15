@@ -44,6 +44,8 @@ from highdicom.sr.enum import RelationshipTypeValues
 from client.errors import ConfigurationError
 from client.utils.object import pick, omit
 
+from ....apisettings.base import LandmarkSet, LandmarkSetGroup, RawReportGroup
+from ....apisettings.sr.landmarks import srdoc_legacy_landmark_sets, check_landmark_identities, note_duplicate_identities
 from ....apisettings.base import ImageTransformMatrix, ImageTransformMatrixCollection, \
 	ImageCoord, ImageCoordCollection, Finding, FindingCollection, Measurement, MeasurementCollection, ArrowAnnotation, \
 	ReportGroup, VolumePointCollectionGroup, ReportMetaGroup, ReportGroupCollection, ImageReference, \
@@ -54,7 +56,8 @@ from ....apisettings.base import ImageTransformMatrix, ImageTransformMatrixColle
 from ....apisettings.sr import dcm_encode_reference_frame_transform_matrix, srencode_observation_context, \
 	DCMSR_SONADOR_DATA_REPORT, sr_diagnostic, SRDiagnostic, SRDiagnosticError, srcontent_extra_items, \
 	srcontent_is_by_reference, srcontent_holds_by_reference, SR_DIAGNOSTIC_INFO, SR_DIAGNOSTIC_WARNING, SR_DIAGNOSTIC_ERROR, \
-	SR_CONDITION_DOCUMENT_CLASS_UPGRADED, SR_CONDITION_BY_REFERENCE_ITEM, SR_CONDITION_EMPTY_REPORT_CONTENT, _placeholder_num_values
+	SR_CONDITION_DOCUMENT_CLASS_UPGRADED, SR_CONDITION_BY_REFERENCE_ITEM, SR_CONDITION_EMPTY_REPORT_CONTENT, _placeholder_num_values, \
+	_placeholder_code_values
 from ....apisettings.sr.seriestag import DCMSR_SUPPORTED_TEMPLATE_IDS, SONADOR_SR_TEMPLATE_ID, DCMR_TEMPLATE_ID, \
 	mapping_resource_for_template, DCMSR_LAYOUT_NESTED, DCMSR_SOP_CLASS_ENHANCED, srcontent_strip_unnamed, srencode_image_reference
 from ....serialization import ISO8601_DATETIME_FORMAT, DATETIME_FORMAT3, sonador_encode2str
@@ -579,6 +582,17 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 			@returns iterator of pydicom.Dataset
 		'''
 		yield from self.extra_items
+		for lset in getattr(self, '_landmark_sets', None) or []:
+			parsed = lset._parsed or {}
+			if parsed.get('raw') is not None:
+				yield parsed['raw']
+			yield from lset.extra_items
+			for landmark in lset.landmarks:
+				yield from landmark.extra_items
+				for display in (landmark.display,):
+					if display is not None:
+						yield from display.extra_items
+						yield from display.color_extra_items
 		for group in getattr(self, 'groups', None) or []:
 			yield from getattr(group, 'extra_items', ())
 			for item in itertools.chain(getattr(group, 'findings', None) or [], getattr(group, 'measurements', None) or []):
@@ -692,10 +706,192 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 		# Initialize base class
 		super().__init__(**omit(kwargs, ('report_title',)))
 
+		# Landmark sets: those of the parsed groups, the document's legacy point groups, then the caller's
+		self._images = kwargs.get('images')
+		self._landmark_sets = []
+		# Sets read from this report's document carry its token: only they (or copies of them) own its groups and its
+		# historical duplicates; a set read by another report never does, whatever its content
+		self._landmark_token = generate_uid()
+		if parsed is not None:
+			self._landmark_sets.extend(g.landmark_set for g in (self.groups or []) if isinstance(g, LandmarkSetGroup))
+			self._landmark_sets.extend(srdoc_legacy_landmark_sets(self.extra_items, diagnostics=self.diagnostics,
+				strict=kwargs.get('frames_strict', False)))
+			for lset in self._landmark_sets:
+				if lset._parsed is not None:
+					lset._parsed['report_token'] = self._landmark_token
+			note_duplicate_identities(self._landmark_sets, diagnostics=self.diagnostics, strict=kwargs.get('frames_strict', False))
+		self._landmark_sets.extend(kwargs.get('landmarks') or [])
+
 		# Reference frames: resolved on first use; a parsed document's at once, so that its diagnostics are recorded
 		self._init_frames(**pick(kwargs, ('primary_frame_uid', 'imaging_frames', 'study_frames', 'frames_strict')))
 		if parsed is not None:
 			self.frames
+			self._note_landmark_series(kwargs.get('frames_strict', False))
+
+	@property
+	def landmarks(self):
+		'''	Landmark sets of the report: those read from the document (legacy sets included), then those the caller adds.
+			Assigning a list replaces them. A landmark-set group read from the document and left out of the list is not
+			written. A legacy point group is part of its Volume Measurements container: left out of the list, it stays in
+			that container as read, and only an edited legacy set in the list replaces it.
+
+			@returns list of LandmarkSet
+		'''
+		return list(self._landmark_sets)
+
+	@landmarks.setter
+	def landmarks(self, val):
+		val = list(val or [])
+		for item in val:
+			if not isinstance(item, LandmarkSet):
+				raise TypeError('report.landmarks holds LandmarkSet instances; got %r' % type(item))
+		self._landmark_sets = val
+
+	def _note_landmark_series(self, strict=False):
+		'''	`landmark-source-series-unknown` for a parsed patient-domain set whose Source-Series is not a series the document
+			references.
+		'''
+		from ....apisettings.sr import SR_CONDITION_LANDMARK_SOURCE_SERIES_UNKNOWN
+		referenced = set(r.series_uid for r in (self.parsed.evidence or {}).values() if r.series_uid)
+		for lset in self._landmark_sets:
+			if lset._parsed is not None and lset.is_patient and lset.series_uid and lset.series_uid not in referenced:
+				sr_diagnostic(self.diagnostics, SR_DIAGNOSTIC_WARNING, SR_CONDITION_LANDMARK_SOURCE_SERIES_UNKNOWN, 'Source-Series of the '
+					'landmark set is not a series the document references; listed under the document series',
+					path='group %s' % lset.tracking_uid, value=lset.series_uid, strict=strict)
+
+	def _image_metadata(self):
+		'''	What is known of the images the report's annotations reference: the cached instances of the series the report
+			can resolve (`dcmsr_image_metadata`), with the caller's `images` taking precedence. Makes no request.
+
+			@returns dict: SOP Instance UID -> ImageMetadata or (columns, rows)
+		'''
+		from ...orthanc.sr import dcmsr_image_metadata
+		found = dcmsr_image_metadata(self._known_series().values())
+		found.update(self._images or {})
+		return found
+
+	def _landmark_groups_written(self):
+		'''	Groups of the sets the report writes that no parsed group stands for: new sets, and legacy sets being migrated.
+
+			@returns list of LandmarkSetGroup
+		'''
+		backed = set(id(g.landmark_set) for g in (self.groups or []) if isinstance(g, LandmarkSetGroup))
+		migrated = set(id(s) for s in self._landmark_groups_migrated())
+		return [LandmarkSetGroup(s) for s in self._landmark_sets if id(s) not in backed and (not s.legacy or id(s) in migrated)]
+
+	def _extra_items_for_write(self):
+		'''	Preserved root items as written: a legacy point group being migrated is left out of its container, and a
+			container left empty is left out. The parsed items are not modified: a changed container is written from a
+			copy. Only a child that holds exactly the content its legacy set was read from is left out (see
+			`_legacy_groups_replaced`), so a legacy set copied from another report leaves every group of this one intact.
+
+			@returns list of pydicom.Dataset
+		'''
+		removed = {}
+		for _, container_index, position in self._legacy_groups_replaced():
+			removed.setdefault(container_index, set()).add(position)
+		if not removed:
+			return list(self.extra_items)
+		found = []
+		for index, item in enumerate(self.extra_items):
+			drop = removed.get(index)
+			if not drop:
+				found.append(item)
+				continue
+			kept = [child for position, child in enumerate(item.get('ContentSequence') or []) if position not in drop]
+			if kept:
+				copied = DcmDataset()
+				for element in item:
+					if element.keyword != 'ContentSequence':
+						copied.add(copy.deepcopy(element))
+				copied.ContentSequence = DcmSequence([copy.deepcopy(child) for child in kept])
+				found.append(copied)
+		return found
+
+	def _landmark_groups_migrated(self):
+		'''	Legacy sets of the report being written in the landmark-set form (edited), whether read by this report or
+			by another.
+
+			@returns list of LandmarkSet
+		'''
+		return [lset for lset in self._landmark_sets if lset.legacy and lset.edited and (lset._parsed or {}).get('legacy_content')]
+
+	def _legacy_groups_replaced(self, strict=True):
+		'''	The legacy groups of this report's document that migrated sets replace. Only a set this report read (or a copy
+			of one, which carries the same report token) owns a group: it replaces the child it was read from, wherever the
+			root items or siblings stand when the report is written, while that child still holds the content it was read
+			from. The item read has priority: present and unchanged it is replaced, present and changed the write is refused.
+			Once that item is gone, a child holding its content or its tracking UID stands for it: one unchanged child is
+			replaced, one changed child is refused, several are refused as ambiguous. A group no longer in the report is not
+			replaced. Undoing either edit (the set's or the group's) makes the report writable again. A set read by another report replaces
+			nothing, even when one of this report's groups holds the same bytes; it is written as a new group.
+
+			@returns list of (LandmarkSet, container index, child index)
+			@input strict (bool, default=True): raise when two sets of the report would replace the same legacy group;
+				otherwise the first of them replaces it
+			@raises SRDiagnosticError (strict): `landmark-legacy-not-migratable` when the group read has changed in the report
+				since it was read (a conflict), `shared-tracking-uid` when several children could be it or two sets would
+				replace one group (ambiguous); nothing is written and undoing one of the edits permits a re-save
+		'''
+		from ....apisettings.base.sr import _items_state
+		from ....apisettings.sr import SR_CONDITION_SHARED_TRACKING_UID, DCMSR_REPORT_VOLUME_MEAUREMENTS, srcontent_is_named
+		migrated = self._landmark_groups_migrated()
+		if not migrated:
+			return []
+		from ....apisettings.sr import SR_CONDITION_LANDMARK_LEGACY_NOT_MIGRATABLE
+
+		def tracking_uid(child):
+			for item in child.get('ContentSequence') or []:
+				if srcontent_is_named(item, dcmcodes.DCM.TrackingUniqueIdentifier) and item.get('ValueType') == 'UIDREF':
+					return str(item.get('UID') or '') or None
+			return None
+
+		children = OrderedDict()
+		for index, item in enumerate(self.extra_items):
+			if not srcontent_is_named(item, DCMSR_REPORT_VOLUME_MEAUREMENTS):
+				continue
+			for position, child in enumerate(item.get('ContentSequence') or []):
+				children[(index, position)] = (child, _items_state([child])[0], tracking_uid(child))
+		found, taken = [], {}
+		for lset in migrated:
+			if lset._parsed.get('report_token') != self._landmark_token:
+				continue
+			content = lset._parsed['legacy_content']
+			# The child read, wherever the root items or siblings now stand: the same object holding the same content; for a
+			# copy of the set (another object), the one child holding that content. More than one is ambiguous.
+			# The item read has priority: present and unchanged, it is replaced; present and changed, the write is refused,
+			# whatever its siblings hold. Once it is no longer there (a copy of the set, or items replaced by copies), every
+			# child with its content or its tracking UID is a candidate: one unchanged candidate is replaced, one changed
+			# candidate is a conflict, and several are ambiguous
+			original = [key for key, (item, _, _) in children.items() if item is lset._parsed.get('legacy_item')]
+			if original:
+				candidates = original
+			else:
+				candidates = [key for key, (_, value, uid) in children.items() if value == content
+					or (uid and uid == lset._parsed.get('legacy_tracking_uid'))]
+			if not candidates:
+				continue
+			if len(candidates) > 1:
+				if not strict:
+					continue
+				raise SRDiagnosticError(SRDiagnostic(SR_DIAGNOSTIC_ERROR, SR_CONDITION_SHARED_TRACKING_UID, 'group %s' % lset.tracking_uid,
+					lset.tracking_uid, 'the legacy point group this set was read from cannot be told apart from %d candidates of the '
+					'report (by content or tracking UID); it is not migrated' % len(candidates)))
+			key = candidates[0]
+			if children[key][1] != content:
+				if not strict:
+					continue
+				raise SRDiagnosticError(SRDiagnostic(SR_DIAGNOSTIC_ERROR, SR_CONDITION_LANDMARK_LEGACY_NOT_MIGRATABLE,
+					'group %s' % lset.tracking_uid, lset.tracking_uid, 'the legacy point group this set was read from has changed in the '
+					'report since it was read; migrating the set would lose that change. Edit one of them, not both'))
+			if key in taken:
+				if not strict:
+					continue
+				raise SRDiagnosticError(SRDiagnostic(SR_DIAGNOSTIC_ERROR, SR_CONDITION_SHARED_TRACKING_UID, 'group %s' % lset.tracking_uid,
+					lset.tracking_uid, 'two landmark sets of the report replace the same legacy point group; keep one of them'))
+			taken[key] = lset
+			found.append((lset, key[0], key[1]))
+		return found
 
 	@property
 	def reference_frames(self):
@@ -799,7 +995,8 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 		'''
 		measurements = [m for m in self.typed_measurements if m.geometry is not None and m.geometry.is_image]
 		arrows = [a for a in self.arrow_findings if a.geometry.is_image]
-		return list(self.series_tag_findings) + measurements + arrows
+		landmarks = [s for s in self.landmarks if s.reference is not None]
+		return list(self.series_tag_findings) + measurements + arrows + landmarks
 
 	@property
 	def _source_series_measurements(self):
@@ -814,6 +1011,7 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 		for group in (self.groups or []):
 			found.extend(getattr(group, 'measurements', None) or [])
 		found.extend(self.arrow_findings)
+		found.extend(s for s in self.landmarks if not s.legacy or s.edited)
 		return [m for m in found if m.geometry is not None and m.geometry.is_patient and m.series_uid]
 
 	def _known_series(self):
@@ -948,7 +1146,10 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 			groups.append(ReportGroup(measurements=MeasurementCollection([measurement]),
 				tracking_id=measurement.tracking_id, tracking_uid=measurement.tracking_uid))
 
-		groups.extend(g for g in (self.groups or []) if (isinstance(g, ReportGroup) and not isinstance(g, VolumePointCollectionGroup)))
+		sets = set(id(s) for s in self._landmark_sets)
+		groups.extend(g for g in (self.groups or []) if (isinstance(g, ReportGroup) and not isinstance(g, VolumePointCollectionGroup))
+			and not (isinstance(g, LandmarkSetGroup) and id(g.landmark_set) not in sets))
+		groups.extend(self._landmark_groups_written())
 		return groups
 
 	def _meta_groups(self, **kwargs):
@@ -1330,6 +1531,10 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 
 		# Frames: the policy and the frame records are settled before anything is built
 		self._apply_write_policy(require=require, target=target)
+		check_landmark_identities(self._landmark_sets, report_token=self._landmark_token)
+		images = self._image_metadata()
+		for lset in self._landmark_sets:
+			lset._write_images = images
 		self._pending_plan = self.frame_write_plan()
 
 		# Source series resolved before the content is built, so that an unresolvable one writes nothing
@@ -1371,12 +1576,13 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 		if dcmsr_series_number is None:
 			dcmsr_series_number = int(dcm_header_text(parsed, DCMHEADER_SERIES_NUMBER, 1) or 1) if parsed is not None else 1
 
-		# A preserved NUM item without a value (an empty Measured Value Sequence, legal in DICOM) cannot be read
-		# back by highdicom while it builds the document; it carries a placeholder value meanwhile and is
-		# written with its empty sequence, the document sharing the content items
-		without_value = []
+		# A preserved NUM item without a value (an empty Measured Value Sequence, legal in DICOM), or a preserved CODE
+		# item without one, cannot be read back by highdicom while it builds the document; it carries a placeholder
+		# value meanwhile and is written as it was, the document sharing the content items
+		without_value, without_code = [], []
 		for root in content:
 			_placeholder_num_values(root, without_value)
+			_placeholder_code_values(root, without_code)
 
 		# Initialize SR document instance
 		_srdoc = document_class(
@@ -1389,6 +1595,8 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 
 		for num in without_value:
 			num.MeasuredValueSequence = DcmSequence()
+		for code in without_code:
+			del code.ConceptCodeSequence
 
 		# The image references are written without a concept name, as the Viewer does (the placeholder
 		# name is needed while highdicom collects the evidence; the document shares the item objects)
