@@ -186,10 +186,16 @@ class DicomDatetimePair:
 	'''	Helper data class for working with DICOM date/time pairs: parsing data from string
 		to Python representations and combining date and time components to a single
 		unified timestamp (datetime.datetime) representation.
+
+		The pair may carry the Timezone Offset From UTC (0008,0201) of the dataset the date and
+		time were read from (`offset_value`). `ts` is the naive local timestamp the pair has always
+		produced; `ts_utc` applies the offset and yields the naive UTC timestamp, so that timestamps
+		from datasets written in different time zones can be compared.
 	'''
-	def __init__(self, date_value, time_value, *args, meta: DicomDatetimePairKey=None, **kwargs):
+	def __init__(self, date_value, time_value, *args, offset_value=None, meta: DicomDatetimePairKey=None, **kwargs):
 		self._dvalue = date_value
 		self._tvalue = time_value
+		self._ovalue = offset_value
 		self.meta = meta
 
 	@property
@@ -215,6 +221,34 @@ class DicomDatetimePair:
 		if self.date_value:
 			return datetime.datetime.combine(
 				self.date_value, self.time_value or datetime.time(0,0,0))
+
+	@property
+	def utcoffset(self):
+		'''	Timezone Offset From UTC of the pair, parsed from `offset_value` (`&ZZXX`, see
+			`sonador.serialization.dcm_str2utcoffset`). Raises ValueError for a malformed or out of range
+			offset.
+
+			@returns datetime.timezone or None (if no offset value specified)
+		'''
+		from ...serialization import dcm_str2utcoffset
+		return dcm_str2utcoffset(self._ovalue)
+
+	@property
+	def ts_utc(self):
+		'''	Datetime created from the provided date and time values, converted to UTC using the offset
+			value. Without an offset the date and time are taken to be UTC already. The result is naive,
+			like `ts`. Raises ValueError for a malformed offset and OverflowError when the UTC instant
+			cannot be represented (an offset applied at the limits of the datetime range).
+
+			@returns datetime.datetime or None (if no date value specified)
+		'''
+		ts = self.ts
+		if ts is None:
+			return None
+		offset = self.utcoffset
+		if offset is None:
+			return ts
+		return ts - offset.utcoffset(None)
 
 
 # DICOM Header Definitions
@@ -663,6 +697,9 @@ DCMHEADER_CONTENT_DATE = 'ContentDate'
 DCMCODE_CONTENT_TIME = ('0008', '0033')
 DCMHEADER_CONTENT_TIME = 'ContentTime'
 
+DCMCODE_TIMEZONE_OFFSET_FROM_UTC = ('0008', '0201')
+DCMHEADER_TIMEZONE_OFFSET_FROM_UTC = 'TimezoneOffsetFromUTC'
+
 DCMTS_CONTENT = DicomDatetimePairKey(
 	IMAGING_SERVER_RESOURCE_IMAGE, DCMHEADER_CONTENT_DATE, DCMHEADER_CONTENT_TIME)
 
@@ -845,6 +882,17 @@ DCM_DATE_STRFORMAT_ALT1 = '%Y-%m%d'
 DCM_DATE_STRFORMAT_ALT2 = '%m/%d/%Y'
 DCM_TIME_STRFORMAT = '%H%M%S.%f'
 DCM_TIME_STRFORMAT_ALT1 = '%H%M%S'
+
+# The TM value representation (PS3.5 6.2): `HHMMSS.FFFFFF`, where the fraction has one to six digits and the
+# trailing components may be omitted (`HH`, `HHMM`, `HHMMSS`)
+DCM_TIME_REGEX = re.compile(r'^(\d{2})(?:(\d{2})(?:(\d{2})(?:\.(\d{1,6}))?)?)?$')
+
+# Timezone Offset From UTC (0008,0201) and the offset suffix of the DT value representation, as DICOM defines
+# them (PS3.3 C.12.1.1.8, PS3.5 6.2): a sign and four digits (`&ZZXX`, hours then minutes), from `-1200` to
+# `+1400` inclusive, minutes below 60, `+0000` for UTC (`-0000` is not a valid encoding)
+DCM_UTC_OFFSET_REGEX = re.compile(r'^([+-])(\d{2})(\d{2})$')
+DCM_UTC_OFFSET_MINUTES_MIN = -12 * 60
+DCM_UTC_OFFSET_MINUTES_MAX = 14 * 60
 
 
 DCM_FILE_EXTENSION = 'dcm'
