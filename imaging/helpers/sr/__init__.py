@@ -65,6 +65,7 @@ from ...orthanc import ImagingSeries
 from ...orthanc.base import ImagingResourceBaseCollection
 from ...orthanc.sr import DcmSRSeries, DcmSRInstance
 
+from ..headers import dcm_header_value
 from .encoding import SonadorSRMeasurementReport
 from .frames import SRFrameMixin
 from .parse import srdoc_parse, srdoc_read, srdoc_document_class, srdoc_sop_class, srdoc_evidence_headers, srdoc_synthetic_evidence, srdoc_set_study, \
@@ -171,6 +172,74 @@ def srdoc_apply_character_set(ds):
 	if srdoc_has_non_ascii_text(ds):
 		ds.SpecificCharacterSet = DCM_CHARACTER_SET_UTF8
 	return ds
+
+
+def _uid_text(value):
+	'''	A UID value as a stripped string.
+
+		@input value: UID as read from a property, a tag dictionary or a dataset
+		@returns str, or None when the value is absent or empty
+	'''
+	return (str(value).strip() or None) if value is not None else None
+
+
+def dcm_instance_sop_uids(instance, fetch_tags=True):
+	'''	SOP Class UID and SOP Instance UID of an imaging server instance. Each UID is taken from the
+		first source that holds it, and a value already found is kept:
+
+		1. the instance's `sop_class_uid` and `sop_instance_uid` properties (the main record of an
+			Orthanc instance);
+		2. what is cached on the instance, at no request: its simplified tags, then its file;
+		3. its simplified tags, requested once and cached on the instance, when a UID is still
+			missing, neither tags nor file are cached, `fetch_tags` is true and the instance has a
+			`tags` accessor;
+		4. its file (`dcmfile(cache=True)`: one `file` request, cached afterwards) when a UID is
+			still missing and no file is cached.
+
+		A tag request that fails is logged and the file is read instead. Tags already cached that
+		lack a UID lead to the file without a tag request. A UID that no source holds is an error:
+		the reference would otherwise drop the series from the evidence or record an empty value.
+
+		@input instance (DcmInstance, or any object with `sop_class_uid`, `sop_instance_uid` and
+			`dcmfile`): the instance
+		@input fetch_tags (bool, default=True): request the simplified tags when nothing cached
+			holds a UID. False for a caller that downloads the file anyway (full evidence), so the
+			file is the only request.
+
+		@returns tuple (str, str): the SOP Class UID and the SOP Instance UID
+		@raises ValueError when the SOP Class UID or the SOP Instance UID is still missing after the file
+	'''
+	sop_class = _uid_text(getattr(instance, 'sop_class_uid', None))
+	sop_instance = _uid_text(getattr(instance, 'sop_instance_uid', None))
+
+	def complete(source):
+		return (sop_class or _uid_text(dcm_header_value(source, DCMHEADER_SOP_CLASS_UID)),
+			sop_instance or _uid_text(dcm_header_value(source, DCMHEADER_SOP_INSTANCE_UID)))
+
+	cached = getattr(instance, '__dict__', {})
+	for source in (cached.get('_tags'), cached.get('_dcmfile')):
+		if source is not None and not (sop_class and sop_instance):
+			sop_class, sop_instance = complete(source)
+	if sop_class and sop_instance:
+		return sop_class, sop_instance
+
+	if fetch_tags and cached.get('_tags') is None and cached.get('_dcmfile') is None \
+			and getattr(type(instance), 'tags', None) is not None:
+		try:
+			sop_class, sop_instance = complete(instance.tags)
+		except Exception as err:
+			# The file carries both UIDs, so a failed tag read costs the download and nothing more
+			logger.warning('Unable to load the simplified tags of instance %s (%s); reading the instance file',
+				getattr(instance, 'pk', None), err)
+		if sop_class and sop_instance:
+			return sop_class, sop_instance
+
+	sop_class, sop_instance = complete(instance.dcmfile(cache=True))
+	missing = [name for name, value in (('SOP Class UID', sop_class), ('SOP Instance UID', sop_instance)) if not value]
+	if missing:
+		raise ValueError('Instance %s has no %s in its record, its simplified tags or its file; '
+			'it cannot be referenced as evidence' % (getattr(instance, 'pk', None), ' or '.join(missing)))
+	return sop_class, sop_instance
 
 
 class SonadorBaseSR(metaclass=abc.ABCMeta):
@@ -1263,32 +1332,35 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 	# ---- evidence ----
 
 	@staticmethod
-	def _instance_reference(series, instance):
-		'''	Image reference to an imaging server instance, built from its cached JSON (SOP Class and SOP
-			Instance UID from the main tags). When the cached tags lack either UID the instance file is
-			read instead (`dcmfile(cache=True)`: one `file` request, cached afterwards). The reference
-			carries frame number 1 for a multiframe SOP class (`DCM_MULTIFRAME_SOP_CLASSES`), else none.
+	def _instance_reference(series, instance, fetch_tags=True):
+		'''	Image reference to an imaging server instance. The SOP Class and SOP Instance UIDs come
+			from the instance's properties (its main record), then what is cached on it (simplified
+			tags, file), then a `simplified-tags` request when `fetch_tags` is true and nothing is
+			cached, then a `file` request for a UID still missing when no file is cached
+			(`dcm_instance_sop_uids`). The reference carries frame number 1 for a multiframe SOP
+			class (`DCM_MULTIFRAME_SOP_CLASSES`), else none.
 
 			@input series (ImagingSeries): series the instance belongs to
 			@input instance (DcmInstance): the instance
+			@input fetch_tags (bool, default=True): allow the `simplified-tags` request
 
 			@returns ImageReference
+			@raises ValueError when no source holds one of the two UIDs
 		'''
-		sop_class = instance.sop_class_uid
-		sop_instance = instance.sop_instance_uid
-		if not sop_class or not sop_instance:
-			ds = instance.dcmfile(cache=True)
-			sop_class, sop_instance = str(ds.SOPClassUID), str(ds.SOPInstanceUID)
-		frame = 1 if str(sop_class) in DCM_MULTIFRAME_SOP_CLASSES else None
-		return ImageReference(str(sop_class), str(sop_instance), frame, series.series_uid)
+		sop_class, sop_instance = dcm_instance_sop_uids(instance, fetch_tags=fetch_tags)
+		frame = 1 if sop_class in DCM_MULTIFRAME_SOP_CLASSES else None
+		return ImageReference(sop_class, sop_instance, frame, series.series_uid)
 
 	def series_reference(self, series):
 		'''	Image reference a Series Tag on `series` carries: the first instance of the series (`dcm0`).
+			A model with `record_instances=True` downloads the files of its reference series for the
+			evidence, so a UID missing from what is cached is read from the file without a
+			`simplified-tags` request; with `record_instances=False` the tags are tried first.
 
 			@input series (ImagingSeries): the tagged series
 			@returns ImageReference
 		'''
-		return self._instance_reference(series, series.dcm0)
+		return self._instance_reference(series, series.dcm0, fetch_tags=not self.record_instances)
 
 	def _series_for_finding(self, finding):
 		'''	Reference series a finding applies to: the one matching the finding's `series_uid`, else the
@@ -1354,10 +1426,16 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 			of every reference series, downloaded (one `file` request per instance). With
 			`record_instances=False`, the exchange profile: datasets synthesised from the cached patient,
 			study, series and instance JSON for the first instance of each reference series and the
-			instances the Series Tags and image-domain measurements reference. That costs no request when
-			the cached instance JSON carries the SOP Class and SOP Instance UIDs (a study populated with
-			`bulkpopulate_related(child_instances=True)` on the development Orthanc build); an instance
-			whose cached tags lack them is fetched once (`dcmfile(cache=True)`).
+			instances the Series Tags and image-domain measurements reference. The mode is the model's
+			(`record_instances` of the constructor); the argument of `create_sr` does not change it.
+
+			Requests per first instance of a reference series in the exchange profile: none when its
+			main record, its cached simplified tags and its cached file together hold the SOP Class and
+			SOP Instance UIDs. Otherwise one `simplified-tags` request when neither tags nor file are
+			cached, then one `file` request only for a UID still missing (tags that failed to load or
+			lack it) and only when no file is cached (`_instance_reference`). Bulk population with
+			`child_instances=True` fills the main record, which holds both UIDs on the development
+			Orthanc build but is not guaranteed to.
 
 			For a model built from a document and bound to no reference series: datasets synthesised
 			from the parsed document's own evidence and from the Series Tag and image-domain measurement
@@ -1409,6 +1487,12 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 			synthesised from the cached JSON of that series' study. The source-series part is computed on
 			every access, so a measurement added or a `series_uid` changed after an earlier access or
 			write is reflected; the cached part is not rebuilt.
+
+			With `record_instances=False` on the model, the first access makes, per first instance of a
+			reference series: no request when its main record, cached tags and cached file together
+			hold the SOP Class and SOP Instance UIDs; one `simplified-tags` request when a UID is
+			missing and neither tags nor file are cached; one `file` request only for a UID still
+			missing when no file is cached (see `_base_evidence`).
 
 			@returns list of pydicom.Dataset, or None for a model with neither reference series, supplied
 				evidence nor a parsed document
