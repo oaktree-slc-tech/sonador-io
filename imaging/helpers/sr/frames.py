@@ -488,13 +488,19 @@ def _converted_annotation(obj, transform, to_uid):
 	if getattr(obj, '_drawing_plane', None) is not None:
 		converted._drawing_plane = tuple(transform.rotate_directions(drawing_plane_vectors(obj._drawing_plane)))
 		converted._drawing_plane_text = None
-	for attr in ('_normal',):
+	for attr in ('_normal', '_legacy_normal'):
 		if getattr(obj, attr, None) is not None:
-			setattr(converted, attr, transform.rotate_directions([getattr(obj, attr)])[0])
+			setattr(converted, attr, ImageCoord(*transform.rotate_directions([getattr(obj, attr)])[0]))
+	# The construction points of a circle derived from three circumference points move with the circle
+	construction = getattr(obj, '_construction_points', None)
+	if construction is not None:
+		converted.construction_points_raw = transform.convert(construction)
 	if keeps:
 		converted._parsed_points = converted._geometry.points
 		if hasattr(converted, '_parsed_frame_of_reference_uid'):
 			converted._parsed_frame_of_reference_uid = to_uid
+		if construction is not None:
+			converted._parsed_construction_points = converted._construction_points
 	converted._parsed_frame_uid = to_uid
 	converted.source_transform = None
 	return converted
