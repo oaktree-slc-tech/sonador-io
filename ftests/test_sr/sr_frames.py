@@ -22,7 +22,7 @@ from pydicom.dataset import Dataset
 from pydicom.sequence import Sequence
 
 from ...apisettings.base import ImageTransformMatrix, ReferenceFrame, FrameGraph, FrameConversionError, LengthMeasurement, \
-	AngleMeasurement, ArrowAnnotation, ImageCoord, ImageCoordCollection, VolumePointCollectionGroup, frame_unit, \
+	AngleMeasurement, ArrowAnnotation, CircleMeasurement, circle_through_points, Geometry, DCMSR_GEOMETRY_DOMAIN_PATIENT, ImageCoord, ImageCoordCollection, VolumePointCollectionGroup, frame_unit, \
 	DCMSR_FRAME_NATIVE, DCMSR_FRAME_REGISTERED, DCMSR_FRAME_UNREGISTERED, DCMSR_FRAME_NOT_APPLICABLE
 from ...apisettings.sr import SRDiagnosticError, sr_diagnostics_with, srcontent_is_named, dcm_code_value, \
 	SR_CONDITION_FRAME_UID_COLLISION, SR_CONDITION_FRAME_EDGE_INVALID, SR_CONDITION_FRAME_EDGE_UNVERIFIED, \
@@ -1002,6 +1002,52 @@ class FramesEditTestCase(unittest.TestCase):
 		self.assertIn('2.25.46902', str(caught.exception))
 		arrow.frame_of_reference_uid = P
 		self.assertTrue(parsed.create_sr())
+
+	def test_converted_circle_moves_its_construction_points(self):
+		# A three-point circle serialized and read again begins clean; converted, its construction points are the same
+		# points in the target frame, still describe the converted circle, and the copy is as clean as the original.
+		# The original is unchanged. A legacy `CIRCLE` with a supplied normal rotates that normal on the copy alone.
+		points = ((0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (5.0, 5.0, 0.0))
+		source = new_report()
+		source.measurements = [CircleMeasurement.from_points(*points, frame_of_reference_uid=P, tracking_uid='2.25.46921')]
+		parsed = SonadorImagingMeasurementReport.from_sr(disk(source.create_sr()), imaging_frames=REFS)
+		a, _, _ = chained(parsed)
+		circle = parsed.typed_measurements[0]
+		self.assertTrue(circle.keeps_stored_value)
+		self.assertFalse(circle.construction_points_changed)
+		self.assertFalse(circle.construction_points_dropped)
+		converted = parsed.convert(circle, a)
+		expected = parsed.frames.transform(P, a).convert(points)
+		self.assertEqual(converted.frame_of_reference_uid, a.uid)
+		self.assertTrue(np.allclose(converted.construction_points, expected, atol=1e-3, rtol=0))
+		self.assertFalse(converted.construction_points_changed)
+		self.assertFalse(converted.construction_points_dropped)
+		self.assertAlmostEqual(converted.value, circle.value, places=6)
+		through = circle_through_points(*converted.construction_points)
+		self.assertTrue(np.allclose(through['center'], converted.center, atol=1e-3, rtol=0))
+		self.assertAlmostEqual(through['radius'], converted.radius, places=3)
+		self.assertAlmostEqual(abs(float(np.dot(through['normal'], converted.normal))), 1.0, places=6)
+		self.assertTrue(np.allclose(circle.construction_points, points, atol=1e-3, rtol=0))
+		self.assertEqual(circle.frame_of_reference_uid, P)
+		other = new_report()
+		chained(other)
+		other.measurements = [converted]
+		stored = F.read_report(disk(other.create_sr()), ('P', 'S'), 'exchange').typed_measurements[0]
+		self.assertEqual(stored.frame_of_reference_uid, a.uid)
+		self.assertTrue(np.allclose(stored.construction_points, expected, atol=1e-3, rtol=0))
+
+		# The legacy circle: a rotation about Z changes a normal that is not along Z
+		report = new_report()
+		report.frames.add_frame(ReferenceFrame(A2, name='Anatomic'))
+		report.frames.add_edge(F.RZ, A2, P)
+		legacy = CircleMeasurement(geometry=Geometry(DCMSR_GEOMETRY_DOMAIN_PATIENT, 'CIRCLE', [(0.0, 0.0, 0.0), (5.0, 0.0, 0.0)]),
+			legacy_normal=(0.0, 1.0, 0.0), frame_of_reference_uid=P, tracking_uid='2.25.46922')
+		rotated = report.convert(legacy, A2)
+		expected_normal = report.frames.transform(P, A2).rotate_directions([(0.0, 1.0, 0.0)])[0]
+		self.assertLess(float(np.dot(expected_normal, (0.0, 1.0, 0.0))), 0.999)
+		self.assertTrue(np.allclose(rotated.normal, expected_normal, atol=1e-9, rtol=0))
+		self.assertTrue(np.allclose(legacy.normal, (0.0, 1.0, 0.0), atol=1e-9, rtol=0))
+		self.assertEqual((rotated.frame_of_reference_uid, legacy.frame_of_reference_uid), (A2, P))
 
 	def test_single_landmark_converts(self):
 		report = new_report()
