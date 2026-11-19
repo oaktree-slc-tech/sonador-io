@@ -83,7 +83,13 @@ series.findings('series-tag')
 ```
 
 The other annotations follow the same pattern: build the object, pass it to the report model, and read it
-back through `findings`, `measurements` or `landmarks`. The details are in the Sonador documentation:
+back through `findings`, `measurements` or `landmarks`.
+
+A document can belong to a timepoint, a bucket that groups the series of one study. Pass
+`timepoint=Timepoint.create('Post-operative review', ts)` to the report model, list the timepoints of a study
+with `study.timepoints()`, and narrow `findings`, `measurements` and `landmarks` with `timepoint_uid`.
+
+The details are in the Sonador documentation:
 
 * [Annotations in DICOM-SR Documents](https://code.oak-tree.tech/oak-tree/medical-imaging/imaging-development-env/-/wikis/integrations/sonador-io/dicom-sr-annotations): Series Tags, measurements, arrows and
   points, with the document form of each and the diagnostics a reader reports.

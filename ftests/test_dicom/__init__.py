@@ -3,12 +3,13 @@
 	reference, units and STL encoding of M3D models (`dicom_m3d`), the writers of the Referenced Series
 	Sequence (`dicom_references`), the Image Type readers that tell derived series from primary imaging
 	(`dicom_imagetype`), the coded series attributes and the record of modified attributes
-	(`dicom_codes`) and the header and Image Type constants (`dicom_constants`). No server connection
-	is needed.
+	(`dicom_codes`), the header and Image Type constants (`dicom_constants`) and the timepoint value with
+	its reader and writer (`dicom_timepoint`). No server connection is needed.
 
 		python -m unittest sonador.ftests.test_dicom.dicom_encoding sonador.ftests.test_dicom.dicom_m3d \
 			sonador.ftests.test_dicom.dicom_references sonador.ftests.test_dicom.dicom_imagetype \
-			sonador.ftests.test_dicom.dicom_codes sonador.ftests.test_dicom.dicom_constants
+			sonador.ftests.test_dicom.dicom_codes sonador.ftests.test_dicom.dicom_constants \
+			sonador.ftests.test_dicom.dicom_timepoint
 '''
 from .dicom_encoding import *
 from .dicom_m3d import *
@@ -16,3 +17,4 @@ from .dicom_references import *
 from .dicom_imagetype import *
 from .dicom_codes import *
 from .dicom_constants import *
+from .dicom_timepoint import *

@@ -53,7 +53,7 @@
 '''
 import functools, datetime, logging, posixpath
 from abc import ABCMeta, abstractmethod
-from collections import OrderedDict
+from collections import OrderedDict, namedtuple
 
 from pydicom.dataset import Dataset
 from pydicom.sequence import Sequence
@@ -66,11 +66,12 @@ from ...apisettings import IMAGING_SERVER_RESOURCE_REPORT, DCMHEADER_SERIES_INST
 	DCMHEADER_SERIES_DESCRIPTION, DCMHEADER_SERIES_DATE, DCMHEADER_SERIES_TIME, DCMHEADER_STUDY_INSTANCE_UID, \
 	IMAGING_SERVER_PARENT_SERIES, IMAGING_SERVER_SERIES_INDEX, IMAGING_SERVER_MAINDICOM, \
 	DicomDatetimePair, DCMTS_CONTENT, FindingCollection, MeasurementCollection, DCMHEADER_FRAME_OF_REFERENCE_UID, \
-	SONADOR_MEASUREMENT_TYPE_GENERIC, SONADOR_MEASUREMENT_TYPE_LANDMARK_SET, LandmarkSetCollection
+	SONADOR_MEASUREMENT_TYPE_GENERIC, SONADOR_MEASUREMENT_TYPE_LANDMARK_SET, LandmarkSetCollection, TIMEPOINT_DEFAULT
 from ...apisettings.sr import sr_diagnostic, SR_DIAGNOSTIC_INFO, SR_DIAGNOSTIC_WARNING, \
 	SR_CONDITION_PREDECESSOR_CHAIN_UNVERIFIED, SR_CONDITION_UID_ORDER_TIE_BREAK, SR_CONDITION_SHARED_TRACKING_UID, \
-	SR_CONDITION_UNKNOWN_SOURCE_SERIES
+	SR_CONDITION_UNKNOWN_SOURCE_SERIES, SR_CONDITION_TIMEPOINT_SERIES_CONFLICT, SR_CONDITION_TIMEPOINT_ATTRIBUTE_MISMATCH
 from ..helpers.headers import dcm_header_value, dcm_header_uid
+from ..helpers.timepoint import dcm_timepoint, timepoint_diagnostic
 from .base import ImagingSeriesCoreResource, ImagingSeriesDcm0Mixin, ImagingSeriesCollection, ImagingServerChildCollection, \
 	DcmInstanceCoreResource, DcmInstanceCoreCollection, ImagingSeriesBulkPopulateMixin
 
@@ -243,6 +244,10 @@ def _landmarks_by_series(nested, series_uid=None):
 	return found
 
 
+# One timepoint of a study: the timepoint (None for the default timepoint) and the SR series that belong to it
+TimepointMembers = namedtuple('TimepointMembers', ('timepoint', 'series'))
+
+
 def dcmsr_local_series(datasets, server=None):
 	'''	Build a `DcmSRSeries` from DICOM-SR documents held locally (files read into pydicom datasets).
 		The series and instance JSON are derived from the document headers and each dataset is
@@ -377,6 +382,70 @@ class DcmSRSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 			for instance in self._instances:
 				instance.invalidate()
 
+	def get_timepoint(self, diagnostics=None, strict=False):
+		'''	Timepoint the series belongs to: the timepoint of its current document (`current_instance`), read from
+			the document headers on each call and never cached. Without every file cached the current document is
+			selected from the indexed headers (`predecessor-chain-unverified`) and the membership is provisional
+			until the files are cached. Costs no request when the report, the file or the tags of the current
+			document are cached, else one `simplified-tags` request.
+
+			Documents of the series that carry different timepoint UIDs are reported (`timepoint-series-conflict`,
+			a `warning`); the current document's timepoint applies. Only documents whose report, file or tags are
+			already cached are compared, so the check makes no request and is not exhaustive. A revision without a
+			timepoint is not a conflict.
+
+			@input diagnostics (list, default=None): list the conditions are appended to; a condition already in
+				it with the same path and value is not recorded again
+			@input strict (bool, default=False): raise SRDiagnosticError on a `warning`
+
+			@returns Timepoint, or None for a series without a timepoint (the default timepoint of its study)
+		'''
+		instances = self.instances_collection
+		current = instances.current_instance(diagnostics=diagnostics, strict=strict)
+		if current is None:
+			return None
+		timepoint = current.get_timepoint(diagnostics=diagnostics, strict=strict)
+
+		uids = set([timepoint.uid] if timepoint is not None else [])
+		for instance in instances:
+			if instance is current:
+				continue
+			headers = instance._cached_headers()
+			other = dcm_timepoint(headers) if headers is not None else None
+			if other is not None:
+				uids.add(other.uid)
+		if len(uids) > 1:
+			timepoint_diagnostic(diagnostics, SR_CONDITION_TIMEPOINT_SERIES_CONFLICT,
+				'documents of the series carry different timepoints; the current document applies (%s)'
+					% (timepoint.uid if timepoint is not None else 'no timepoint'),
+				path='series %s' % self.pk, value=', '.join(sorted(uids)), strict=strict)
+		return timepoint
+
+	@property
+	def timepoint(self):
+		'''	Timepoint the series belongs to (`get_timepoint`, lenient and without a diagnostics list)
+
+			@returns Timepoint or None
+		'''
+		return self.get_timepoint()
+
+	def _cached_timepoint(self):
+		'''	Timepoint the series belongs to, from what is already cached: the instances of the series and the report,
+			file or tags of its current document. Makes no request.
+
+			@returns (bool, Timepoint or None): whether the membership could be read, and the timepoint
+		'''
+		instances = self.__dict__.get('_instances')
+		if instances is None:
+			return False, None
+		current = instances.current_instance()
+		if current is None:
+			return True, None
+		headers = current._cached_headers()
+		if headers is None:
+			return False, None
+		return True, dcm_timepoint(headers)
+
 	def landmark_sets(self, collection_class=LandmarkSetCollection, **kwargs):
 		'''	Landmark sets of the current document of the series, as `DcmSRInstance.landmark_sets` keys them.
 
@@ -454,7 +523,83 @@ class DcmSRSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingServerChildCo
 		for series in self:
 			series.invalidate()
 
-	def _aggregate(self, attr, series_uid=None, measurement_type=None, collection_class=FindingCollection, frame_of_reference_uid=None, **kwargs):
+	def timepoints(self, diagnostics=None, strict=False):
+		'''	Timepoints of the study, each with the SR series that belong to it. Computed from the document headers
+			on each call: at most one `simplified-tags` request per SR series whose current document has no report,
+			file or tags cached.
+
+			The first entry is the default timepoint (key `TIMEPOINT_DEFAULT`, no `Timepoint`), which holds the SR
+			series without one and is present even when empty. The other entries are keyed by timepoint UID and
+			ordered by `Timepoint.sort_key`. The values of an entry are those of its member series with the lowest
+			Series Instance UID; members that differ in any field record `timepoint-attribute-mismatch`.
+
+			@input diagnostics (list, default=the collection's `diagnostics`): list the conditions are appended to
+			@input strict (bool, default=False): raise SRDiagnosticError on a `warning`
+
+			@returns OrderedDict: `{TIMEPOINT_DEFAULT or timepoint UID: TimepointMembers(timepoint, series)}`
+		'''
+		diagnostics = self.diagnostics if diagnostics is None else diagnostics
+		default, members = self._timepoint_members(diagnostics, strict)
+		entries = [self._timepoint_entry(uid, found, diagnostics, strict) for uid, found in members.items()]
+
+		results = OrderedDict(((TIMEPOINT_DEFAULT, TimepointMembers(None, default)),))
+		for entry in sorted(entries, key=lambda entry: entry.timepoint.sort_key):
+			results[entry.timepoint.uid] = entry
+		return results
+
+	def _timepoint_members(self, diagnostics, strict):
+		'''	Membership of every SR series, read from the timepoint of its current document.
+
+			@returns (list, OrderedDict): the series without a timepoint, and `{timepoint UID: [(series, Timepoint), ...]}`,
+				both in collection order
+		'''
+		default, members = [], OrderedDict()
+		for series in self:
+			timepoint = series.get_timepoint(diagnostics=diagnostics, strict=strict)
+			if timepoint is None:
+				default.append(series)
+			else:
+				members.setdefault(timepoint.uid, []).append((series, timepoint))
+		return default, members
+
+	def _timepoint_entry(self, uid, found, diagnostics, strict):
+		'''	One timepoint with its member series: the values are those of the member with the lowest Series Instance
+			UID, and members that differ from it in any field, presence included, record `timepoint-attribute-mismatch`.
+
+			@input uid (str): timepoint UID
+			@input found (list of (DcmSRSeries, Timepoint)): the members
+			@returns TimepointMembers, its series ordered by Series Instance UID
+		'''
+		found = sorted(found, key=lambda pair: str(pair[0].series_uid or ''))
+		representative = found[0][1]
+		differing = [str(series.series_uid) for series, timepoint in found[1:] if timepoint != representative]
+		if differing:
+			timepoint_diagnostic(diagnostics, SR_CONDITION_TIMEPOINT_ATTRIBUTE_MISMATCH,
+				'members of the timepoint differ in identifier, date, time or description; the values of series %s are shown'
+					% found[0][0].series_uid,
+				path='timepoint %s' % uid, value=', '.join(differing), strict=strict)
+		return TimepointMembers(representative, [series for series, _ in found])
+
+	def _timepoint_series(self, timepoint_uid, diagnostics=None, strict=False):
+		'''	SR series that belong to a timepoint, by the timepoint of their current document, in collection order. The
+			members of the timepoint selected are compared as `timepoints` compares them, so a mismatch among them is
+			recorded, or raised under `strict`, by the narrowing as well.
+
+			@input timepoint_uid (str): a timepoint UID, or `TIMEPOINT_DEFAULT` for the series without a timepoint
+			@returns list of DcmSRSeries
+		'''
+		diagnostics = self.diagnostics if diagnostics is None else diagnostics
+		default, members = self._timepoint_members(diagnostics, strict)
+		if timepoint_uid == TIMEPOINT_DEFAULT:
+			return default
+		found = members.get(timepoint_uid)
+		if not found:
+			return []
+		self._timepoint_entry(timepoint_uid, found, diagnostics, strict)
+		return [series for series, _ in found]
+
+	def _aggregate(self, attr, series_uid=None, measurement_type=None, collection_class=FindingCollection, frame_of_reference_uid=None,
+			timepoint_uid=None, **kwargs):
 		'''	Merge the results of `attr` (`findings` or `measurements`) of every SR series. The current
 			document is selected per series; the results of different series are independent and are
 			combined under the identity (SR series, tracking UID). A tracking UID that two series share
@@ -465,12 +610,17 @@ class DcmSRSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingServerChildCo
 			@input collection_class: collection type the merged results are built with
 			@input frame_of_reference_uid (str, default=None): keep only the measurements in this Frame of
 				Reference, resolved from what is cached
+			@input timepoint_uid (str, default=None): keep only the SR series that belong to this timepoint
+				(`TIMEPOINT_DEFAULT` for those without one), selected before a series is read, so the series outside
+				it are not parsed. None looks no membership up.
 			@input kwargs: passed to the series method (`all_revisions`, `diagnostics`, `strict`)
 			@returns the narrowed mapping
 		'''
 		results = OrderedDict()
 		seen = {}
-		for series in self:
+		selected = self if timepoint_uid is None else self._timepoint_series(
+			timepoint_uid, diagnostics=kwargs.get('diagnostics'), strict=kwargs.get('strict', False))
+		for series in selected:
 			per_series = getattr(series, attr)(collection_class=collection_class, **kwargs)
 			for uid, by_type in per_series.items():
 				for mtype, collection in by_type.items():
@@ -486,21 +636,27 @@ class DcmSRSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingServerChildCo
 		return _shape_results(results, series_uid=series_uid, measurement_type=measurement_type, collection_class=collection_class,
 			frame_of_reference_uid=frame_of_reference_uid)
 
-	def landmarks(self, series_uid=None, frame_of_reference_uid=None, **kwargs):
+	def landmarks(self, series_uid=None, frame_of_reference_uid=None, timepoint_uid=None, **kwargs):
 		'''	Landmark sets of the current document of every SR series of the study, combined as `findings` combines.
 
+			@input timepoint_uid (str, default=None): timepoint to narrow to, as `findings`
 			@input kwargs: `all_revisions`, `diagnostics`, `strict`
 			@returns dict: `{series_uid: [LandmarkSet, ...]}`
 		'''
-		nested = self._aggregate('landmark_sets', collection_class=LandmarkSetCollection, frame_of_reference_uid=frame_of_reference_uid, **kwargs)
+		nested = self._aggregate('landmark_sets', collection_class=LandmarkSetCollection, frame_of_reference_uid=frame_of_reference_uid,
+			timepoint_uid=timepoint_uid, **kwargs)
 		return _landmarks_by_series(nested, series_uid)
 
-	def findings(self, series_uid=None, measurement_type=None, **kwargs):
+	def findings(self, series_uid=None, measurement_type=None, timepoint_uid=None, **kwargs):
 		'''	Qualitative findings of the current document of every SR series of the study, keyed by
 			imaging-series UID and measurement type.
 
 			@input series_uid (str, default=None): imaging series to narrow to
 			@input measurement_type (str, default=None): measurement type to narrow to (`series-tag`, `arrow`)
+			@input timepoint_uid (str, default=None): timepoint to narrow to: the findings of the SR series that
+				belong to it, or with `TIMEPOINT_DEFAULT` of those without a timepoint. The selection is by series
+				(`DcmSRSeries.get_timepoint`), also with `all_revisions=True`; a UID no series carries gives the
+				empty result of the call's shape. None looks no membership up and makes no request for it.
 			@input kwargs: passed to `DcmSRInstanceCollection.findings` (`all_revisions`, `diagnostics`,
 				`strict`)
 			@returns
@@ -510,15 +666,16 @@ class DcmSRSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingServerChildCo
 			  - FindingCollection for both
 		'''
 		return self._aggregate('findings', series_uid=series_uid, measurement_type=measurement_type,
-			collection_class=FindingCollection, **kwargs)
+			collection_class=FindingCollection, timepoint_uid=timepoint_uid, **kwargs)
 
-	def measurements(self, series_uid=None, measurement_type=None, frame_of_reference_uid=None, **kwargs):
+	def measurements(self, series_uid=None, measurement_type=None, frame_of_reference_uid=None, timepoint_uid=None, **kwargs):
 		'''	Quantitative measurements of the current document of every SR series of the study, keyed by
 			imaging-series UID and measurement type. Arguments as `findings`. Costs one `file` request per
 			SR series on first access, shared with `findings`.
 
 			@input frame_of_reference_uid (str, default=None): keep only the measurements in this Frame of
 				Reference, resolved from what is cached, with no request
+			@input timepoint_uid (str, default=None): timepoint to narrow to, as `findings`
 
 			@returns
 			  - dict keyed to imaging-series UID: `{series_uid: {measurement_type: MeasurementCollection}}`
@@ -527,7 +684,7 @@ class DcmSRSeriesCollection(ImagingSeriesBulkPopulateMixin, ImagingServerChildCo
 			  - MeasurementCollection for both (empty when nothing matches)
 		'''
 		return self._aggregate('measurements', series_uid=series_uid, measurement_type=measurement_type,
-			collection_class=MeasurementCollection, frame_of_reference_uid=frame_of_reference_uid, **kwargs)
+			collection_class=MeasurementCollection, frame_of_reference_uid=frame_of_reference_uid, timepoint_uid=timepoint_uid, **kwargs)
 
 
 class DcmStructuredInstance(DcmInstanceCoreResource):
@@ -694,6 +851,39 @@ class DcmSRInstance(DcmStructuredInstance):
 		if self.__dict__.get('_dcmfile') is not None:
 			return self._dcmfile
 		return self.tags
+
+	def _cached_headers(self):
+		'''	Headers of the document from what is already cached: the dataset of the parsed report, the cached
+			file, else the cached tags. Makes no request.
+
+			@returns pydicom.Dataset or dict, or None when nothing is cached
+		'''
+		report = self.__dict__.get('_report')
+		if report is not None and getattr(report, 'parsed', None) is not None:
+			return report.parsed.dataset
+		if self.__dict__.get('_dcmfile') is not None:
+			return self._dcmfile
+		return self.__dict__.get('_tags')
+
+	def get_timepoint(self, diagnostics=None, strict=False):
+		'''	Timepoint the document itself carries, read from its headers on each call (`_evidence_headers`): no
+			request when the report, the file or the tags are cached, else one `simplified-tags` request. For a
+			superseded revision it can differ from the timepoint of the series (`DcmSRSeries.get_timepoint`).
+
+			@input diagnostics (list, default=None): list the conditions of the timepoint item are appended to
+			@input strict (bool, default=False): raise SRDiagnosticError on a `warning`
+
+			@returns Timepoint, or None for a document without a timepoint
+		'''
+		return dcm_timepoint(self._evidence_headers(), diagnostics=diagnostics, strict=strict)
+
+	@property
+	def timepoint(self):
+		'''	Timepoint the document itself carries (`get_timepoint`, lenient and without a diagnostics list)
+
+			@returns Timepoint or None
+		'''
+		return self.get_timepoint()
 
 	@property
 	def instance_reference_uids(self):

@@ -1250,6 +1250,21 @@ ImageReference.__new__.__defaults__ = (None, None, None)
 DCMSR_FINDING = dcmcodes.DCM.Finding
 
 
+class _DocumentTimepointMixin:
+	'''	`timepoint` of an annotation read from a document.
+	'''
+	@property
+	def timepoint(self):
+		'''	Timepoint of the document the annotation was read from (`sr_instance.timepoint`), computed on each
+			access and never stored. This is the provenance of the annotation: for a superseded revision it can
+			differ from the timepoint of the SR series, which is what the findings API selects by.
+
+			@returns Timepoint, or None for an annotation created in Python or read from a document without one
+		'''
+		sr_instance = getattr(self, 'sr_instance', None)
+		return sr_instance.timepoint if sr_instance is not None else None
+
+
 class _DisplayAttributesMixin:
 	'''	`display` attribute shared by findings and measurements.
 	'''
@@ -1268,7 +1283,7 @@ class _DisplayAttributesMixin:
 		self._display = val
 
 
-class Finding(_DisplayAttributesMixin, SRDataCollectionMember):
+class Finding(_DocumentTimepointMixin, _DisplayAttributesMixin, SRDataCollectionMember):
 	'''	Qualitative finding associated with a resource: a simplified implementation of the DICOM-SR
 		TID 1501 "Finding" item, extended with the Sonador-SR 0.3 per-finding properties of a Series
 		Tag (a coded concept applied to a whole imaging series, with optional description, text,
@@ -1700,7 +1715,7 @@ MeasurementValue = namedtuple('MeasurementValue', ('name', 'value', 'unit', 'ite
 MeasurementValue.__new__.__defaults__ = (None,)
 
 
-class Measurement(_DisplayAttributesMixin, SRDataCollectionMember):
+class Measurement(_DocumentTimepointMixin, _DisplayAttributesMixin, SRDataCollectionMember):
 	'''	Numerical measurement associated with a resource: a simplified implementation of DICOM-SR
 		TID 300, extended with the identity, property and link attributes a `Finding` carries.
 
@@ -5147,7 +5162,7 @@ class LandmarkCollection:
 		return found[0]
 
 
-class LandmarkSet(_FrozenMixin, _NamedMixin, _DisplayAttributesMixin, SRDataCollectionMember):
+class LandmarkSet(_FrozenMixin, _NamedMixin, _DocumentTimepointMixin, _DisplayAttributesMixin, SRDataCollectionMember):
 	'''	A named group of points with attributes of its own: one TID 1501 measurement group of a document, with a
 		Finding for the set and one coded item per landmark, each carrying its point. A set is neither a finding nor a
 		measurement: `report.landmarks` and the `landmarks` accessors list it.

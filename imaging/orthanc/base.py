@@ -1413,17 +1413,30 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 		if self.__dict__.get('_sr') is not None:
 			self._sr.invalidate()
 
-	def landmarks(self, series_uid=None, frame_of_reference_uid=None, **kwargs):
+	def timepoints(self, **kwargs):
+		'''	Timepoints of the study, each with the SR series that belong to it (`DcmSRSeriesCollection.timepoints`):
+			the default timepoint first, then the defined timepoints in their order. After
+			`bulkpopulate_related(child_instances=True)` on the study collection, costs at most one `simplified-tags`
+			request per SR series, and none for a current document whose report, file or tags are cached.
+
+			@input kwargs: `diagnostics`, `strict`
+			@returns OrderedDict: `{TIMEPOINT_DEFAULT or timepoint UID: TimepointMembers(timepoint, series)}`
+		'''
+		return self.sr_collection.timepoints(**kwargs)
+
+	def landmarks(self, series_uid=None, frame_of_reference_uid=None, timepoint_uid=None, **kwargs):
 		'''	Landmark sets of the study: the current document of every SR series, with the request budget of `findings`
 			(the parsed reports are shared).
 
 			@input series_uid (str, default=None), frame_of_reference_uid (str, default=None): narrowing
+			@input timepoint_uid (str, default=None): timepoint to narrow to, as `findings`
 			@input kwargs: `all_revisions`, `diagnostics`, `strict`
 			@returns dict: `{series_uid: [LandmarkSet, ...]}`
 		'''
-		return self.sr_collection.landmarks(series_uid=series_uid, frame_of_reference_uid=frame_of_reference_uid, **kwargs)
+		return self.sr_collection.landmarks(series_uid=series_uid, frame_of_reference_uid=frame_of_reference_uid,
+			timepoint_uid=timepoint_uid, **kwargs)
 
-	def findings(self, series_uid=None, measurement_type=None, **kwargs):
+	def findings(self, series_uid=None, measurement_type=None, timepoint_uid=None, **kwargs):
 		'''	Qualitative findings of the study: the current document of every SR series, keyed by
 			imaging-series UID and measurement type. After `bulkpopulate_related(child_instances=True)` on the study
 			collection, the first access costs one `file` GET per SR series and later accesses none: the
@@ -1433,6 +1446,9 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 
 			@input series_uid (str, default=None): imaging series to narrow to
 			@input measurement_type (str, default=None): measurement type to narrow to (`series-tag`, `arrow`)
+			@input timepoint_uid (str, default=None): timepoint to narrow to: the findings of the SR series that
+				belong to it (`timepoints`), or with `TIMEPOINT_DEFAULT` of those without a timepoint. The SR series
+				outside it are not parsed. None looks no membership up and makes no request for it.
 			@input kwargs: passed to `DcmSRInstanceCollection.findings` (`all_revisions`, `diagnostics`,
 				`strict`)
 			@returns
@@ -1441,15 +1457,17 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 			  - dict keyed to imaging-series UID for a `measurement_type`: `{series_uid: FindingCollection}`
 			  - FindingCollection for both
 		'''
-		return self.sr_collection.findings(series_uid=series_uid, measurement_type=measurement_type, **kwargs)
+		return self.sr_collection.findings(series_uid=series_uid, measurement_type=measurement_type,
+			timepoint_uid=timepoint_uid, **kwargs)
 
-	def measurements(self, series_uid=None, measurement_type=None, **kwargs):
+	def measurements(self, series_uid=None, measurement_type=None, timepoint_uid=None, **kwargs):
 		'''	Quantitative measurements of the study: the current document of every SR series, keyed by
 			imaging-series UID and measurement type. Arguments as `findings`; a patient-domain measurement
 			is keyed by the series of its document. After `bulkpopulate_related(child_instances=True)` on
 			the study collection, the first access costs one `file` GET per SR series, shared with
 			`findings`, and later accesses none. Cache invalidation is `invalidate_findings`.
 
+			@input timepoint_uid (str, default=None): timepoint to narrow to, as `findings`
 			@input kwargs: passed to `DcmSRSeriesCollection.measurements`: `frame_of_reference_uid` keeps only
 				the measurements in that Frame of Reference, resolved from what is cached with no request
 
@@ -1459,7 +1477,8 @@ class ImagingStudy(ImagingResourceMixin, ImagingResourceParentMixin, ImagingServ
 			  - dict keyed to imaging-series UID for a `measurement_type`: `{series_uid: MeasurementCollection}`
 			  - MeasurementCollection for both (empty when nothing matches)
 		'''
-		return self.sr_collection.measurements(series_uid=series_uid, measurement_type=measurement_type, **kwargs)
+		return self.sr_collection.measurements(series_uid=series_uid, measurement_type=measurement_type,
+			timepoint_uid=timepoint_uid, **kwargs)
 
 	@property
 	def series_by_uid(self):
@@ -2400,15 +2419,17 @@ class ImagingSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 			key=lambda dcm: dcm.ts if dcm.ts else datetime.datetime(year=1900, month=1, day=1),
 			reverse=True)
 
-	def landmarks(self, frame_of_reference_uid=None, **kwargs):
+	def landmarks(self, frame_of_reference_uid=None, timepoint_uid=None, **kwargs):
 		'''	Landmark sets listed under this series, from the current document of every SR series of the parent study
 			(`ImagingStudy.landmarks` narrowed to this series).
 
+			@input timepoint_uid (str, default=None): timepoint to narrow to, as `ImagingStudy.findings`
 			@returns dict: `{series_uid: [LandmarkSet, ...]}`
 		'''
-		return self.parent.landmarks(series_uid=self.series_uid, frame_of_reference_uid=frame_of_reference_uid, **kwargs)
+		return self.parent.landmarks(series_uid=self.series_uid, frame_of_reference_uid=frame_of_reference_uid,
+			timepoint_uid=timepoint_uid, **kwargs)
 
-	def findings(self, measurement_type=None, **kwargs):
+	def findings(self, measurement_type=None, timepoint_uid=None, **kwargs):
 		'''	Qualitative findings that apply to this series, from the current document of every SR series
 			of the parent study (`ImagingStudy.findings` narrowed to this series). After
 			`bulkpopulate_related(child_instances=True)` on the study collection, the first access costs
@@ -2416,13 +2437,15 @@ class ImagingSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 			instances, the instance collection of each SR series is fetched first.
 
 			@input measurement_type (str, default=None): measurement type to narrow to (`series-tag`, `arrow`)
+			@input timepoint_uid (str, default=None): timepoint to narrow to, as `ImagingStudy.findings`
 			@input kwargs: passed to `DcmSRInstanceCollection.findings` (`all_revisions`, `diagnostics`,
 				`strict`)
 			@returns
 			  - dict keyed to measurement type: `{measurement_type: FindingCollection}`
 			  - FindingCollection for a measurement type
 		'''
-		return self.parent.findings(series_uid=self.series_uid, measurement_type=measurement_type, **kwargs)
+		return self.parent.findings(series_uid=self.series_uid, measurement_type=measurement_type,
+			timepoint_uid=timepoint_uid, **kwargs)
 
 	@property
 	def frame_of_reference_uid(self):
@@ -2434,7 +2457,7 @@ class ImagingSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 		from .sr import dcmsr_series_frame_uid
 		return dcmsr_series_frame_uid(self)
 
-	def measurements(self, measurement_type=None, frame_of_reference_uid=None, **kwargs):
+	def measurements(self, measurement_type=None, frame_of_reference_uid=None, timepoint_uid=None, **kwargs):
 		'''	Quantitative measurements that apply to this series, from the current document of every SR
 			series of the parent study (`ImagingStudy.measurements` narrowed to this series). With
 			`frame_of_reference_uid`, the measurements of the study in that Frame of Reference instead,
@@ -2444,6 +2467,8 @@ class ImagingSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 
 			@input measurement_type (str, default=None): measurement type to narrow to
 			@input frame_of_reference_uid (str, default=None): Frame of Reference to select by
+			@input timepoint_uid (str, default=None): timepoint to narrow to, as `ImagingStudy.findings`; applied
+				with either selection
 			@input kwargs: passed to `DcmSRInstanceCollection.measurements` (`all_revisions`, `diagnostics`,
 				`strict`)
 
@@ -2452,9 +2477,10 @@ class ImagingSeries(ImagingSeriesDcm0Mixin, ImagingSeriesCoreResource):
 			  - MeasurementCollection for a `measurement_type` (empty when nothing matches)
 		'''
 		if frame_of_reference_uid is None:
-			return self.parent.measurements(series_uid=self.series_uid, measurement_type=measurement_type, **kwargs)
+			return self.parent.measurements(series_uid=self.series_uid, measurement_type=measurement_type,
+				timepoint_uid=timepoint_uid, **kwargs)
 		merged = OrderedDict()
-		for by_type in self.parent.measurements(frame_of_reference_uid=frame_of_reference_uid, **kwargs).values():
+		for by_type in self.parent.measurements(frame_of_reference_uid=frame_of_reference_uid, timepoint_uid=timepoint_uid, **kwargs).values():
 			for mtype, collection in by_type.items():
 				merged.setdefault(mtype, []).extend(collection)
 		merged = OrderedDict((mtype, MeasurementCollection(items)) for mtype, items in merged.items())

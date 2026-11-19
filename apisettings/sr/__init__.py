@@ -271,6 +271,14 @@ SR_CONDITION_LANDMARK_LEGACY_MIGRATED = 'landmark-legacy-migrated'
 SR_CONDITION_LANDMARK_LEGACY_NOT_MIGRATABLE = 'landmark-legacy-not-migratable'
 SR_CONDITION_LANDMARK_SET_INVALID = 'landmark-set-invalid'
 
+# Timepoints (`sonador.imaging.helpers.timepoint`): conditions of a timepoint item, of the documents of one SR series
+# and of the members of one timepoint
+SR_CONDITION_TIMEPOINT_MULTIPLE_ITEMS = 'timepoint-multiple-items'
+SR_CONDITION_TIMEPOINT_MISSING_UID = 'timepoint-missing-uid'
+SR_CONDITION_TIMEPOINT_INVALID_DATE = 'timepoint-invalid-date'
+SR_CONDITION_TIMEPOINT_SERIES_CONFLICT = 'timepoint-series-conflict'
+SR_CONDITION_TIMEPOINT_ATTRIBUTE_MISMATCH = 'timepoint-attribute-mismatch'
+
 
 class SRDiagnostic(namedtuple('SRDiagnostic', ('severity', 'condition', 'path', 'value', 'message'))):
 	'''	One condition met while reading or writing a DICOM-SR document. `info` records a fact,

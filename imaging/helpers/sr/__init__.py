@@ -52,7 +52,7 @@ from ....apisettings.base import ImageTransformMatrix, ImageTransformMatrixColle
 	SONADOR_SR, SONADOR_MANUFACTURER, SONADOR_IO, sonador_software_version, DCMTS_SERIES, \
 	DCMHEADER_SERIES_DESCRIPTION, DCMHEADER_SERIES_NUMBER, DCMHEADER_REGISTRATION_SEQUENCE, \
 	DCMHEADER_MANUFACTER_MODEL_NAME, DCMHEADER_SOFTWARE_VERSIONS, DCMHEADER_SOP_CLASS_UID, DCMHEADER_SOP_INSTANCE_UID, \
-	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_STUDY_INSTANCE_UID
+	DCMHEADER_SERIES_INSTANCE_UID, DCMHEADER_STUDY_INSTANCE_UID, DCMHEADER_TIMEPOINT_MIRROR, Timepoint
 from ....apisettings.sr import dcm_encode_reference_frame_transform_matrix, srencode_observation_context, \
 	DCMSR_SONADOR_DATA_REPORT, sr_diagnostic, SRDiagnostic, SRDiagnosticError, srcontent_extra_items, \
 	srcontent_is_by_reference, srcontent_holds_by_reference, SR_DIAGNOSTIC_INFO, SR_DIAGNOSTIC_WARNING, SR_DIAGNOSTIC_ERROR, \
@@ -66,6 +66,7 @@ from ...orthanc.base import ImagingResourceBaseCollection
 from ...orthanc.sr import DcmSRSeries, DcmSRInstance
 
 from ..headers import dcm_header_value
+from ..timepoint import dcm_set_timepoint, dcm_copy_foreign_items
 from .encoding import SonadorSRMeasurementReport
 from .frames import SRFrameMixin
 from .parse import srdoc_parse, srdoc_read, srdoc_document_class, srdoc_sop_class, srdoc_evidence_headers, srdoc_synthetic_evidence, srdoc_set_study, \
@@ -259,6 +260,8 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 			document's name on a re-save, the caller's otherwise
 		@attr extra_items (tuple of pydicom.Dataset): root-level content items preserved from the parsed
 			document and re-emitted after the TID 1500 items
+		@attr timepoint (Timepoint or None): timepoint the document is written with: the parsed document's
+			on a re-save, the caller's otherwise; None writes no timepoint. It can be assigned before `create_sr`.
 	'''
 	dcmsr_report_template = None
 	dcmsr_document_template = None
@@ -296,6 +299,7 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 				identifier written
 			@input person_observer (str, default=the parsed document's name): Person Observer Name written
 				at the root
+			@input timepoint (Timepoint, default=the parsed document's): timepoint the document is written with
 
 			@input observation_context_uid (str, default=new UID per document): Device Observer UID
 			@input observation_context_device_name (str, default=class profile): Device Observer Name
@@ -324,6 +328,8 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 			or mapping_resource_for_template(self.template_id)
 		self.person_observer = kwargs.get('person_observer', parsed.person_observer if parsed is not None else None)
 		self.extra_items = tuple(kwargs.get('extra_items', parsed.extra_items if parsed is not None else ()) or ())
+		self.timepoint = kwargs.get('timepoint', parsed.timepoint if parsed is not None else None)
+		self._timepoint_mirror = None
 
 		procedures = report_procedure or (parsed.procedures if parsed is not None else None) or self.report_procedure
 		if isinstance(procedures, (list, tuple)) and len(procedures) == 1:
@@ -441,7 +447,9 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 	def dcmsr_series_headers(self, srdoc, ts:datetime.datetime, description=None, **kwargs):
 		'''	Add identifying headers to the SR document: series date and time, Series Description, the
 			equipment profile of the class (Manufacturer Model Name and Software Versions) and, on a
-			re-save, the headers carried through from the parsed document (`_carry_headers`).
+			re-save, the headers carried through from the parsed document (`_carry_headers`) and the items of
+			its Referenced Performed Procedure Step Sequence that are not timepoint items. The model's timepoint
+			is written last (`sonador.imaging.helpers.timepoint`).
 
 			@input srdoc (highdicom SR document): document the headers are set on
 			@input ts (datetime.datetime): series date and time
@@ -464,8 +472,79 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 
 		if self.parsed is not None:
 			self._carry_headers(srdoc, self.parsed.dataset)
+			dcm_copy_foreign_items(self.parsed.dataset, srdoc)
+
+		# Timepoint: a value read from the parsed document is written back as read, with the series-level
+		# attributes the document held; any other value is checked, and its copy is written when the document
+		# holds none of the four attributes, or always when the caller owns them (`timepoint_mirror`)
+		if self.timepoint is not None:
+			unchanged = self._timepoint_unchanged()
+			if self._timepoint_mirror is True:
+				mirror = True
+			else:
+				mirror = False if unchanged else None
+			dcm_set_timepoint(srdoc, self.timepoint, mirror=mirror, validate=not unchanged)
 
 		return srdoc
+
+	def _timepoint_unchanged(self):
+		'''	Whether the model's timepoint is the one read from the parsed document, equal in every field.
+
+			@returns bool: False for a model that was not built from a document, or whose document had none
+		'''
+		return self.parsed is not None and self.parsed.timepoint is not None and self.timepoint == self.parsed.timepoint
+
+	def _check_timepoint(self, dcmsr_series_uid=None):
+		'''	Check the model's timepoint before a document is built. A value that is not the parsed document's is
+			checked (`Timepoint.validate`). In the destination series an established timepoint is neither changed
+			nor cleared; assigning one where the series has none is allowed, and so is any timepoint, or none, in
+			a series the model neither was read from nor is bound to.
+
+			The destination is `dcmsr_series_uid`, else the parsed document's series, else the bound series. Its
+			established timepoint is the series' own when the model is bound to it: the timepoint of its current
+			document, which a newer revision than the parsed one may have set. A model built from a document reads
+			it from what is cached, with no request, and falls back to the parsed document's timepoint when the
+			series cannot be read that way; a model that was not built from a document asks the series
+			(`DcmSRSeries.get_timepoint`).
+
+			@input dcmsr_series_uid (str, default=None): Series Instance UID given to `create_sr`
+
+			@raises ValueError for a value that is not a Timepoint, a value `validate` refuses, or a change or
+				removal of the timepoint of the destination series
+		'''
+		timepoint = self.timepoint
+		if timepoint is not None:
+			if not isinstance(timepoint, Timepoint):
+				raise ValueError('`timepoint` must be a Timepoint, not %s' % type(timepoint).__name__)
+			if not self._timepoint_unchanged():
+				timepoint.validate()
+
+		destination = dcmsr_series_uid or self.series_instance_uid
+		if not destination:
+			return
+		destination = str(destination)
+
+		# The series' current membership, when the model is bound to the destination
+		known, established = False, None
+		if self.series is not None and str(getattr(self.series, 'series_uid', None)) == destination:
+			if self.parsed is None:
+				if hasattr(self.series, 'get_timepoint'):
+					known, established = True, self.series.get_timepoint()
+			elif hasattr(self.series, '_cached_timepoint'):
+				known, established = self.series._cached_timepoint()
+		# Else the document the model was read from, when the destination is its series
+		if not known and self.parsed is not None \
+				and destination == dcm_header_text(self.parsed.dataset, DCMHEADER_SERIES_INSTANCE_UID):
+			established = self.parsed.timepoint
+
+		if established is None:
+			return
+		if timepoint is None:
+			raise ValueError('SR series %s belongs to timepoint %s; a timepoint is not cleared in its series. '
+				'Write to another series (`dcmsr_series_uid`) instead.' % (destination, established.uid))
+		if timepoint.uid != established.uid:
+			raise ValueError('SR series %s belongs to timepoint %s; it cannot be written with timepoint %s. '
+				'Another timepoint means another series (`dcmsr_series_uid`).' % (destination, established.uid, timepoint.uid))
 
 	def _carry_headers(self, srdoc, parsed):
 		'''	Copy to the new document the top-level headers of the parsed document that the new document
@@ -483,6 +562,9 @@ class SonadorBaseSR(metaclass=abc.ABCMeta):
 			if elem.tag.group < 0x0008 or elem.tag.element == 0x0000 or elem.tag in srdoc:
 				continue
 			if elem.keyword in DCMSR_HEADERS_REGENERATED:
+				continue
+			# The series-level copy of a timepoint the caller owns is written from the model's timepoint
+			if self._timepoint_mirror is True and elem.keyword in DCMHEADER_TIMEPOINT_MIRROR:
 				continue
 			srdoc[elem.tag] = copy.deepcopy(elem)
 		return srdoc
@@ -1517,7 +1599,7 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 			dcmsr_series_number=None, dcmsr_instance_number=1, ts=None, is_complete=None,
 			is_final=None, is_verified=None, series_headers_kwargs=None, record_instances=None,
 			person_observer=None, device_observer_uid=None, template_id=None, previous=_PARSED_PREDECESSOR,
-			document_template=None, strict=False, require=None, target=None, **kwargs):
+			document_template=None, strict=False, require=None, target=None, timepoint_mirror=None, **kwargs):
 		'''	Create the DICOM-SR document from the model data: the report content (`create_report_sr`),
 			the evidence, the document flags, the predecessor links, the root template and the series
 			headers. Specific Character Set `ISO_IR 192` is set whenever a text value of the document is
@@ -1561,6 +1643,11 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 				writes every frame as given, `'registered'` refuses geometry with no trusted path, `'native'` refuses
 				anything not stored in the target frame (see `sonador.imaging.helpers.sr.frames`)
 			@input target (str, default=the primary): target frame of the policy; required without a primary
+			@input timepoint_mirror (bool, default=None): True states that the caller owns the series-level
+				Performed Procedure Step ID, Start Date, Start Time and Description of the document: those of the
+				parsed document are not carried and the four are written from the model's timepoint, when it has
+				one. By default a re-save carries them as they were and the copy of a new timepoint is written only
+				when the document holds none of them.
 			@input kwargs: further document class, report template, observation context and primary
 				group arguments (see `create_report_sr`)
 
@@ -1577,7 +1664,8 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 				(`frame-edge-invalid`), or a primary change that would rebind a saved legacy edge (`legacy-target-change`)
 			@raises FrameConversionError for a policy without a target on a report with no primary
 			@raises ConfigurationError when no procedure reported is set
-			@raises ValueError when a Series Tag finding has no image reference and no reference series
+			@raises ValueError for a timepoint that fails its check, or one that would change or clear the timepoint
+				of the series written to (`_check_timepoint`); when a Series Tag finding has no image reference and no reference series
 				to take one from, when the model has no evidence source at all, when a document class
 				other than Comprehensive 3D SR is requested, when a patient-domain measurement names a source series the report cannot
 				resolve (`source_series_references`), or for a drawing plane that fails validation
@@ -1588,6 +1676,7 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 				+ 'the content tree would invalidate its target, so the document is not rewritten.'))
 		if not self.report_procedure:
 			raise ConfigurationError('Unable to create DICOM-SR instance. No "report_procedure" code provided.')
+		self._check_timepoint(dcmsr_series_uid)
 
 		if record_instances is None:
 			record_instances = self.record_instances
@@ -1702,7 +1791,11 @@ class SonadorComprehensiveSR3D(SRFrameMixin, SonadorBaseSR):
 			_srdoc.PredecessorDocumentsSequence = DcmSequence(srdoc_predecessor_items(predecessors))
 
 		# Apply series headers to report instance
-		self.dcmsr_series_headers(_srdoc, ts, **(series_headers_kwargs or {}))
+		self._timepoint_mirror = timepoint_mirror
+		try:
+			self.dcmsr_series_headers(_srdoc, ts, **(series_headers_kwargs or {}))
+		finally:
+			self._timepoint_mirror = None
 
 		# UTF-8 for a document with text that is not ASCII; an all-ASCII document keeps the character set
 		# highdicom gives it
