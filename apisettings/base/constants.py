@@ -756,6 +756,29 @@ DCMHEADER_NUMBER_OF_SLICES = 'NumberOfSlices'
 DCMHEADER_NUMBER_OF_TIME_SLICES = 'NumberOfTimeSlices'
 
 DCMHEADER_PERFORMED_PROCEDURE_STEP_DESCRIPTION = 'PerformedProcedureStepDescription'
+DCMHEADER_PERFORMED_PROCEDURE_STEP_ID = 'PerformedProcedureStepID'
+DCMHEADER_PERFORMED_PROCEDURE_STEP_START_DATE = 'PerformedProcedureStepStartDate'
+DCMHEADER_PERFORMED_PROCEDURE_STEP_START_TIME = 'PerformedProcedureStepStartTime'
+DCMHEADER_REFERENCED_PERFORMED_PROCEDURE_STEP_SEQUENCE = 'ReferencedPerformedProcedureStepSequence'
+DCMTS_PERFORMED_PROCEDURE_STEP = DicomDatetimePairKey(
+	IMAGING_SERVER_RESOURCE_SERIES, DCMHEADER_PERFORMED_PROCEDURE_STEP_START_DATE, DCMHEADER_PERFORMED_PROCEDURE_STEP_START_TIME)
+
+# Timepoints: a timepoint groups series inside one study. It is carried by an item of Referenced Performed Procedure
+# Step Sequence whose Referenced SOP Class UID is the timepoint class UID, with a copy of its descriptive values in
+# the series-level Performed Procedure Step attributes (`sonador.imaging.helpers.timepoint`).
+SONADOR_TIMEPOINT_SOP_CLASS_UID = '2.25.33188558902346601872773385043464853716'
+
+# Key of the default timepoint of a study (the Study Date/Time), which holds every series without a timepoint
+TIMEPOINT_DEFAULT = 'default'
+
+# Longest identifier (SH) and description (LO) a timepoint is written with
+TIMEPOINT_ID_MAX_LENGTH = 16
+TIMEPOINT_DESCRIPTION_MAX_LENGTH = 64
+
+# The series-level Performed Procedure Step attributes that hold the copy of a timepoint's descriptive values
+DCMHEADER_TIMEPOINT_MIRROR = (
+	DCMHEADER_PERFORMED_PROCEDURE_STEP_ID, DCMHEADER_PERFORMED_PROCEDURE_STEP_START_DATE,
+	DCMHEADER_PERFORMED_PROCEDURE_STEP_START_TIME, DCMHEADER_PERFORMED_PROCEDURE_STEP_DESCRIPTION)
 
 DCMHEADER_SCHEDULED_PROCEDURE_STEP_START_DATE = 'ScheduledProcedureStepStartDate'
 DCMHEADER_SCHEDULED_PROCEDURE_STEP_START_TIME = 'ScheduledProcedureStepStartTime'

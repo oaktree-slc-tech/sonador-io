@@ -1,0 +1,426 @@
+{
+  "contract": "oak-tree/medical-imaging/sonador-client#50",
+  "timepoint_class_uid": "2.25.33188558902346601872773385043464853716",
+  "command": "python -m sonador.ftests.test_sr.timepoints_fixtures",
+  "versions": {
+    "pydicom": "3.0.2",
+    "highdicom": "0.28.2.post2"
+  },
+  "order_cases": [
+    {
+      "uid": "2.25.9101",
+      "id": null,
+      "date": "20260101",
+      "time": "0930",
+      "description": "b"
+    },
+    {
+      "uid": "2.25.9102",
+      "id": null,
+      "date": "20260101",
+      "time": "093000",
+      "description": "c"
+    },
+    {
+      "uid": "2.25.9103",
+      "id": null,
+      "date": "20260101",
+      "time": "093000.5",
+      "description": "a"
+    },
+    {
+      "uid": "2.25.9104",
+      "id": null,
+      "date": "20260102",
+      "time": null,
+      "description": null
+    },
+    {
+      "uid": "2.25.9106",
+      "id": null,
+      "date": "20260103",
+      "time": "120000",
+      "description": "\ud800\udc00"
+    },
+    {
+      "uid": "2.25.9105",
+      "id": null,
+      "date": "20260103",
+      "time": "120000",
+      "description": "\ue000"
+    },
+    {
+      "uid": "2.25.9108",
+      "id": null,
+      "date": "20260104",
+      "time": "9:30",
+      "description": "x"
+    },
+    {
+      "uid": "2.25.9109",
+      "id": null,
+      "date": "20260104",
+      "time": "000000",
+      "description": "x"
+    },
+    {
+      "uid": "2.25.9107",
+      "id": null,
+      "date": null,
+      "time": null,
+      "description": null
+    },
+    {
+      "uid": "2.25.9111",
+      "id": null,
+      "date": null,
+      "time": null,
+      "description": "A"
+    },
+    {
+      "uid": "2.25.9110",
+      "id": null,
+      "date": "2026-01-01",
+      "time": null,
+      "description": "B"
+    }
+  ],
+  "files": {
+    "sonador-io.timepoint-image.2026-1118.dcm": {
+      "pack": 1,
+      "role": "Synthetic MR image the documents reference",
+      "modality": "MR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.55709842843288360648768528066856743654",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.11491826878345668264244113753381208337",
+      "timepoint": null,
+      "timepoint_items": 0,
+      "tracking_uids": [],
+      "changed_after_writing": null,
+      "sha256": "42b9e313f7cdc276ed0126610d151cfe796cd9a0d2f3407f0e3126a6c624b958"
+    },
+    "sonador-io.timepoint-length.2026-1118.dcm": {
+      "pack": 1,
+      "role": "Comprehensive 3D SR with a timepoint and one Length measurement",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.13366655332427947376566697424373952372",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.78523297670560768713991368869927156966",
+      "timepoint": {
+        "uid": "2.25.191695047064511770490138894325767502622",
+        "id": "TP-POSTOP-6W",
+        "date": "20261104",
+        "time": "093000",
+        "description": "Post-operative review, 6 weeks"
+      },
+      "timepoint_items": 1,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.12767952652442664316007481828334772297"
+      ],
+      "changed_after_writing": null,
+      "sha256": "a38c9f643e126dd6cb0bb00170eb422e2792f0a3283bd59cce3d0e0ed9f27bb0"
+    },
+    "sonador-io.timepoint-length-none.2026-1118.dcm": {
+      "pack": 1,
+      "role": "The same document without a timepoint",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.12688627308977800489223125677292899862",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.12644537611833454675615655690434218386",
+      "timepoint": null,
+      "timepoint_items": 0,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.10521755808161370488001058974983069907"
+      ],
+      "changed_after_writing": null,
+      "sha256": "a304893c53aa6a6b10489c6c48d2b719b2c97756de4cb3cacb26dd3c3d44840b"
+    },
+    "sonador-io.timepoint-resave.2026-1118.dcm": {
+      "pack": 2,
+      "role": "Re-save of timepoint-length: same series and timepoint",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.13366655332427947376566697424373952372",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.13064456432263641203204675163123804860",
+      "timepoint": {
+        "uid": "2.25.191695047064511770490138894325767502622",
+        "id": "TP-POSTOP-6W",
+        "date": "20261104",
+        "time": "093000",
+        "description": "Post-operative review, 6 weeks"
+      },
+      "timepoint_items": 1,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.12767952652442664316007481828334772297"
+      ],
+      "changed_after_writing": null,
+      "sha256": "9c61ae89888080ce7b01063d897ebb400e60488d719fd2cba495bd790eae5574"
+    },
+    "sonador-io.timepoint-join-r1.2026-1118.dcm": {
+      "pack": 2,
+      "role": "Joining series, first revision: no timepoint",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.97876909327062151807504818157665413644",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.65674343785062397763390610170521293308",
+      "timepoint": null,
+      "timepoint_items": 0,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.91504082269073942061047351205390647979"
+      ],
+      "changed_after_writing": null,
+      "sha256": "2ac960e81d16f5b5b4b4cec131756b2d4f4c850bf1dc3404338f06b17ca8478d"
+    },
+    "sonador-io.timepoint-join-r2.2026-1118.dcm": {
+      "pack": 2,
+      "role": "Joining series, second revision: joins the timepoint",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.97876909327062151807504818157665413644",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.31545151217988763858963843327109313405",
+      "timepoint": {
+        "uid": "2.25.191695047064511770490138894325767502622",
+        "id": "TP-POSTOP-6W",
+        "date": "20261104",
+        "time": "093000",
+        "description": "Post-operative review, 6 weeks"
+      },
+      "timepoint_items": 1,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.91504082269073942061047351205390647979"
+      ],
+      "changed_after_writing": null,
+      "sha256": "4f198589751da53d9b5c709dac88748842e2af6e58feca6db964aadcaee62592"
+    },
+    "sonador-io.timepoint-conflict-r1.2026-1118.dcm": {
+      "pack": 2,
+      "role": "Conflicting series, first revision",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.12833871940450891262119123843989133703",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.85169707141337068079956925388188753965",
+      "timepoint": {
+        "uid": "2.25.191695047064511770490138894325767502622",
+        "id": "TP-POSTOP-6W",
+        "date": "20261104",
+        "time": "093000",
+        "description": "Post-operative review, 6 weeks"
+      },
+      "timepoint_items": 1,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.19585932127589351713900298560970156915"
+      ],
+      "changed_after_writing": null,
+      "sha256": "32a1de1718a2c684b4581ec619ebb3683cee01250e3463935a64679b2e5fa423"
+    },
+    "sonador-io.timepoint-conflict-r2.2026-1118.dcm": {
+      "pack": 2,
+      "role": "Conflicting series, second revision: another timepoint UID",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.12833871940450891262119123843989133703",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.17790542760308108070618612510306452156",
+      "timepoint": {
+        "uid": "2.25.79970188334603530926702433571624902988",
+        "id": "TP-POSTOP-6W",
+        "date": "20261104",
+        "time": "093000",
+        "description": "Post-operative review, 6 weeks"
+      },
+      "timepoint_items": 1,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.19585932127589351713900298560970156915"
+      ],
+      "changed_after_writing": "Referenced SOP Instance UID of the timepoint item replaced after writing",
+      "sha256": "835901c0297ac5aee7f4db13fd101542f906484d10f85016567822fca0898179"
+    },
+    "sonador-io.timepoint-image-mpps-before.2026-1118.dcm": {
+      "pack": 2,
+      "role": "Synthetic image with a Modality Performed Procedure Step item and series-level values of its own",
+      "modality": "MR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.78359603200248079111059474184531083811",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.10569587827898067643917282999842472820",
+      "timepoint": null,
+      "timepoint_items": 0,
+      "tracking_uids": [],
+      "changed_after_writing": null,
+      "sha256": "c47509440e9f587c993f59e583c688220497612599b48157740360a273f5d193"
+    },
+    "sonador-io.timepoint-image-mpps-after.2026-1118.dcm": {
+      "pack": 2,
+      "role": "The same image after dcm_set_timepoint: the item appended, the other item and the series-level values unchanged",
+      "modality": "MR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.78359603200248079111059474184531083811",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.10569587827898067643917282999842472820",
+      "timepoint": {
+        "uid": "2.25.191695047064511770490138894325767502622",
+        "id": "TP-POSTOP-6W",
+        "date": "20261104",
+        "time": "093000",
+        "description": "Post-operative review, 6 weeks"
+      },
+      "timepoint_items": 1,
+      "tracking_uids": [],
+      "changed_after_writing": null,
+      "sha256": "12f411090116f6b3171f7afeae104a98c8538f745d3366ce8d5ca05d76c20434"
+    },
+    "sonador-io.timepoint-study-a.2026-1118.dcm": {
+      "pack": 2,
+      "role": "Study series A: timepoint postop",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.12884435596614203870500693272604962922",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.12951257578681568175884492397275667697",
+      "timepoint": {
+        "uid": "2.25.191695047064511770490138894325767502622",
+        "id": "TP-POSTOP-6W",
+        "date": "20261104",
+        "time": "093000",
+        "description": "Post-operative review, 6 weeks"
+      },
+      "timepoint_items": 1,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.53642610318871970418947626292324531936"
+      ],
+      "changed_after_writing": null,
+      "sha256": "76da268c89807cd21f56b8d7bdb6862213b71dbb192d6136fa1a98444913130c"
+    },
+    "sonador-io.timepoint-study-a-time.2026-1118.dcm": {
+      "pack": 2,
+      "role": "Study series A-time: timepoint postop with another time",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.12411663206983346288156026006219712093",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.10212199882357567174286408528731651073",
+      "timepoint": {
+        "uid": "2.25.191695047064511770490138894325767502622",
+        "id": "TP-POSTOP-6W",
+        "date": "20261104",
+        "time": "101500",
+        "description": "Post-operative review, 6 weeks"
+      },
+      "timepoint_items": 1,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.13018476009463065016319170116554935472"
+      ],
+      "changed_after_writing": null,
+      "sha256": "3610ff64e7399f40d7a3715f3991373ab8951c111c2293e9d99fb33d9472d261"
+    },
+    "sonador-io.timepoint-study-b.2026-1118.dcm": {
+      "pack": 2,
+      "role": "Study series B: timepoint preop",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.29084916562468149797701962803930486193",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.48413411158685334876294759561952662355",
+      "timepoint": {
+        "uid": "2.25.79970188334603530926702433571624902988",
+        "id": "TP-PREOP",
+        "date": "20260901",
+        "time": "140000",
+        "description": "Pre-operative planning"
+      },
+      "timepoint_items": 1,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.30985863143093078392543022681315149236"
+      ],
+      "changed_after_writing": null,
+      "sha256": "7764b7f73e9a30eb68c81bf5a8756749c3a72c9654f0878a5bc42831ed563700"
+    },
+    "sonador-io.timepoint-study-none.2026-1118.dcm": {
+      "pack": 2,
+      "role": "Study series without a timepoint",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.10198174425184380330759883569011770998",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.57224529128694880888962256546604336885",
+      "timepoint": null,
+      "timepoint_items": 0,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.10156557722304762582648220233422112316"
+      ],
+      "changed_after_writing": null,
+      "sha256": "8dff0a09c2143ea910cdd5e3fab4e59db5ae436a7a1c4d9b43bcb084af1cbac3"
+    },
+    "sonador-io.timepoint-multiple-items.2026-1118.dcm": {
+      "pack": 2,
+      "role": "Two timepoint items: the first is used",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.12528954136518932274885404537062663795",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.13011139416365619697775082250249377375",
+      "timepoint": {
+        "uid": "2.25.191695047064511770490138894325767502622",
+        "id": "TP-POSTOP-6W",
+        "date": "20261104",
+        "time": "093000",
+        "description": "Post-operative review, 6 weeks"
+      },
+      "timepoint_items": 2,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.21688406979505657751598219531203946330"
+      ],
+      "changed_after_writing": "A second timepoint item with another UID appended after writing",
+      "sha256": "1d0a35773b1dfbe61642f865b4a841b72fdde58a9167836caf5fba47ab61e7df"
+    },
+    "sonador-io.timepoint-missing-uid.2026-1118.dcm": {
+      "pack": 2,
+      "role": "A timepoint item without a Referenced SOP Instance UID: no timepoint",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.64280247680442191631188806802161755587",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.96817312933475624072275018642124385164",
+      "timepoint": null,
+      "timepoint_items": 1,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.66626515954685629505869657048954295527"
+      ],
+      "changed_after_writing": "Referenced SOP Instance UID of the timepoint item removed after writing",
+      "sha256": "5600db752eb02730650d62862f96c70661d5e1ce15eb623275aeba9c534a4b2e"
+    },
+    "sonador-io.timepoint-invalid-date.2026-1118.dcm": {
+      "pack": 2,
+      "role": "A timepoint date that is not eight digits: the text is kept",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.12768091267566336610980472098723556937",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.20576481303392518894559255814323295500",
+      "timepoint": {
+        "uid": "2.25.191695047064511770490138894325767502622",
+        "id": "TP-POSTOP-6W",
+        "date": "2026-11-04",
+        "time": "093000",
+        "description": "Post-operative review, 6 weeks"
+      },
+      "timepoint_items": 1,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.41509183389997831780561838039628751300"
+      ],
+      "changed_after_writing": "Performed Procedure Step Start Date of the timepoint item replaced after writing",
+      "sha256": "e26e9b3b7285bea3d65d833473684570f54b7827a227fe6966cf5e842cf62860"
+    },
+    "sonador-io.timepoint-invalid-time.2026-1118.dcm": {
+      "pack": 2,
+      "role": "A timepoint time that is not a TM value: the text is kept",
+      "modality": "SR",
+      "study_uid": "1.2.826.0.1.3680043.8.498.12678867059209928922731636632141213458",
+      "series_uid": "1.2.826.0.1.3680043.8.498.31251636273506129590348347623681413529",
+      "sop_instance_uid": "1.2.826.0.1.3680043.8.498.76039411322251180506400898468823180155",
+      "timepoint": {
+        "uid": "2.25.191695047064511770490138894325767502622",
+        "id": "TP-POSTOP-6W",
+        "date": "20261104",
+        "time": "9:30",
+        "description": "Post-operative review, 6 weeks"
+      },
+      "timepoint_items": 1,
+      "tracking_uids": [
+        "1.2.826.0.1.3680043.8.498.12488215375466727099666511981183024249"
+      ],
+      "changed_after_writing": "Performed Procedure Step Start Time of the timepoint item replaced after writing",
+      "sha256": "1792159eeb441e9954af4820ea43301fff49887aa7df3d9f1af318af36d7591b"
+    }
+  }
+}

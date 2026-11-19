@@ -49,6 +49,7 @@ from ....apisettings.sr.seriestag import srcontent_is_valid, DCMSR_SOP_CLASS_ENH
 	DCMSR_SOP_CLASS_COMPREHENSIVE_3D, DCMSR_SOP_CLASSES_SUPPORTED, DCMSR_SUPPORTED_TEMPLATE_IDS, DCMR_TEMPLATE_ID, \
 	mapping_resource_for_template
 from ..headers import dcm_header_value, dcm_header_uid
+from ..timepoint import dcm_timepoint
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +92,8 @@ SRPredecessor = namedtuple('SRPredecessor', ('study_uid', 'series_uid', 'sop_cla
 SRParsedDocument = namedtuple('SRParsedDocument', (
 	'dataset', 'highdicom', 'title', 'template_id', 'mapping_resource', 'procedures', 'person_observer',
 	'device_observer_uid', 'groups', 'extra_items', 'evidence', 'predecessors', 'diagnostics', 'frame_records',
-	'point_collections'))
-SRParsedDocument.__new__.__defaults__ = (None, ())
+	'point_collections', 'timepoint'))
+SRParsedDocument.__new__.__defaults__ = (None, (), None)
 
 # Point collection read from a document's Volume Measurements container: the group's tracking identity and
 # one SCOORD3D item, in the frame it names. The container itself is preserved as a root item.
@@ -468,7 +469,7 @@ def srdoc_synthetic_evidence(headers, study_uid, references):
 def srdoc_parse(dcmsr, report_class, strict=False, diagnostics=None, calibrations=None, **kwargs):
 	'''	Parse one DICOM-SR document to a report model: read the root items (title, procedures
 		reported, Person Observer, Device Observer UID; everything else at the root is preserved),
-		the measurement groups (`ReportGroup.from_sr`), the evidence and the predecessors, and hand
+		the measurement groups (`ReportGroup.from_sr`), the evidence, the predecessors and the timepoint, and hand
 		them to the model class as an `SRParsedDocument`. The series of each finding and measurement is resolved from
 		the evidence (`_resolve_reference`).
 
@@ -546,7 +547,8 @@ def srdoc_parse(dcmsr, report_class, strict=False, diagnostics=None, calibration
 		mapping_resource=mapping_resource or mapping_resource_for_template(template_id),
 		procedures=procedures, person_observer=person_observer, device_observer_uid=device_observer_uid,
 		groups=groups, extra_items=extra_items, evidence=evidence, predecessors=srdoc_predecessors(ds),
-		diagnostics=diagnostics, frame_records=frame_records, point_collections=tuple(srdoc_point_collections(ds)))
+		diagnostics=diagnostics, frame_records=frame_records, point_collections=tuple(srdoc_point_collections(ds)),
+		timepoint=dcm_timepoint(ds, diagnostics=diagnostics, strict=strict))
 	kwargs.setdefault('frames_strict', strict)
 	return report_class._from_parsed(parsed, **kwargs)
 
